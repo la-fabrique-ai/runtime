@@ -65,21 +65,42 @@ export async function cmdTeamLaptop(ctx: Context, args: string[], opts: TeamLapt
 // the host is never changed for machines that cannot be added.
 async function up(ctx: Context, host: LaptopHost, team: string | undefined): Promise<number> {
   await checkLocalHc(ctx);
+  // Which containers exist before the host converges: the ones that appear were
+  // created by this `team up`, and their machines (if any) hold an old core.
+  const before = await presentContainers(ctx, host);
   const converged = await remoteAttachForwarding(ctx, host, ["forge", "team", "converge", ...(team ? [team] : [])]);
   if (converged !== 0) return converged;
   const status = await remoteExec(ctx, host, ["forge", "team", "status", "--json"]);
   if (status.code !== 0) {
     throw new ForgeError(`forge team status failed on ${host.name}: ${status.stderr.trim() || `exit code ${status.code}`}`);
   }
-  let containers: string[];
+  let rows: { name: string; present?: boolean }[];
   try {
-    containers = (JSON.parse(status.stdout) as { name: string }[]).map((m) => m.name);
+    rows = JSON.parse(status.stdout) as { name: string; present?: boolean }[];
   } catch {
     throw new ForgeError(`forge team status on ${host.name} printed something unreadable`);
   }
-  const { added, removed } = await syncMachines(ctx, host, containers);
+  const recreated = before === null ? [] : rows.filter((r) => r.present === true && !before.has(r.name)).map((r) => r.name);
+  const { added, removed, replaced, stale } = await syncMachines(ctx, host, rows.map((m) => m.name), recreated);
   for (const name of added) ctx.out(`Added Herdr App machine ${name}.`);
+  for (const name of replaced) ctx.out(`Replaced Herdr App machine ${name}: its container was recreated.`);
   for (const name of removed) ctx.out(`Removed Herdr App machine ${name}.`);
-  if (added.length === 0 && removed.length === 0) ctx.out("Herdr App's machines are up to date.");
+  for (const name of stale) {
+    ctx.err(`NOTE: Herdr App's machine ${name} still points at the container's previous core: click "Connect" on it in Herdr App.`);
+  }
+  if (added.length + replaced.length + removed.length + stale.length === 0) ctx.out("Herdr App's machines are up to date.");
   return 0;
+}
+
+// The containers that exist on the host, or null when it cannot say (nothing is
+// then assumed about what `converge` creates).
+async function presentContainers(ctx: Context, host: LaptopHost): Promise<Set<string> | null> {
+  const r = await remoteExec(ctx, host, ["forge", "team", "status", "--json"]);
+  if (r.code !== 0) return null;
+  try {
+    const rows = JSON.parse(r.stdout) as { name: string; present?: boolean }[];
+    return rows.some((x) => x.present === undefined) ? null : new Set(rows.filter((x) => x.present).map((x) => x.name));
+  } catch {
+    return null;
+  }
 }

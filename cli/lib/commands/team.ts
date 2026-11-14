@@ -158,7 +158,7 @@ async function releaseCommand(ctx: Context, cfg: ForgeConfig, to: string | undef
   return 0;
 }
 
-type Row = { name: string; team: string | null; role: string; busy: Busy; session: SessionState };
+type Row = { name: string; team: string | null; role: string; present: boolean; busy: Busy; session: SessionState };
 
 // Le miroir d'équipe se rafraîchit d'abord (§5.5) : un échec est un
 // avertissement sur stderr, jamais un échec de status.
@@ -176,7 +176,7 @@ async function status(ctx: Context, cfg: ForgeConfig, json: boolean): Promise<nu
   for (const m of members(cfg)) {
     const running = instances.get(m.name)?.status === "Running";
     rows.push({
-      name: m.name, team: m.team, role: m.role,
+      name: m.name, team: m.team, role: m.role, present: instances.has(m.name),
       busy: instances.has(m.name) ? await busyState(ctx, m.name) : null,
       session: running ? await sessionState(ctx, m.name) : "none",
     });

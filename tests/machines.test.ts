@@ -25,7 +25,7 @@ test("syncMachines adds the missing, removes the ones of removed members, never 
   };
   const ctx = fakeContext({ rules: [{ match: "hc machine ls --json", stdout: JSON.stringify(listed) }] });
   const out = await syncMachines(ctx, host, ["agent-web-lead", "agent-web-dev-1"]);
-  assert.deepEqual(out, { added: ["forge-local-web-lead"], removed: ["forge-local-web-dev-9"] });
+  assert.deepEqual(out, { added: ["forge-local-web-lead"], removed: ["forge-local-web-dev-9"], replaced: [], stale: [] });
   const hc = ctx.calls.filter((c) => c[0] === "hc" && c[2] !== "ls");
   assert.deepEqual(hc, [
     ["hc", "machine", "rm", "forge-local-web-dev-9"],
@@ -38,6 +38,6 @@ test("a machine whose command is stale is replaced", async () => {
   const listed = { machines: [{ name: "forge-local-web-lead", target: "'/old/forge' hc-via forge-local agent-web-lead" }] };
   const ctx = fakeContext({ rules: [{ match: "hc machine ls --json", stdout: JSON.stringify(listed) }] });
   const out = await syncMachines(ctx, host, ["agent-web-lead"]);
-  assert.deepEqual(out, { added: ["forge-local-web-lead"], removed: [] });
+  assert.deepEqual(out, { added: ["forge-local-web-lead"], removed: [], replaced: [], stale: [] });
   assert.ok(ctx.calls.some((c) => c.join(" ").startsWith("hc machine rm forge-local-web-lead")));
 });
