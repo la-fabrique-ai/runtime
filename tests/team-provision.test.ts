@@ -110,6 +110,9 @@ test("pushed files: token, team instructions plus the role prompt, settings with
   assert.deepEqual(settings.enabledPlugins, { "superpowers@claude-plugins-official": true });
   assert.deepEqual(settings.hooks, JSON.parse(readFileSync("container/settings.json", "utf8")).hooks);
   assert.equal(file("/home/aiuser/.claude/settings.json")!.uid, "0");
+  // Lire le corps d'un message sans demander l'humain, en lecture seule : pas de
+  // dossier de travail de plus (additionalDirectories ouvrirait aussi l'écriture).
+  assert.deepEqual(settings.permissions, { allow: ["Read(~/.forge/messages/**)"] });
   assert.ok(file("/usr/local/bin/forge-agent") && file("/home/aiuser/.claude/hooks/pre-bash.sh") && file("/home/aiuser/.claude.json"));
 });
 
