@@ -4,7 +4,10 @@
 import { ForgeError } from "./context.ts";
 
 const REPO = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
-const TASK = /^[A-Za-z0-9._-]+$/;
+// Pas de tiret initial : un nom de tâche finit en argument d'incus et de git
+// (`incus config set <c> user.forge.task <nom>`), qui le prendraient pour une
+// option. Même règle que validateGitRef, pour l'API comme pour `forge team assign`.
+const TASK = /^[A-Za-z0-9._][A-Za-z0-9._-]*$/;
 const REF = /^[A-Za-z0-9._/-]+$/;
 
 export function validateRepo(ownerRepo: string): void {
@@ -17,7 +20,7 @@ export const isTaskName = (name: string): boolean => TASK.test(name);
 
 export function validateTaskName(name: string): void {
   if (!isTaskName(name)) {
-    throw new ForgeError(`task-name must only contain [A-Za-z0-9._-], got: ${name}`);
+    throw new ForgeError(`task-name must only contain [A-Za-z0-9._-] and must not start with '-', got: ${name}`);
   }
 }
 
