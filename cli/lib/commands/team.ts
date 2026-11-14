@@ -104,7 +104,8 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
         // Elle ne relit pas ses instructions, et la tuer perdrait la conversation
         // avec l'humain : forge le dit, l'humain choisit le moment.
         ctx.err(`NOTE: ${m.name}'s instructions changed, but its running session keeps the old ones. ` +
-          `To restart it (the conversation is lost): forge hc-exec ${m.name} "hc kill agent", then forge team converge.`);
+          "To restart it (the conversation is lost): stop its `agent` terminal in Herdr App (or `hc kill <the Pilot's machine>/agent`), " +
+          "then run forge team up again.");
       }
     }
   }

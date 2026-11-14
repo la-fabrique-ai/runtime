@@ -187,7 +187,8 @@ test("converge updates an existing member's files; a live pilot is told its inst
   for (const name of ["agent-pilot", "agent-web-dev-1"]) {
     assert.match(claudeMd(name) ?? "", /forge-team status/, `${name} has no current CLAUDE.md`);
   }
-  assert.ok(base.err_lines.some((l) => l.includes("agent-pilot's instructions changed") && l.includes("hc kill agent")), base.err_lines.join("\n"));
+  assert.ok(base.err_lines.some((l) => l.includes("agent-pilot's instructions changed") && l.includes("Herdr App") && l.includes("forge team up")), base.err_lines.join("\n"));
+  assert.ok(!base.err_lines.some((l) => l.includes("hc-exec")), "the host's commands are not the human's");
   assert.ok(!base.calls.some((c) => c.join(" ").includes("-- hc kill") || c.join(" ").includes("-- hc run ")), "the live session is left alone");
 
   base.err_lines.length = 0;
