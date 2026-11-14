@@ -79,6 +79,9 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
   if (team !== undefined) requireTeam(cfg, team);
   const wanted = members(cfg).filter((m) => team === undefined || m.team === team);
   const existing = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
+  // Dites en dernier : stderr et stdout n'arrivent pas dans l'ordre par SSH, et
+  // une NOTE au milieu des lignes du membre suivant se lit mal.
+  const notes: string[] = [];
   for (const m of wanted) {
     const instance = existing.get(m.name);
     let changed = false;
@@ -105,7 +108,7 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
       } else if (changed) {
         // Elle ne relit pas ses instructions, et la tuer perdrait la conversation
         // avec l'humain : forge le dit, l'humain choisit le moment.
-        ctx.err(`NOTE: ${m.name}'s instructions changed, but its running session keeps the old ones. ` +
+        notes.push(`NOTE: ${m.name}'s instructions changed, but its running session keeps the old ones. ` +
           "To restart it (the conversation is lost): stop its `agent` terminal in Herdr App (or `hc kill <the Pilot's machine>/agent`), " +
           "then run forge team up again.");
       }
@@ -118,6 +121,7 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
     for (const name of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${name}.`);
   }
   await printMembers(ctx, cfg, wanted, team);
+  for (const note of notes) ctx.err(note);
   return 0;
 }
 
