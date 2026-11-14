@@ -61,6 +61,7 @@ beforeEach(() => {
         return { code: 0, stdout: JSON.stringify(
           state === "exited" ? { state: "finished", exit_code: 0, status: null }
             // Un terminal gardé par hc, relancé en shell : vivant, sans statut d'agent.
+            : state === "unknown" ? { argv: ["forge-agent"], state: "live", status: null }
             : state === "lost" ? { argv: ["/bin/bash"], keep: true, state: "live", status: null }
               : { argv: ["/usr/local/bin/forge-agent", "--forge-task", "t"], state: "live", status: { state } }), stderr: "" };
       }
@@ -141,10 +142,33 @@ test("assign needs the capability; the lead's assign records the task and who ga
   assert.equal(keys(DEV2)["user.forge.assigned_by"], LEAD);
 });
 
-test("a message to a kept terminal that is not forge-agent (a shell) is refused, and nothing is typed", async () => {
-  sessions[LEAD] = "lost";
+test("a forge-agent that has not announced a status yet is waited for, then the message is delivered", async () => {
+  sessions[LEAD] = "unknown";
+  const waits: number[] = [];
+  ctx.sleep = async (ms) => { waits.push(ms); if (waits.length === 3) sessions[LEAD] = "idle"; };
+  const reply = await call(DEV1, { op: "message", to: LEAD, summary: "Salut" });
+  assert.ok(reply.ok, JSON.stringify(reply));
+  assert.deepEqual(waits, [1000, 1000, 1000]);
+  assert.equal(sends.length, 1);
+});
+
+test("a forge-agent that announces nothing for the whole wait is refused, and nothing is typed", async () => {
+  sessions[LEAD] = "unknown";
+  const waits: number[] = [];
+  ctx.sleep = async (ms) => { waits.push(ms); };
   const reply = await call(DEV1, { op: "message", to: LEAD, summary: "Salut" });
   assert.ok(!reply.ok && reply.error.startsWith(`${LEAD} has no live session`), JSON.stringify(reply));
+  assert.equal(waits.length, 9, "about ten looks, a second apart");
+  assert.equal(sends.length, 0);
+});
+
+test("a kept terminal that is not forge-agent (a shell) is refused at once, without waiting, and nothing is typed", async () => {
+  sessions[LEAD] = "lost";
+  const waits: number[] = [];
+  ctx.sleep = async (ms) => { waits.push(ms); };
+  const reply = await call(DEV1, { op: "message", to: LEAD, summary: "Salut" });
+  assert.ok(!reply.ok && reply.error.startsWith(`${LEAD} has no live session`), JSON.stringify(reply));
+  assert.deepEqual(waits, []);
   assert.equal(sends.length, 0);
 });
 
