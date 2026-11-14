@@ -36,6 +36,7 @@ const env = {
 };
 const team = (args: string[], input = "") => run(FORGE, ["team", ...args], { env: { ...env, FORGE_SIDE: "host" }, input, timeout: 1_800_000 });
 const git = (args: string[], cwd: string) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+const viaHcExec = (line: string) => run(FORGE, ["hc-exec", DEV2, line], { env: { ...env, FORGE_SIDE: "host" } });
 const hasImage = () => ENABLED && incus(PROJECT, ["image", "info", "agent-base"]).status === 0;
 
 after(() => {
@@ -138,4 +139,22 @@ test("a small team: converge, assign, publish through the team mirror, read it, 
   assert.notEqual(again.status, 0, raw("a second assignment was accepted", again));
   assert.match(again.stderr, /busy with a task without a branch/);
   must("release the reviewer", team(["release", REVIEWER]));
+
+  // Herdr App's own daemon enters a container the moment it boots, before forge
+  // does: through hc-exec, first. It is refused until the runtime directory
+  // exists, and never starts a core of its own elsewhere; forge's own session
+  // then reaches the same core.
+  must("restart dev-2", incus(PROJECT, ["restart", DEV2]));
+  let early = viaHcExec("hc get agent");
+  for (let i = 0; i < 60 && /not ready|still being provisioned/.test(early.stderr); i++) {
+    run("sleep", ["1"]);
+    early = viaHcExec("hc get agent");
+  }
+  assert.doesNotMatch(early.stdout + early.stderr, /core listens at/, raw("hc-exec started a core elsewhere", early));
+  must("assign dev-2 after the restart", team(["assign", DEV2, "it-task-2"], "Réponds ok."));
+  const afterwards = viaHcExec("hc get agent");
+  assert.equal(afterwards.status, 0, raw("hc get agent through forge hc-exec after assign", afterwards));
+  assert.equal(asAgent(PROJECT, DEV2, "test ! -e /home/aiuser/.local/state/herdr-core/default/default.sock").status, 0,
+    "a second core was started under ~/.local/state");
 });
+

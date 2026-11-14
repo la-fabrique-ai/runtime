@@ -15,14 +15,24 @@ export const INSTRUCTION_PATH = "/home/aiuser/.forge/instruction.md";
 const HERDR_SPACE_LABEL = "herdr.space";
 const HERDR_TAB_LABEL = "herdr.tab";
 
+// Où hc cherche son core : le dossier d'exécution de l'utilisateur, que
+// systemd crée au démarrage (lingering). Les deux chemins qui mènent à hc, le
+// nôtre (hcArgv) et celui de Herdr App (`forge hc-exec`), donnent les mêmes
+// variables : sans elles, hc se replie sur `~/.local/state` et démarre un second
+// core, que l'autre chemin ne voit pas.
+export const HC_RUNTIME_DIR = "/run/user/1001";
+export const HC_ENV: Record<string, string> = {
+  XDG_RUNTIME_DIR: HC_RUNTIME_DIR,
+  DBUS_SESSION_BUS_ADDRESS: `unix:path=${HC_RUNTIME_DIR}/bus`,
+};
+
 // `hc` en tant qu'aiuser, dans /workspace, avec ce qu'il faut pour joindre son
 // core (le bus de session de l'utilisateur) sans passer par un shell de login.
 export function hcArgv(container: string, args: string[]): string[] {
   return incus("exec", container,
     "--user", "1001", "--group", "1001", "--cwd", "/workspace",
     "--env", "HOME=/home/aiuser",
-    "--env", "XDG_RUNTIME_DIR=/run/user/1001",
-    "--env", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus",
+    ...Object.entries(HC_ENV).flatMap(([k, v]) => ["--env", `${k}=${v}`]),
     "--", "hc", ...args);
 }
 
