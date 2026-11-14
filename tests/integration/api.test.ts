@@ -111,8 +111,11 @@ test("the API over a real proxy device: identity by socket, a message as a file 
     "aiuser 600");
 
   // A session that announces itself idle (OSC 7501), then echoes what it is typed.
-  must("a fake session in the lead", hc(LEAD, ["run", "--bg", "--name", "agent", "--cwd", "/workspace",
-    "sh", "-c", "printf '\\033]7501;state=idle:app=fake\\033\\\\'; cat"]));
+  // Its program is named forge-agent: only such a session is a live one.
+  const fake = "/home/aiuser/fake/forge-agent";
+  must("a stand-in for forge-agent", incus(PROJECT, ["file", "push", "-", `${LEAD}${fake}`, "--create-dirs", "--uid", "1001", "--gid", "1001", "--mode", "755"],
+    "#!/bin/sh\nprintf '\\033]7501;state=idle:app=fake\\033\\\\'\ncat\n"));
+  must("a fake session in the lead", hc(LEAD, ["run", "--bg", "--name", "agent", "--cwd", "/workspace", fake]));
   const body = "Détail : Esc \u001b, fin de collage \u001b[201~\n";
   const sent = must("forge-team message", await asAiuser(DEV, ["forge-team", "message", LEAD, "Fini, branche agent/x"], body));
   const id = /^ok (\d+)$/m.exec(sent.stdout)?.[1];
@@ -127,6 +130,15 @@ test("the API over a real proxy device: identity by socket, a message as a file 
   // hc's own words for a session that has ended: deliverMessage reads them as "no live session".
   must("kill the session", hc(LEAD, ["kill", "agent"]));
   await assert.rejects(deliverMessage(ctx, LEAD, DEV, 99, "Fini", null), new RegExp(`${LEAD} has no live session`));
+
+  // A terminal hc kept and runs as a shell is not a session: a message is refused
+  // and nothing is typed into it.
+  must("a kept shell as the agent terminal", hc(LEAD, ["run", "--bg", "--keep", "--name", "agent", "/bin/bash"]));
+  const toShell = await asAiuser(DEV, ["forge-team", "message", LEAD, "Fini, branche agent/y"], "");
+  assert.equal(toShell.status, 1, raw("a message to a shell", toShell));
+  assert.match(toShell.stderr, new RegExp(`${LEAD} has no live session`));
+  assert.doesNotMatch(must("hc read", hc(LEAD, ["read", "agent"])).stdout, /\[forge\] message/);
+  must("kill the shell", hc(LEAD, ["kill", "agent"]));
 
   // The socket comes back with the container.
   must("incus restart", incus(PROJECT, ["restart", LEAD]));

@@ -68,7 +68,12 @@ test("converge launches only the missing members and reports a stray one without
   assert.ok(!ctx.calls.some((c) => c.includes("delete")));
 });
 
-test("converge starts the pilot's session again when it has exited", async () => {
+// Sorti, ou un terminal que hc a gardé et relancé en shell (redémarrage de la VM).
+const DEAD_PILOT: [string, string][] = [
+  ["it has exited", '{"state":"finished","reason":"exited","exit_code":1,"status":null}'],
+  ["hc kept its terminal as a shell", '{"argv":["/bin/bash"],"keep":true,"state":"live","status":null}'],
+];
+for (const [why, dead] of DEAD_PILOT) test(`converge starts the pilot's session again when ${why}`, async () => {
   writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
     pilot: { capabilities: ["assign"], talkTo: ["web"] },
     teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo", "publish"] } } } },
@@ -82,8 +87,8 @@ test("converge starts the pilot's session again when it has exited", async () =>
   const ctx = { ...base, exec: async (argv: string[], o?: ExecOptions) => {
     const line = argv.join(" ");
     if (line.includes("agent-pilot") && line.endsWith("-- hc get agent")) {
-      return { code: 0, stderr: "", stdout: ran ? '{"state":"live","status":{"state":"idle"}}'
-        : '{"state":"finished","reason":"exited","exit_code":1,"status":null}' };
+      return { code: 0, stderr: "", stdout: ran ? '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}'
+        : dead };
     }
     if (line.includes("agent-pilot") && line.includes("-- hc run ")) ran = true;
     return base.exec(argv, o);
@@ -181,7 +186,7 @@ test("converge updates an existing member's files; a live pilot is told its inst
   fake.addInstance("agent-forge", "agent-web-dev-1", { status: "Running" });
   const base = fakeContext({ incus: fake, rules: RULES });
   const ctx = { ...base, exec: async (argv: string[], o?: ExecOptions) => argv.join(" ").endsWith("-- hc get agent")
-    ? { code: 0, stderr: "", stdout: '{"state":"live","status":{"state":"idle"}}' } : base.exec(argv, o) };
+    ? { code: 0, stderr: "", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}' } : base.exec(argv, o) };
   const claudeMd = (name: string) => fake.files.get(`agent-forge/${name}/home/aiuser/.claude/CLAUDE.md`)?.content;
 
   await cmdTeam(ctx, ["converge"]);

@@ -5,7 +5,7 @@
 import type { Context } from "../context.ts";
 import { ForgeError } from "../context.ts";
 import type { ForgeConfig } from "../config.ts";
-import { deliverMessage, NO_SESSION, sessionState } from "../hc-session.ts";
+import { deliverMessage, isLive, NO_SESSION, sessionState } from "../hc-session.ts";
 import { assign, busyState, NO_BRANCH, release } from "../tasks.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { memberNamed, type Member } from "../team.ts";
@@ -79,9 +79,9 @@ async function run(d: ApiDeps, caller: Member, req: ApiRequest, reserve: (id: nu
   switch (req.op) {
     case "message": {
       mayTalkTo(req.to);
-      // Un message n'est jamais mis en file : sans session vivante, il est refusé.
+      // Un message n'est jamais mis en file : il n'est livré qu'à une session forge-agent vivante.
       const state = await sessionState(ctx, req.to);
-      if (state === "none" || state === "exited") throw new ForgeError(`${req.to} ${NO_SESSION}`);
+      if (!isLive(state)) throw new ForgeError(`${req.to} ${NO_SESSION}`);
       // Le commit qu'un développeur annonce doit être lisible quand son Lead
       // reçoit le message ; un échec n'arrête pas le message, il se dit.
       let warning: string | null = null;

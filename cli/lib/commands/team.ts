@@ -102,7 +102,7 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
     // est morte (startSession retire d'abord l'ancien terminal).
     if (m.role === "pilot") {
       const state = await sessionState(ctx, m.name);
-      if (["none", "exited"].includes(state)) {
+      if (["none", "exited", "lost"].includes(state)) {
         await startSession(ctx, m, null, "");
         ctx.out(`Started ${m.name}'s session.`);
       } else if (changed) {

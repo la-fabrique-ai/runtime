@@ -58,7 +58,11 @@ beforeEach(() => {
         const state = sessions[container];
         if (state === "none") return { code: 1, stdout: "", stderr: "no such terminal" };
         // hc garde un terminal sorti, sans statut.
-        return { code: 0, stdout: JSON.stringify(state === "exited" ? { state: "finished", exit_code: 0, status: null } : { status: { state } }), stderr: "" };
+        return { code: 0, stdout: JSON.stringify(
+          state === "exited" ? { state: "finished", exit_code: 0, status: null }
+            // Un terminal gardé par hc, relancé en shell : vivant, sans statut d'agent.
+            : state === "lost" ? { argv: ["/bin/bash"], keep: true, state: "live", status: null }
+              : { argv: ["/usr/local/bin/forge-agent", "--forge-task", "t"], state: "live", status: { state } }), stderr: "" };
       }
       if (argv[hc + 1] === "kill") {
         ctx.calls.push(argv);
@@ -135,6 +139,13 @@ test("assign needs the capability; the lead's assign records the task and who ga
   assert.deepEqual(reply, { ok: true, id: 2 });
   assert.equal(keys(DEV2)["user.forge.task"], "fix-login-2");
   assert.equal(keys(DEV2)["user.forge.assigned_by"], LEAD);
+});
+
+test("a message to a kept terminal that is not forge-agent (a shell) is refused, and nothing is typed", async () => {
+  sessions[LEAD] = "lost";
+  const reply = await call(DEV1, { op: "message", to: LEAD, summary: "Salut" });
+  assert.ok(!reply.ok && reply.error.startsWith(`${LEAD} has no live session`), JSON.stringify(reply));
+  assert.equal(sends.length, 0);
 });
 
 test("a message to a member that was released is refused: release stopped its session", async () => {

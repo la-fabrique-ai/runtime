@@ -89,8 +89,13 @@ test("startSession: a task without a branch is marked <container>-session; a fai
 
 test("sessionState maps hc get to a state", async () => {
   const get = (rule: ExecRule) => sessionState(setup([rule]).ctx, DEV);
-  assert.equal(await get({ match: "hc get agent", stdout: '{"status":{"app":"claude-code","state":"working"}}' }), "working");
-  assert.equal(await get({ match: "hc get agent", stdout: '{"status":{"state":"done"}}' }), "done");
+  assert.equal(await get({ match: "hc get agent", stdout: '{"argv":["/usr/local/bin/forge-agent"],"status":{"app":"claude-code","state":"working"}}' }), "working");
+  assert.equal(await get({ match: "hc get agent", stdout: '{"argv":["forge-agent","--forge-task","t"],"status":{"state":"done"}}' }), "done");
+  // Un terminal gardé par hc, relancé en shell après un redémarrage : pas une session.
+  assert.equal(await get({ match: "hc get agent", stdout: '{"argv":["/bin/bash"],"keep":true,"state":"live","status":null}' }), "lost");
+  assert.equal(await get({ match: "hc get agent", stdout: '{"state":"live","status":{"state":"idle"}}' }), "lost");
+  // forge-agent sans statut : il démarre, rien ne dit encore qu'il vit.
+  assert.equal(await get({ match: "hc get agent", stdout: '{"argv":["forge-agent"],"state":"live","status":null}' }), "unknown");
   assert.equal(await get({ match: "hc get agent", code: 1 }), "none");
   // Un terminal dont le programme est sorti : hc le garde, sans statut.
   assert.equal(await get({ match: "hc get agent", stdout: '{"state":"finished","reason":"exited","exit_code":1,"status":null}' }), "exited");

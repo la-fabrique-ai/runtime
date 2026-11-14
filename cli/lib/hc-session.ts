@@ -36,7 +36,14 @@ export function hcArgv(container: string, args: string[]): string[] {
     "--", "hc", ...args);
 }
 
-export type SessionState = "none" | "idle" | "working" | "done" | "exited" | "unknown";
+// `lost` : un terminal `agent` vivant dont le programme n'est pas forge-agent
+// (hc en garde un et le relance en shell après un redémarrage de la VM) : ce
+// n'est pas une session, rien n'y est livré.
+export type SessionState = "none" | "idle" | "working" | "done" | "exited" | "lost" | "unknown";
+
+// Une session vivante est un terminal `agent` dont le programme est forge-agent
+// et qui a un statut d'agent.
+export const isLive = (s: SessionState) => s === "idle" || s === "working" || s === "done";
 
 // `hc get agent` : un code non nul veut dire qu'il n'y a pas de terminal. Un
 // terminal dont le programme est sorti reste listé par hc (`"state":"finished"`,
@@ -49,8 +56,11 @@ async function sessionInfo(ctx: Context, container: string): Promise<{ state: Se
   const r = await ctx.exec(hcArgv(container, ["get", SESSION]));
   if (r.code !== 0) return { state: "none", exitCode: null };
   try {
-    const t = JSON.parse(r.stdout) as { state?: unknown; exit_code?: unknown; status?: { state?: unknown } | null };
+    const t = JSON.parse(r.stdout) as { state?: unknown; exit_code?: unknown; argv?: unknown; status?: { state?: unknown } | null };
     if (t.state === "finished") return { state: "exited", exitCode: t.exit_code };
+    // Sans programme lisible, rien ne prouve que c'est forge-agent.
+    const program = Array.isArray(t.argv) && typeof t.argv[0] === "string" ? t.argv[0].split("/").pop() : undefined;
+    if (program !== "forge-agent") return { state: "lost", exitCode: null };
     const state = t.status?.state;
     return { state: state === "idle" || state === "working" || state === "done" ? state : "unknown", exitCode: null };
   } catch {
