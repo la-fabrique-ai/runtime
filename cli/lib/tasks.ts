@@ -48,11 +48,14 @@ export async function assign(ctx: Context, cfg: ForgeConfig, req: AssignRequest)
   const m = memberNamed(cfg, req.to);
   const publishes = m.capabilities.includes("publish");
   if (req.task !== null) validateTaskName(req.task);
+  // La commande à citer est celle de l'appelant : un agent n'a que forge-team.
+  const command = req.by === "human" ? "forge team" : "forge-team";
   if (publishes && req.task === null) {
-    throw new ForgeError(`${m.name} publishes branches: give it a task name (forge team assign ${m.name} <task>).`);
+    throw new ForgeError(`${m.name} publishes branches: give it a task name (${command} assign ${m.name} <task>, the instruction on stdin).`);
   }
   if (!publishes && req.task !== null) {
-    throw new ForgeError(`${m.name} (role ${m.role}) has no publish capability: it takes a task without a branch.`);
+    throw new ForgeError(`${m.name} (role ${m.role}) has no publish capability: give it no task name ` +
+      `(${command} assign ${m.name}, the instruction on stdin).`);
   }
   const busy = await busyState(ctx, m.name);
   if (busy !== null) {
