@@ -92,6 +92,7 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
       // Un container déjà là reçoit les fichiers de la version courante de forge
       // et du prompt de son rôle, comme un neuf : sans cela, une mise à jour
       // n'atteindrait que les containers créés après elle.
+      ctx.out(`Updating ${m.name}...`);
       changed = (await installMemberFiles(ctx, m)).instructionsChanged;
     }
     // Le Pilote a une session permanente : elle repart si elle manque ou si elle

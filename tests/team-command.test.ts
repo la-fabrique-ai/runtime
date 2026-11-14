@@ -189,6 +189,8 @@ test("converge updates an existing member's files; a live pilot is told its inst
   }
   assert.ok(base.err_lines.some((l) => l.includes("agent-pilot's instructions changed") && l.includes("Herdr App") && l.includes("forge team up")), base.err_lines.join("\n"));
   assert.ok(!base.err_lines.some((l) => l.includes("hc-exec")), "the host's commands are not the human's");
+  // Chaque mise à jour nomme son membre.
+  assert.deepEqual(base.out_lines.filter((l) => l.startsWith("Updating ")), ["Updating agent-pilot...", "Updating agent-web-dev-1..."]);
   assert.ok(!base.calls.some((c) => c.join(" ").includes("-- hc kill") || c.join(" ").includes("-- hc run ")), "the live session is left alone");
 
   base.err_lines.length = 0;
