@@ -248,7 +248,7 @@ example, a pilot, a lead, two developers and a reviewer on one repository:
     "web": {
       "repo": "acme/widgets",
       "roles": {
-        "lead": { "capabilities": ["repo", "assign"], "talkTo": ["pilot", "team"] },
+        "lead": { "capabilities": ["repo", "read-team", "assign", "ask-human"], "talkTo": ["pilot", "team"] },
         "dev": { "count": 2, "memory": "8GiB", "capabilities": ["repo", "publish"], "talkTo": ["lead"] },
         "reviewer": { "capabilities": ["repo", "read-team"], "talkTo": ["lead"] }
       }
