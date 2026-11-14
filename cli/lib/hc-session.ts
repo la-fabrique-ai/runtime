@@ -128,7 +128,15 @@ export async function clearMessages(ctx: Context, container: string): Promise<vo
 // contre sa liste de caractères. Aucun corps ne passe par un argv ni par un
 // terminal. L'avis est tapé tout de suite, même pendant un tour : Claude Code
 // le reçoit à sa prochaine frontière d'outil, dans le tour en cours.
-export const NO_SESSION = "has no live session: a free member only gets one when someone assigns it a task (forge-team assign, with that capability)";
+// Vrai d'un membre jamais assigné comme d'un membre libéré (`release` arrête sa
+// session).
+export const NO_SESSION = "has no live session: a member has one from the moment someone assigns it a task until it is released (forge-team assign, with that capability)";
+
+// Arrête la session sans retirer le terminal : l'humain peut relire la session
+// terminée dans Herdr App, et le prochain `assign` la remplace (startSession).
+export async function stopSession(ctx: Context, container: string): Promise<boolean> {
+  return (await ctx.exec(hcArgv(container, ["kill", SESSION]))).code === 0;
+}
 
 export async function deliverMessage(
   ctx: Context, container: string, from: string, id: number, summary: string, body: string | null,

@@ -125,6 +125,10 @@ test("a small team: converge, assign, publish through the team mirror, read it, 
 
   // Release, then assign again: the branch is checked out again.
   must("release dev-1", team(["release", DEV1]));
+  // Release stops the session but leaves the terminal, readable in Herdr App.
+  const released = run("incus", hcArgv(DEV1, ["get", "agent"]).slice(1));
+  assert.equal(released.status, 0, raw("the released terminal is gone", released));
+  assert.match(released.stdout, /"state":\s*"finished"/, raw("the released session still runs", released));
   must("move away", asAgent(PROJECT, DEV1, "git -C /workspace switch -q --detach"));
   must("assign dev-1 again", team(["assign", DEV1, "it-task"], "Reprends."));
   const head = must("branch of dev-1", asAgent(PROJECT, DEV1, "git -C /workspace rev-parse --abbrev-ref HEAD")).stdout.trim();

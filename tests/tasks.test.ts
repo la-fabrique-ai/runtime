@@ -90,12 +90,25 @@ test("a stopped member is started, and a failing session leaves it free", async 
   assert.equal(keys(REV)["user.forge.assigned_by"], undefined);
 });
 
+test("a release whose session cannot be stopped still frees the member, and says so", async () => {
+  const { ctx, flat } = setup({ [DEV1]: { "user.forge.task": "a", "user.forge.assigned_by": HUMAN } }, [{ match: "hc kill", code: 1, stderr: "no core" }]);
+  await release(ctx, cfg, { to: DEV1, by: HUMAN });
+  assert.equal(await busyState(ctx, DEV1), null);
+  assert.ok(ctx.err_lines.some((l) => l.startsWith(`WARNING: could not stop ${DEV1}'s session`)), flat().join("\n"));
+});
+
 test("release: by the human or by who assigned; not by anyone else, not when free", async () => {
   const busy = { "user.forge.task": "a", "user.forge.assigned_by": "agent-web-lead" };
   const mine = setup({ [DEV1]: busy });
   await release(mine.ctx, cfg, { to: DEV1, by: "agent-web-lead" });
   assert.equal(await busyState(mine.ctx, DEV1), null);
   assert.ok(mine.flat().some((c) => c.includes("find /home/aiuser/.forge/messages -mindepth 1 -delete")), "the messages are cleared");
+  // La session s'arrête une fois les clés retirées ; le terminal reste (pas de `hc rm`).
+  const calls = mine.flat();
+  const unset = calls.findLastIndex((c) => c.includes("config unset"));
+  const kill = calls.findIndex((c) => c.endsWith("-- hc kill agent"));
+  assert.ok(unset >= 0 && kill > unset, calls.join("\n"));
+  assert.ok(!calls.some((c) => c.endsWith("-- hc rm agent")), "the terminal stays readable");
   const human = setup({ [DEV1]: busy });
   await release(human.ctx, cfg, { to: DEV1, by: HUMAN });
   assert.equal(await busyState(human.ctx, DEV1), null);

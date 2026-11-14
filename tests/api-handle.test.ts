@@ -60,6 +60,12 @@ beforeEach(() => {
         // hc garde un terminal sorti, sans statut.
         return { code: 0, stdout: JSON.stringify(state === "exited" ? { state: "finished", exit_code: 0, status: null } : { status: { state } }), stderr: "" };
       }
+      if (argv[hc + 1] === "kill") {
+        ctx.calls.push(argv);
+        sessions[container] = "exited";
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (argv[hc + 1] === "run") sessions[container] = "idle";
       if (argv[hc + 1] === "send") {
         ctx.calls.push(argv);
         sends.push({ container, notice: argv.at(-1)! });
@@ -118,7 +124,7 @@ test("a message to a session that does not exist or has exited is refused, never
   for (const state of ["exited", "none"]) {
     sessions[LEAD] = state;
     const reply = await call(DEV1, { op: "message", to: LEAD, summary: "Salut" });
-    assert.ok(!reply.ok && reply.error.startsWith(`${LEAD} has no live session`) && reply.error.includes("assigns it a task"), JSON.stringify(reply));
+    assert.ok(!reply.ok && reply.error.startsWith(`${LEAD} has no live session`) && reply.error.includes("until it is released"), JSON.stringify(reply));
   }
   assert.equal(sends.length, 0);
 });
@@ -129,6 +135,16 @@ test("assign needs the capability; the lead's assign records the task and who ga
   assert.deepEqual(reply, { ok: true, id: 2 });
   assert.equal(keys(DEV2)["user.forge.task"], "fix-login-2");
   assert.equal(keys(DEV2)["user.forge.assigned_by"], LEAD);
+});
+
+test("a message to a member that was released is refused: release stopped its session", async () => {
+  keys(DEV1)["user.forge.task"] = "fix-login";
+  keys(DEV1)["user.forge.assigned_by"] = LEAD;
+  assert.ok((await call(LEAD, { op: "message", to: DEV1, summary: "Un" })).ok);
+  assert.ok((await call(LEAD, { op: "release", to: DEV1 })).ok);
+  const reply = await call(LEAD, { op: "message", to: DEV1, summary: "Deux" });
+  assert.ok(!reply.ok && reply.error.startsWith(`${DEV1} has no live session`), JSON.stringify(reply));
+  assert.equal(sends.length, 1);
 });
 
 test("release is only for who assigned the task", async () => {
