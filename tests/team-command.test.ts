@@ -169,3 +169,28 @@ test("converge gives an existing member its API channel, then restarts the servi
   assert.ok(restart > Math.max(...adds), calls.join("\n"));
   assert.ok(ctx.err_lines.some((l) => l.startsWith("WARNING: could not restart forge-api.service")));
 });
+
+test("converge updates an existing member's files; a live pilot is told its instructions changed, not killed, and only once", async () => {
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+    pilot: { capabilities: ["assign"], talkTo: ["web"] },
+    teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo", "publish"] } } } },
+  }));
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-pilot", { status: "Running" });
+  fake.addInstance("agent-forge", "agent-web-dev-1", { status: "Running" });
+  const base = fakeContext({ incus: fake, rules: RULES });
+  const ctx = { ...base, exec: async (argv: string[], o?: ExecOptions) => argv.join(" ").endsWith("-- hc get agent")
+    ? { code: 0, stderr: "", stdout: '{"state":"live","status":{"state":"idle"}}' } : base.exec(argv, o) };
+  const claudeMd = (name: string) => fake.files.get(`agent-forge/${name}/home/aiuser/.claude/CLAUDE.md`)?.content;
+
+  await cmdTeam(ctx, ["converge"]);
+  for (const name of ["agent-pilot", "agent-web-dev-1"]) {
+    assert.match(claudeMd(name) ?? "", /forge-team status/, `${name} has no current CLAUDE.md`);
+  }
+  assert.ok(base.err_lines.some((l) => l.includes("agent-pilot's instructions changed") && l.includes("hc kill agent")), base.err_lines.join("\n"));
+  assert.ok(!base.calls.some((c) => c.join(" ").includes("-- hc kill") || c.join(" ").includes("-- hc run ")), "the live session is left alone");
+
+  base.err_lines.length = 0;
+  await cmdTeam(ctx, ["converge"]);
+  assert.ok(!base.err_lines.some((l) => l.includes("instructions changed")), "nothing changed the second time");
+});

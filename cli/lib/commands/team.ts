@@ -3,7 +3,7 @@
 // forge ; chaque membre est un container, que `converge` provisionne.
 import type { Context } from "../context.ts";
 import { ForgeError } from "../context.ts";
-import { ensureApiAccess, restartApiService } from "../api/access.ts";
+import { restartApiService } from "../api/access.ts";
 import { INSTRUCTION_MAX } from "../api/protocol.ts";
 import type { ForgeConfig } from "../config.ts";
 import { loadConfig } from "../config.ts";
@@ -16,7 +16,7 @@ import { sessionState, startSession, type SessionState } from "../hc-session.ts"
 import { assign, busyState, release, type Busy } from "../tasks.ts";
 import { columnWidths, formatRow } from "../table.ts";
 import { members, type Member } from "../team.ts";
-import { originMirrorPath, provisionMember } from "../team-provision.ts";
+import { installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { teamMirrorPath } from "../mirror.ts";
 import { containerConfig, safeRef } from "./task-base.ts";
@@ -81,6 +81,7 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
   const existing = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
   for (const m of wanted) {
     const instance = existing.get(m.name);
+    let changed = false;
     if (!instance) {
       await provisionMember(ctx, cfg, m);
     } else if (await provisioningMarker(ctx, m.name) !== null) {
@@ -88,14 +89,23 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
       continue;
     } else {
       if (instance.status !== "Running") await ensureRunning(ctx, m.name);
-      // Un container déjà là reçoit son canal d'API (et la version courante de
-      // forge-team) comme un neuf ; le sien a été posé par provisionMember.
-      await ensureApiAccess(ctx, m);
+      // Un container déjà là reçoit les fichiers de la version courante de forge
+      // et du prompt de son rôle, comme un neuf : sans cela, une mise à jour
+      // n'atteindrait que les containers créés après elle.
+      changed = (await installMemberFiles(ctx, m)).instructionsChanged;
     }
     // Le Pilote a une session permanente : elle repart si elle manque ou si elle
     // est morte (startSession retire d'abord l'ancien terminal).
-    if (m.role === "pilot" && ["none", "exited"].includes(await sessionState(ctx, m.name))) {
-      await startSession(ctx, m, null, "");
+    if (m.role === "pilot") {
+      const state = await sessionState(ctx, m.name);
+      if (["none", "exited"].includes(state)) {
+        await startSession(ctx, m, null, "");
+      } else if (changed) {
+        // Elle ne relit pas ses instructions, et la tuer perdrait la conversation
+        // avec l'humain : forge le dit, l'humain choisit le moment.
+        ctx.err(`NOTE: ${m.name}'s instructions changed, but its running session keeps the old ones. ` +
+          `To restart it (the conversation is lost): forge hc-exec ${m.name} "hc kill agent", then forge team converge.`);
+      }
     }
   }
   // Le service ne connaît que les membres de la config qu'il a lue au démarrage.
