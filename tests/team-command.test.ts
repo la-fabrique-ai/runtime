@@ -92,6 +92,7 @@ test("converge starts the pilot's session again when it has exited", async () =>
   const runs = base.calls.map((c) => c.join(" ")).filter((c) => c.includes("hc run"));
   assert.equal(runs.length, 1, runs.join("\n"));
   assert.ok(runs[0].includes("agent-pilot") && runs[0].includes("--forge-task agent-pilot-session"), runs[0]);
+  assert.ok(base.out_lines.includes("Started agent-pilot's session."), base.out_lines.join("\n"));
 });
 
 test("converge starts the session of a pilot it has just created", async () => {

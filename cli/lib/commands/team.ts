@@ -101,6 +101,7 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
       const state = await sessionState(ctx, m.name);
       if (["none", "exited"].includes(state)) {
         await startSession(ctx, m, null, "");
+        ctx.out(`Started ${m.name}'s session.`);
       } else if (changed) {
         // Elle ne relit pas ses instructions, et la tuer perdrait la conversation
         // avec l'humain : forge le dit, l'humain choisit le moment.
