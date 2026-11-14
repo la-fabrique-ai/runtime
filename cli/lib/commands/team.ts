@@ -95,7 +95,7 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
     // Le Pilote a une session permanente : elle repart si elle manque ou si elle
     // est morte (startSession retire d'abord l'ancien terminal).
     if (m.role === "pilot" && ["none", "exited"].includes(await sessionState(ctx, m.name))) {
-      await startSession(ctx, m, "-", "");
+      await startSession(ctx, m, null, "");
     }
   }
   // Le service ne connaît que les membres de la config qu'il a lue au démarrage.

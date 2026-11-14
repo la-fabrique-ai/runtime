@@ -15,8 +15,11 @@ import { validateTaskName } from "./validate.ts";
 
 export const TASK_KEY = "user.forge.task";
 export const ASSIGNED_BY_KEY = "user.forge.assigned_by";
-// Une tâche sans branche (un relecteur, le Pilote) : la valeur de TASK_KEY.
-export const NO_BRANCH = "-";
+// Une tâche sans branche (un relecteur, le Lead) : la valeur de TASK_KEY. Ni
+// `-` (le client incus lit alors la valeur sur stdin : elle serait vide et la
+// clé retirée), ni un nom de tâche possible : les parenthèses et l'espace n'en
+// sont pas. C'est aussi ce que `forge team status` affiche.
+export const NO_BRANCH = "(no branch)";
 
 export type Busy = { task: string; assignedBy: string } | null;
 
@@ -71,7 +74,7 @@ export async function assign(ctx: Context, cfg: ForgeConfig, req: AssignRequest)
   await mustSucceed("record the task", configSet(ctx, m.name, TASK_KEY, req.task ?? NO_BRANCH));
   await mustSucceed("record who assigned it", configSet(ctx, m.name, ASSIGNED_BY_KEY, req.by));
   try {
-    await startSession(ctx, m, req.task ?? NO_BRANCH, req.text);
+    await startSession(ctx, m, req.task, req.text);
   } catch (e) {
     // Une session qui ne démarre pas ne laisse pas le membre marqué occupé.
     await configUnset(ctx, m.name, TASK_KEY);

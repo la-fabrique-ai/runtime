@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
 import { parseConfig } from "../cli/lib/config.ts";
-import { assign, busyState, release } from "../cli/lib/tasks.ts";
+import { assign, busyState, NO_BRANCH, release } from "../cli/lib/tasks.ts";
 
 const cfg = parseConfig("/c.json", {
   teams: {
@@ -73,10 +73,10 @@ test("refusals change nothing: no state, no git switch, no session", async () =>
   }
 });
 
-test("a reviewer takes a task without a branch: marked '-', no git", async () => {
+test("a reviewer takes a task without a branch: marked as such, no git", async () => {
   const { ctx, keys, flat } = setup();
   await assign(ctx, cfg, { to: REV, task: null, text: "Relis", by: HUMAN });
-  assert.equal(keys(REV)["user.forge.task"], "-");
+  assert.equal(keys(REV)["user.forge.task"], NO_BRANCH);
   assert.ok(!flat().some((c) => c.includes(" git ")));
 });
 

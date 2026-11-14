@@ -112,6 +112,9 @@ export async function deviceNames(ctx: Context, name: string): Promise<string[]>
 // c'est l'appelant qui décide (via mustSucceed) d'échouer bruyamment. Renvoyer
 // void revenait à avaler le code de sortie ET le stderr capturé.
 export function configSet(ctx: Context, name: string, key: string, value: string): Promise<ExecResult> {
+  // Le client incus lit la valeur sur stdin quand elle vaut `-` (aussi dans
+  // `clé=-`) : stdin vide, valeur vide, clé retirée.
+  if (value === "-") throw new Error(`incus config set ${key}: a value of "-" is read from stdin`);
   return ctx.exec(incus("config", "set", name, key, value));
 }
 

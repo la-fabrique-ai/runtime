@@ -72,9 +72,9 @@ async function requireStarted(ctx: Context, container: string): Promise<void> {
 // Une session neuve : l'ancienne (s'il y en a une) est tuée et retirée, la
 // consigne est poussée comme fichier, puis `hc run` lance forge-agent, qui la
 // lit et la donne à claude comme premier message. `task` est le nom de la
-// branche, ou `-` pour une tâche sans branche ; le marqueur `--forge-task` suit
+// branche, ou null pour une tâche sans branche ; le marqueur `--forge-task` suit
 // la forme `<container>-<tâche>` que `forge list` et `forge stop` lisent.
-export async function startSession(ctx: Context, m: Member, task: string, instruction: string): Promise<void> {
+export async function startSession(ctx: Context, m: Member, task: string | null, instruction: string): Promise<void> {
   const mode = await egressBeforeStart(ctx, m.name);
   await egressAfterStart(ctx, m.name, mode);
   // Leur échec est sans importance : il n'y avait peut-être pas de session.
@@ -83,7 +83,7 @@ export async function startSession(ctx: Context, m: Member, task: string, instru
   await clearMessages(ctx, m.name);
   await mustSucceed("push the instruction",
     pushText(ctx, m.name, INSTRUCTION_PATH, instruction, { uid: 1001, gid: 1001, mode: "600" }));
-  const marker = `${m.name}-${task === "-" ? "session" : task}`;
+  const marker = `${m.name}-${task ?? "session"}`;
   await mustSucceed("hc run", ctx.exec(hcArgv(m.name, [
     "run", "--bg", "--name", SESSION, "--cwd", "/workspace",
     // Herdr App ne montre que les terminaux étiquetés par un espace et un

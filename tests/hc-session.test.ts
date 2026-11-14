@@ -83,7 +83,7 @@ test("startSession refuses a session whose agent stops as soon as it starts", as
 
 test("startSession: a task without a branch is marked <container>-session; a failing kill is ignored", async () => {
   const { ctx } = setup([{ match: "hc kill agent", code: 1 }, { match: "hc rm agent", code: 1 }]);
-  await startSession(ctx, memberNamed(cfg, DEV), "-", "Relis");
+  await startSession(ctx, memberNamed(cfg, DEV), null, "Relis");
   assert.ok(ctx.calls.some((c) => c.join(" ").includes(`--forge-task ${DEV}-session `)));
 });
 

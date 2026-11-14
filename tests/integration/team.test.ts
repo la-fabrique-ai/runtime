@@ -128,4 +128,14 @@ test("a small team: converge, assign, publish through the team mirror, read it, 
   must("assign dev-1 again", team(["assign", DEV1, "it-task"], "Reprends."));
   const head = must("branch of dev-1", asAgent(PROJECT, DEV1, "git -C /workspace rev-parse --abbrev-ref HEAD")).stdout.trim();
   assert.equal(head, "agent/it-task");
+
+  // A task without a branch is recorded (incus reads a value of "-" from stdin,
+  // which would leave the key empty): the member shows as busy, a second
+  // assignment is refused, a release frees it.
+  must("assign the reviewer", team(["assign", REVIEWER], "Relis."));
+  assert.match(must("team status", team(["status"])).stdout, new RegExp(`${REVIEWER}\\s+reviewer\\s+\\(no branch\\)`));
+  const again = team(["assign", REVIEWER], "Encore.");
+  assert.notEqual(again.status, 0, raw("a second assignment was accepted", again));
+  assert.match(again.stderr, /busy with a task without a branch/);
+  must("release the reviewer", team(["release", REVIEWER]));
 });
