@@ -112,7 +112,7 @@ function call(req) {
     process.stdout.write(`you: ${you.name} role=${you.role} capabilities=${you.capabilities.join(",") || "none"} ` +
       `may-talk-to=${you.talkTo.join(",") || "nobody"}\n`);
     for (const r of reply.team) {
-      process.stdout.write(`${r.name} role=${r.role} ${r.publishes ? "takes-a-task-name" : "no-task-name"} ${r.busy ? `task=${r.task === null ? "(no branch)" : r.task}` : "free"} ` +
+      process.stdout.write(`${r.name} role=${r.role} ${r.publishes ? "takes-a-task-name" : "no-task-name"} ${r.busy ? `task=${r.task === null ? "(no branch)" : r.task}` : "free"}${r.assignedByYou ? " assigned-by-you" : ""} ` +
         `session=${r.session}${r.waitingOn ? ` waiting-on=${r.waitingOn}` : ""}\n`);
     }
   } else {

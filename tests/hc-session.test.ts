@@ -142,6 +142,15 @@ test("deliverMessage without a body: one notice, typed as a single argv element,
     ["hc", "send", "--json", "agent", `[forge] message 7 from ${DEV}: Fini, branche agent/fix-login`]);
 });
 
+test("deliverMessage tells an agent it retains the sender: the task, and who to release, before the summary", async () => {
+  for (const [task, label] of [["fix-login", "fix-login"], [null, "without a branch"]] as const) {
+    const { ctx, sends } = scriptedSend(withLead(), [OK]);
+    await deliverMessage(ctx, LEAD, DEV, 7, "Fini", "corps", { task });
+    assert.equal(sends[0].at(-1),
+      `[forge] message 7 from ${DEV}, on the task you assigned it (${label}; forge-team release ${DEV} once it is finished): Fini (detail: /home/aiuser/.forge/messages/7.md)`);
+  }
+});
+
 test("deliverMessage with a body: the file is pushed first, byte for byte; the body is in no argv", async () => {
   const fake = withLead();
   const { ctx, sends } = scriptedSend(fake, [OK]);

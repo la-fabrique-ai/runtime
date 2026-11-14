@@ -142,6 +142,23 @@ test("assign needs the capability; the lead's assign records the task and who ga
   assert.equal(keys(DEV2)["user.forge.assigned_by"], LEAD);
 });
 
+test("the notice says it is the report of an agent the recipient retains, only when the recipient assigned its task", async () => {
+  const notice = async (assignedBy: string | undefined) => {
+    for (const k of ["user.forge.task", "user.forge.assigned_by"]) delete keys(DEV1)[k];
+    if (assignedBy !== undefined) Object.assign(keys(DEV1), { "user.forge.task": "fix-login", "user.forge.assigned_by": assignedBy });
+    await call(DEV1, { op: "message", to: LEAD, summary: "Fini" });
+    return sends.at(-1)!.notice;
+  };
+  const mention = `, on the task you assigned it (fix-login; forge-team release ${DEV1} once it is finished)`;
+  assert.match(await notice(LEAD), new RegExp(`^\\[forge\\] message \\d+ from ${DEV1}${mention.replace(/[()]/g, "\\$&")}: Fini$`));
+  assert.doesNotMatch(await notice(PILOT), /on the task you assigned it/, "another assigner");
+  assert.doesNotMatch(await notice(undefined), /on the task you assigned it/, "no task");
+  keys(DEV1)["user.forge.task"] = "(no branch)";
+  keys(DEV1)["user.forge.assigned_by"] = LEAD;
+  await call(DEV1, { op: "message", to: LEAD, summary: "Fini" });
+  assert.match(sends.at(-1)!.notice, /\(without a branch; forge-team release/);
+});
+
 test("a forge-agent that has not announced a status yet is waited for, then the message is delivered", async () => {
   sessions[LEAD] = "unknown";
   const waits: number[] = [];
@@ -214,6 +231,13 @@ test("status lists the lead's talk-to, with who each one waits on until its sess
   assert.deepEqual(status.team.map((r) => r.publishes), [false, true, true, false]);
   const dev1 = (await rows()).find((r) => r.name === DEV1)!;
   assert.deepEqual([dev1.role, dev1.busy, dev1.task, dev1.session, dev1.waitingOn], ["dev", true, "fix-login", "idle", LEAD]);
+  // `assignedByYou` : celui que l'appelant retient.
+  const assignedBy = async (caller: string, name: string) => ((await call(caller, { op: "status" })) as unknown as { team: { name: string; assignedByYou: boolean }[] }).team.find((r) => r.name === name)!.assignedByYou;
+  keys(DEV1)["user.forge.assigned_by"] = LEAD;
+  assert.equal(await assignedBy(LEAD, DEV1), true);
+  assert.equal(await assignedBy(LEAD, DEV2), false, "free");
+  keys(DEV1)["user.forge.assigned_by"] = PILOT;
+  assert.equal(await assignedBy(LEAD, DEV1), false, "assigned by someone else");
   sessions[DEV1] = "working";
   assert.equal((await rows()).find((r) => r.name === DEV1)!.waitingOn, null);
 });

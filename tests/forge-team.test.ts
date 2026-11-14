@@ -73,9 +73,9 @@ test("assign sends the task and the instruction; ask is ask-human", async () => 
 });
 
 test("status prints one line per row", async () => {
-  answer = '{"ok":true,"you":{"name":"agent-web-lead","role":"lead","capabilities":["repo","assign"],"talkTo":["agent-web-dev-1"]},"team":[{"name":"agent-web-dev-1","role":"dev","publishes":true,"busy":true,"task":"fix-login","session":"idle","waitingOn":"agent-web-lead"}]}';
+  answer = '{"ok":true,"you":{"name":"agent-web-lead","role":"lead","capabilities":["repo","assign"],"talkTo":["agent-web-dev-1"]},"team":[{"name":"agent-web-dev-1","role":"dev","publishes":true,"busy":true,"assignedByYou":true,"task":"fix-login","session":"idle","waitingOn":"agent-web-lead"}]}';
   const r = await run(["status"], "");
-  assert.equal(r.stdout, "ok\nyou: agent-web-lead role=lead capabilities=repo,assign may-talk-to=agent-web-dev-1\nagent-web-dev-1 role=dev takes-a-task-name task=fix-login session=idle waiting-on=agent-web-lead\n");
+  assert.equal(r.stdout, "ok\nyou: agent-web-lead role=lead capabilities=repo,assign may-talk-to=agent-web-dev-1\nagent-web-dev-1 role=dev takes-a-task-name task=fix-login assigned-by-you session=idle waiting-on=agent-web-lead\n");
 });
 
 test("a refusal exits 1 with the reason on stderr; an unreachable socket exits 2", async () => {

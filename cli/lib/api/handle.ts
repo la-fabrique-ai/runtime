@@ -94,7 +94,10 @@ async function run(d: ApiDeps, caller: Member, req: ApiRequest, reserve: (id: nu
       }
       const id = d.journal.reserve();
       reserve(id);
-      await deliverMessage(ctx, req.to, caller.name, id, req.summary, req.body);
+      // Un agent que le destinataire retient (c'est lui qui lui a confié sa tâche) : l'avis le dit.
+      const mine = await busyState(ctx, caller.name);
+      const retained = mine !== null && mine.assignedBy === req.to ? { task: mine.task === NO_BRANCH ? null : mine.task } : null;
+      await deliverMessage(ctx, req.to, caller.name, id, req.summary, req.body, retained);
       return { id, reply: (n) => ({ ok: true, id: n, ...(warning === null ? {} : { warning }) }) };
     }
     case "assign":
@@ -118,6 +121,7 @@ async function run(d: ApiDeps, caller: Member, req: ApiRequest, reserve: (id: nu
         const session = await sessionState(ctx, name);
         team.push({
           name, role: m.role, publishes: m.capabilities.includes("publish"), busy: busy !== null,
+          assignedByYou: busy !== null && busy.assignedBy === caller.name,
           task: busy === null || busy.task === NO_BRANCH ? null : busy.task,
           session, waitingOn: session === "working" ? null : waitingOn(d.journal.entries(), name),
         });

@@ -148,13 +148,6 @@ export async function clearMessages(ctx: Context, container: string): Promise<vo
   await execAsAgentArgv(ctx, container, ["find", MESSAGES_DIR, "-mindepth", "1", "-delete"]);
 }
 
-// Un message de l'API (DX 5, §5.4) : le corps, s'il y en a un, devient un
-// fichier du container du destinataire ; la session ne reçoit qu'une ligne, que
-// forge seul écrit : son préfixe, un identifiant de journal, le nom de
-// l'expéditeur (tiré de la socket) et le résumé, que le protocole a vérifié
-// contre sa liste de caractères. Aucun corps ne passe par un argv ni par un
-// terminal. L'avis est tapé tout de suite, même pendant un tour : Claude Code
-// le reçoit à sa prochaine frontière d'outil, dans le tour en cours.
 // Vrai d'un membre jamais assigné comme d'un membre libéré (`release` arrête sa
 // session).
 export const NO_SESSION = "has no live session: a member has one from the moment someone assigns it a task until it is released (forge-team assign, with that capability)";
@@ -165,8 +158,21 @@ export async function stopSession(ctx: Context, container: string): Promise<bool
   return (await ctx.exec(hcArgv(container, ["kill", SESSION]))).code === 0;
 }
 
+// Un message de l'API (DX 5, §5.4) : le corps, s'il y en a un, devient un
+// fichier du container du destinataire ; la session ne reçoit qu'une ligne, que
+// forge seul écrit : son préfixe, un identifiant de journal, le nom de
+// l'expéditeur (tiré de la socket) et le résumé, que le protocole a vérifié
+// contre sa liste de caractères. Aucun corps ne passe par un argv ni par un
+// terminal. L'avis est tapé tout de suite, même pendant un tour : Claude Code
+// le reçoit à sa prochaine frontière d'outil, dans le tour en cours.
+// Quand l'expéditeur est un agent que le destinataire a lui-même assigné,
+// l'avis le dit (`retained` : sa tâche) et nomme qui libérer : un rappel écrit
+// par forge, au moment où l'agent doit agir. Ce ne sont que des noms de
+// container et de tâche que forge a déjà validés, jamais un texte d'agent
+// avant le résumé.
 export async function deliverMessage(
   ctx: Context, container: string, from: string, id: number, summary: string, body: string | null,
+  retained: { task: string | null } | null = null,
 ): Promise<{ turn: number }> {
   const path = `${MESSAGES_DIR}/${id}.md`;
   if (body !== null) {
@@ -175,7 +181,9 @@ export async function deliverMessage(
       throw new ForgeError(`delivery to ${container} failed: ${firstLine(pushed.stderr) || `exit code ${pushed.code}`}`);
     }
   }
-  const notice = `[forge] message ${id} from ${from}: ${summary}${body === null ? "" : ` (detail: ${path})`}`;
+  const onTask = retained === null ? "" :
+    `, on the task you assigned it (${retained.task ?? "without a branch"}; forge-team release ${from} once it is finished)`;
+  const notice = `[forge] message ${id} from ${from}${onTask}: ${summary}${body === null ? "" : ` (detail: ${path})`}`;
   const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   for (let attempt = 1; ; attempt++) {
     const r = await ctx.exec(hcArgv(container, ["send", "--json", SESSION, notice]));
