@@ -107,15 +107,18 @@ test("two messages sent together get two ids and two files", async () => {
 
 test("a developer may not message another developer: refused, no hc call, one refused entry", async () => {
   const reply = await call(DEV1, { op: "message", to: DEV2, summary: "Salut" });
-  assert.deepEqual(reply, { ok: false, error: `${DEV1} may not talk to ${DEV2}` });
+  // Le refus dit à qui l'appelant peut écrire.
+  const error = `${DEV1} may not talk to ${DEV2}: it may talk to ${LEAD}`;
+  assert.deepEqual(reply, { ok: false, error });
   assert.equal(sends.length, 0);
-  assert.deepEqual(d.journal.entries().map((e) => [e.outcome, e.error]), [["refused", `${DEV1} may not talk to ${DEV2}`]]);
+  assert.deepEqual(d.journal.entries().map((e) => [e.outcome, e.error]), [["refused", error]]);
 });
 
 test("a message to a session that does not exist or has exited is refused, never queued", async () => {
   for (const state of ["exited", "none"]) {
     sessions[LEAD] = state;
-    assert.deepEqual(await call(DEV1, { op: "message", to: LEAD, summary: "Salut" }), { ok: false, error: `${LEAD} has no live session` });
+    const reply = await call(DEV1, { op: "message", to: LEAD, summary: "Salut" });
+    assert.ok(!reply.ok && reply.error.startsWith(`${LEAD} has no live session`) && reply.error.includes("assigns it a task"), JSON.stringify(reply));
   }
   assert.equal(sends.length, 0);
 });
@@ -150,9 +153,14 @@ test("status lists the lead's talk-to, with who each one waits on until its sess
   const rows = async () => {
     const r = await call(LEAD, { op: "status" });
     assert.ok(r.ok);
-    return (r as unknown as { team: { name: string; role: string; busy: boolean; task: string | null; session: string; waitingOn: string | null }[] }).team;
+    return (r as unknown as { you: unknown; team: { name: string; role: string; busy: boolean; task: string | null; session: string; waitingOn: string | null }[] }).team;
   };
   assert.deepEqual((await rows()).map((r) => r.name), [PILOT, DEV1, DEV2, REV]);
+  // `you` : ce qu'un agent ne peut savoir autrement ; `publishes` : prend-il un nom de tâche.
+  const status = (await call(LEAD, { op: "status" })) as unknown as { you: { name: string; role: string; capabilities: string[]; talkTo: string[] }; team: { name: string; publishes: boolean }[] };
+  assert.deepEqual([status.you.name, status.you.role, status.you.talkTo], [LEAD, "lead", [PILOT, DEV1, DEV2, REV]]);
+  assert.ok(status.you.capabilities.includes("assign"));
+  assert.deepEqual(status.team.map((r) => r.publishes), [false, true, true, false]);
   const dev1 = (await rows()).find((r) => r.name === DEV1)!;
   assert.deepEqual([dev1.role, dev1.busy, dev1.task, dev1.session, dev1.waitingOn], ["dev", true, "fix-login", "idle", LEAD]);
   sessions[DEV1] = "working";

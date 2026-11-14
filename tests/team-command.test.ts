@@ -47,7 +47,8 @@ test("assign reads the instruction from stdin and gives the task on behalf of th
   assert.equal(code, 0);
   const keys = fake.instances.get("agent-forge")!.get("agent-web-dev-1")!.config;
   assert.deepEqual([keys["user.forge.task"], keys["user.forge.assigned_by"]], ["fix-login", "human"]);
-  assert.equal(fake.files.get("agent-forge/agent-web-dev-1/home/aiuser/.forge/instruction.md")!.content, "Corrige le login");
+  assert.equal(fake.files.get("agent-forge/agent-web-dev-1/home/aiuser/.forge/instruction.md")!.content,
+    "[forge] task fix-login from human\n\nCorrige le login");
 });
 
 test("an empty instruction is refused before any Incus call", async () => {

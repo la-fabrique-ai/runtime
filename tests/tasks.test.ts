@@ -75,9 +75,10 @@ test("refusals change nothing: no state, no git switch, no session", async () =>
 });
 
 test("a reviewer takes a task without a branch: marked as such, no git", async () => {
-  const { ctx, keys, flat } = setup();
+  const { fake, ctx, keys, flat } = setup();
   await assign(ctx, cfg, { to: REV, task: null, text: "Relis", by: HUMAN });
   assert.equal(keys(REV)["user.forge.task"], NO_BRANCH);
+  assert.equal(fake.files.get(`agent-forge/${REV}/home/aiuser/.forge/instruction.md`)!.content, "[forge] task without a branch from human\n\nRelis");
   assert.ok(!flat().some((c) => c.includes(" git ")));
 });
 

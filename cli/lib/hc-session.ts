@@ -118,6 +118,8 @@ export async function clearMessages(ctx: Context, container: string): Promise<vo
 // contre sa liste de caractères. Aucun corps ne passe par un argv ni par un
 // terminal. L'avis est tapé tout de suite, même pendant un tour : Claude Code
 // le reçoit à sa prochaine frontière d'outil, dans le tour en cours.
+export const NO_SESSION = "has no live session: a free member only gets one when someone assigns it a task (forge-team assign, with that capability)";
+
 export async function deliverMessage(
   ctx: Context, container: string, from: string, id: number, summary: string, body: string | null,
 ): Promise<{ turn: number }> {
@@ -134,7 +136,7 @@ export async function deliverMessage(
     const r = await ctx.exec(hcArgv(container, ["send", "--json", SESSION, notice]));
     if (r.code === 0) return { turn: sentTurn(container, r.stdout) };
     const why = hcError(r);
-    if (why.includes("has finished")) throw new ForgeError(`${container} has no live session`);
+    if (why.includes("has finished")) throw new ForgeError(`${container} ${NO_SESSION}`);
     if (why.includes("is still starting") && attempt < SEND_ATTEMPTS) {
       await sleep(SEND_WAIT_MS);
       continue;

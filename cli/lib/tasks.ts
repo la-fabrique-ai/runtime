@@ -39,6 +39,12 @@ export async function owner(ctx: Context, cfg: ForgeConfig, team: string, task: 
   return null;
 }
 
+// La première ligne d'une session confiée, écrite par forge avant la consigne :
+// de quoi dire à l'agent quelle tâche on lui donne et à qui rendre compte. Même
+// forme que l'avis d'un message ; l'appelant est un nom de container ou `human`.
+export const taskNotice = (task: string | null, by: string) =>
+  `[forge] task ${task ?? "without a branch"} from ${by}`;
+
 type AssignRequest = { to: string; task: string | null; text: string; by: string };
 
 // Les règles d'abord (rien ne change tant qu'elles ne sont pas toutes passées),
@@ -77,7 +83,7 @@ export async function assign(ctx: Context, cfg: ForgeConfig, req: AssignRequest)
   await mustSucceed("record the task", configSet(ctx, m.name, TASK_KEY, req.task ?? NO_BRANCH));
   await mustSucceed("record who assigned it", configSet(ctx, m.name, ASSIGNED_BY_KEY, req.by));
   try {
-    await startSession(ctx, m, req.task, req.text);
+    await startSession(ctx, m, req.task, `${taskNotice(req.task, req.by)}\n\n${req.text}`);
   } catch (e) {
     // Une session qui ne démarre pas ne laisse pas le membre marqué occupé.
     await configUnset(ctx, m.name, TASK_KEY);

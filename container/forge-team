@@ -108,8 +108,11 @@ function call(req) {
   if (reply.warning) process.stderr.write(`forge-team: warning: ${reply.warning}\n`);
   if (req.op === "status") {
     process.stdout.write("ok\n");
+    const you = reply.you;
+    process.stdout.write(`you: ${you.name} role=${you.role} capabilities=${you.capabilities.join(",") || "none"} ` +
+      `may-talk-to=${you.talkTo.join(",") || "nobody"}\n`);
     for (const r of reply.team) {
-      process.stdout.write(`${r.name} role=${r.role} ${r.busy ? `task=${r.task === null ? "(no branch)" : r.task}` : "free"} ` +
+      process.stdout.write(`${r.name} role=${r.role} ${r.publishes ? "takes-a-task-name" : "no-task-name"} ${r.busy ? `task=${r.task === null ? "(no branch)" : r.task}` : "free"} ` +
         `session=${r.session}${r.waitingOn ? ` waiting-on=${r.waitingOn}` : ""}\n`);
     }
   } else {

@@ -5,7 +5,7 @@
 import type { Context } from "../context.ts";
 import { ForgeError } from "../context.ts";
 import type { ForgeConfig } from "../config.ts";
-import { deliverMessage, sessionState } from "../hc-session.ts";
+import { deliverMessage, NO_SESSION, sessionState } from "../hc-session.ts";
 import { assign, busyState, NO_BRANCH, release } from "../tasks.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { memberNamed, type Member } from "../team.ts";
@@ -69,7 +69,9 @@ type Done = { reply: (id: number) => ApiReply; id?: number };
 async function run(d: ApiDeps, caller: Member, req: ApiRequest, reserve: (id: number) => void): Promise<Done> {
   const { ctx, cfg } = d;
   const mayTalkTo = (to: string) => {
-    if (!caller.talkTo.includes(to)) throw new ForgeError(`${caller.name} may not talk to ${to}`);
+    if (!caller.talkTo.includes(to)) {
+      throw new ForgeError(`${caller.name} may not talk to ${to}: it may talk to ${caller.talkTo.join(", ") || "nobody"}`);
+    }
   };
   const needCapability = (capability: "assign" | "ask-human") => {
     if (!caller.capabilities.includes(capability)) throw new ForgeError(`${caller.name} has no ${capability} capability`);
@@ -79,7 +81,7 @@ async function run(d: ApiDeps, caller: Member, req: ApiRequest, reserve: (id: nu
       mayTalkTo(req.to);
       // Un message n'est jamais mis en file : sans session vivante, il est refusé.
       const state = await sessionState(ctx, req.to);
-      if (state === "none" || state === "exited") throw new ForgeError(`${req.to} has no live session`);
+      if (state === "none" || state === "exited") throw new ForgeError(`${req.to} ${NO_SESSION}`);
       // Le commit qu'un développeur annonce doit être lisible quand son Lead
       // reçoit le message ; un échec n'arrête pas le message, il se dit.
       let warning: string | null = null;
@@ -108,18 +110,20 @@ async function run(d: ApiDeps, caller: Member, req: ApiRequest, reserve: (id: nu
       needCapability("ask-human");
       return { reply: (id) => ({ ok: true, id }) };
     case "status": {
+      // `you` : un agent ne sait de lui-même que ce qu'on lui dit.
+      const you = { name: caller.name, role: caller.role, capabilities: caller.capabilities, talkTo: caller.talkTo };
       const team: Record<string, unknown>[] = [];
       for (const name of caller.talkTo) {
         const m = memberNamed(cfg, name);
         const busy = await busyState(ctx, name);
         const session = await sessionState(ctx, name);
         team.push({
-          name, role: m.role, busy: busy !== null,
+          name, role: m.role, publishes: m.capabilities.includes("publish"), busy: busy !== null,
           task: busy === null || busy.task === NO_BRANCH ? null : busy.task,
           session, waitingOn: session === "working" ? null : waitingOn(d.journal.entries(), name),
         });
       }
-      return { reply: () => ({ ok: true, team }) };
+      return { reply: () => ({ ok: true, you, team }) };
     }
   }
 }
