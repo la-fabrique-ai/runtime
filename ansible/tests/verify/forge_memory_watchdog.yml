@@ -158,9 +158,12 @@
             cmd: runuser -u {{ forge_users[0].name }} -- bash -s
             chdir: /
             stdin: |
-              set -e
-              # incus reads its standard input, which here is this script.
-              incus() { command incus "$@" </dev/null; }
+              set -ex
+              # incus reads its standard input, which here is this script; and no
+              # call may wait for ever: one that blocks fails at once, and the
+              # trace on stderr names it.
+              INCUS="$(command -v incus)"
+              incus() { timeout -k 5 60 "$INCUS" "$@" </dev/null; }
               incus project create agent-forge -c features.images=false
               # The forge user's ids, mapped to aiuser's 1001 as forge's profile
               # does: the container's aiuser is the forge user on the host.
@@ -171,10 +174,15 @@
                   -c raw.idmap="$IDMAP"
                 incus exec "$c" --project agent-forge -- cat /proc/1/comm --wait || true
                 incus exec "$c" --project agent-forge -- useradd -u 1001 -m aiuser
-                incus file push --mode 0644 /tmp/verify-grow.py "$c"/tmp/grow.py --project agent-forge
-                incus exec "$c" --project agent-forge -- su -s /bin/sh aiuser -c 'nohup timeout 300 python3 /tmp/grow.py >/dev/null 2>&1 &'
+                # In aiuser's home: /tmp is emptied when the container's systemd boots,
+                # which may be after this push.
+                incus file push --mode 0644 --uid 1001 --gid 1001 /tmp/verify-grow.py "$c"/home/aiuser/grow.py --project agent-forge
+                incus exec "$c" --project agent-forge -- su -s /bin/sh aiuser -c 'nohup timeout 300 python3 /home/aiuser/grow.py >/dev/null 2>&1 &'
               done
           changed_when: true
+          # No step of this block waits for ever: each has a limit, and a test
+          # that blocks fails, naming the step, in well under 10 minutes.
+          timeout: 150
 
         - name: Wait for the watchdog to kill it
           ansible.builtin.command:
@@ -207,6 +215,7 @@
               timeout -k 5 60 incus exec agent-wdtest --project agent-forge -- true </dev/null
               ! timeout -k 5 60 incus exec agent-wdtest --project agent-forge -- pgrep -f grow.py </dev/null
           changed_when: false
+          timeout: 150
 
         - name: Check nothing else was killed
           ansible.builtin.command:
@@ -216,6 +225,7 @@
               set -e
               test "$(timeout -k 5 60 incus exec agent-wdtest --project agent-forge -- cat /proc/1/comm </dev/null)" = systemd
           changed_when: false
+          timeout: 80
 
         # forge-proxy has stalled for as long as the team member did, and the
         # threshold's duration has passed twice over: had it been watched, its
@@ -229,7 +239,7 @@
         # left, the team member's was killed.
         - name: Check forge-proxy is not watched
           ansible.builtin.command:
-            cmd: pgrep -fc "^python3 /tmp/grow.py"
+            cmd: pgrep -fc "^python3 /home/aiuser/grow.py"
           register: verify_wd_left
           changed_when: false
           failed_when: verify_wd_left.stdout | int != 1
@@ -250,9 +260,11 @@
             cmd: runuser -u {{ forge_users[0].name }} -- bash -s
             chdir: /
             stdin: |
-              incus() { command incus "$@" </dev/null; }
+              INCUS="$(command -v incus)"
+              incus() { timeout -k 5 40 "$INCUS" "$@" </dev/null; }
               incus delete -f agent-wdtest --project agent-forge || true
               incus delete -f forge-proxy --project agent-forge || true
               incus project delete agent-forge
           changed_when: true
           failed_when: false
+          timeout: 120
