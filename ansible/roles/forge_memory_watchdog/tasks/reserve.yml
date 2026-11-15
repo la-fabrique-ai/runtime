@@ -52,14 +52,15 @@
 
 # At the next start (a reboot included) the unit's setting applies; this is the
 # running process's, until then. A daemon that is not running (socket
-# activation) has no process: 0.
+# activation) has no process: 0. Only ever lowered: sshd puts its own listener
+# at -1000, which is better than the value asked for.
 - name: Give the running daemons the same OOM score
   ansible.builtin.shell:
     cmd: |
       set -e
       pid="{{ item.stdout | trim }}"
       test "$pid" -gt 0 || exit 0
-      test "$(cat /proc/$pid/oom_score_adj)" != "{{ forge_memory_watchdog_oom_score_adjust }}" || exit 0
+      test "$(cat /proc/$pid/oom_score_adj)" -gt "{{ forge_memory_watchdog_oom_score_adjust }}" || exit 0
       echo "{{ forge_memory_watchdog_oom_score_adjust }}" > /proc/$pid/oom_score_adj
       echo changed
   loop: "{{ forge_memory_watchdog_mainpids.results }}"

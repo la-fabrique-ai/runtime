@@ -78,11 +78,12 @@
   register: verify_wd_oom_live
   changed_when: false
 
+# At most the asked value: sshd sets its own listener to -1000.
 - name: Check the daemons are the last the kernel kills
   ansible.builtin.assert:
     that:
       - "'OOMScoreAdjust=' ~ forge_memory_watchdog_oom_score_adjust | default(-900) in item.stdout.split('\n')"
-      - verify_wd_oom_live.results[ansible_loop.index0].stdout | int == forge_memory_watchdog_oom_score_adjust | default(-900)
+      - verify_wd_oom_live.results[ansible_loop.index0].stdout | int <= forge_memory_watchdog_oom_score_adjust | default(-900)
   loop: "{{ verify_wd_oom.results }}"
   loop_control:
     label: "{{ item.item }}"
