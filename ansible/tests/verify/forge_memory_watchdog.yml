@@ -135,16 +135,20 @@
     - name: Reproduce the saturation, then check the watchdog's work
       when: verify_wd_project.rc != 0
       block:
-        - name: Write the process that never stops growing
+        - name: Write the process that grows to a cap
           ansible.builtin.copy:
             dest: /tmp/verify-grow.py
             mode: "0644"
             content: |
               import time
               chunks = []
-              while True:
+              # Up to 400 MiB, well above the 160 MiB of memory.high (enough
+              # to stall the container), then it keeps what it has: a process
+              # nobody kills (forge-proxy's) must not fill the machine.
+              while len(chunks) < 100:
                   chunks.append(bytearray(b"\x01") * (4 * 1024 * 1024))
                   time.sleep(0.02)
+              time.sleep(3600)
 
         # Two containers under the same pressure: a team member (agent-wdtest)
         # and, in the same project, forge-proxy, which the watchdog must not
@@ -168,7 +172,7 @@
                 incus exec "$c" --project agent-forge -- cat /proc/1/comm --wait || true
                 incus exec "$c" --project agent-forge -- useradd -u 1001 -m aiuser
                 incus file push --mode 0644 /tmp/verify-grow.py "$c"/tmp/grow.py --project agent-forge
-                incus exec "$c" --project agent-forge -- su -s /bin/sh aiuser -c 'nohup python3 /tmp/grow.py >/dev/null 2>&1 &'
+                incus exec "$c" --project agent-forge -- su -s /bin/sh aiuser -c 'nohup timeout 300 python3 /tmp/grow.py >/dev/null 2>&1 &'
               done
           changed_when: true
 
@@ -225,7 +229,7 @@
         # left, the team member's was killed.
         - name: Check forge-proxy is not watched
           ansible.builtin.command:
-            cmd: pgrep -fc "python3 /tmp/grow.py"
+            cmd: pgrep -fc "^python3 /tmp/grow.py"
           register: verify_wd_left
           changed_when: false
           failed_when: verify_wd_left.stdout | int != 1
