@@ -46,6 +46,7 @@ On the forge host:
   team release <container>          Free a team member
   team status [--json] [--quick]    Each member's task, session and wait, the human's questions, the origin mirror's age
                                     (refreshes the team mirror first, unless --quick)
+  team inbox --json                 Every installed host's questions and counts, as one line of JSON (read by the Herdr App mod)
   team watch [--host <name>]        The team, its questions and the origin mirror in this terminal (from the Mac)
   team sync <team>                  Refresh the team's origin mirror (needs the forwarded SSH agent), then the team mirror
   relay publish [<task>]            On the contributor's dev VM: publish agent/<task> through the relay

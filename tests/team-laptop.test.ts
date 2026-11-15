@@ -123,3 +123,28 @@ test("answer sends the summary as JSON on the host's stdin, never in its argv; a
   assert.deepEqual(JSON.parse(ctx.execOptions[1]!.input!), { summary: "Voir", body: "le détail\n" });
   await assert.rejects(() => cmdAnswer(ctx, "x", "Oui"), /Usage/);
 });
+
+// `forge team inbox --json` : une ligne de JSON, un hôte injoignable est une entrée en erreur.
+test("inbox answers one line of JSON for every installed host; an unreachable one has its error and empty counts", async () => {
+  saveHost({ ...host("forge-local"), done: ["setup"] });
+  saveHost({ ...host("forge-two"), done: ["setup"] });
+  const status = { members: [
+    { name: "agent-web-lead", present: true, task: "t", session: "working" },
+    { name: "agent-web-dev-1", present: true, task: null, session: "idle" },
+    { name: "agent-web-dev-2", present: false, task: null, session: "none" },
+  ], inbox: [{ id: 7, from: "agent-web-lead", time: "2026-11-15T10:00:00Z", summary: "Quel\u001b[2J nom ?", hasBody: true }], mirrors: [{ team: "web", originAgeSeconds: 5 }] };
+  const ctx = fakeContext({ rules: [
+    { match: "forge-local -- ", stdout: JSON.stringify(status) },
+    { match: "forge-two -- ", code: 255, stderr: "ssh: connect to host: Connection refused\n" },
+  ] });
+  assert.equal(await cmdTeamLaptop(ctx, ["inbox"], { json: true }), 0);
+  assert.equal(ctx.out_lines.length, 1);
+  const report = JSON.parse(ctx.out_lines[0]);
+  assert.deepEqual(report.hosts.map((h: { host: string }) => h.host), ["forge-local", "forge-two"]);
+  assert.deepEqual(report.hosts[0].members, { working: 1, idle: 1, free: 1 });
+  assert.deepEqual(report.hosts[0].questions.map((q: { id: number; summary: string }) => [q.id, q.summary]), [[7, "Quel[2J nom ?"]]);
+  assert.deepEqual(report.hosts[0].teams, ["web"]);
+  assert.equal(report.hosts[1].error, "ssh: connect to host: Connection refused");
+  assert.deepEqual(report.hosts[1].members, { working: 0, idle: 0, free: 0 });
+  assert.ok(ctx.execOptions.every((o) => o?.timeoutMs === 20000));
+});

@@ -23,6 +23,16 @@ export function repoRoot(): string {
   return process.env.FORGE_REPO_DIR ?? resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
+// Herdr App's directory on the machine of the maintainer: its settings and its
+// mods, of which forge installs one (herdr/mods/forge).
+export function herdrAppDir(): string {
+  return join(forgeHome(), ".config", "herdr-app");
+}
+
+export function herdrAppModsDir(): string {
+  return join(herdrAppDir(), "mods");
+}
+
 export function workspacesDir(): string {
   return process.env.FORGE_WORKSPACES ?? join(forgeHome(), "workspaces");
 }

@@ -7,13 +7,13 @@
 // (playbook, setup and image again; a cloud host's are OpenTofu, the
 // playbooks and the relay's setup).
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync,
+  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync,
   statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ForgeError, type Context } from "../context.ts";
-import { forgeHome, laptopDataDir, limaHome, repoRoot, sshDir } from "../paths.ts";
+import { forgeHome, herdrAppDir, herdrAppModsDir, laptopDataDir, limaHome, repoRoot, sshDir } from "../paths.ts";
 import {
   applyInteractive, askCloudSettings, askRelaySettings, checkNestedVirt, currentPublicIp, infraFor, infraOutputs,
   loadCloudSettings, saveCloudSettings,
@@ -192,11 +192,13 @@ export async function cmdInstall(ctx: Context, opts: InstallOptions = {}): Promi
   // setting, are missing.
   await linkForge(ctx, checkout);
   const telemetry = await herdrAppTelemetry(ctx);
+  const mod = installForgeMod();
 
   // 12. What was done, what was already there; then herdr.
   ctx.out(`${host.name}:`);
   for (const [s, outcome] of outcomes) ctx.out(`  ${label(s, host.kind)}: ${outcome}`);
   ctx.out(`  Herdr App telemetry: ${telemetry}`);
+  ctx.out(`  Herdr App forge mod: ${mod}`);
   return cmdOpen(ctx, { host: host.name });
 }
 
@@ -694,7 +696,24 @@ async function herdrAppTelemetry(ctx: Context): Promise<string> {
   return "off";
 }
 
-export const herdrAppSettingsPath = (): string => join(forgeHome(), ".config", "herdr-app", "settings.json");
+// The forge mod (herdr/mods/forge): copied on every run into Herdr App's mods
+// directory. The mod is forge's own, so its files are replaced; nothing else in
+// that directory is touched, and keys.json never is: any edit makes that file the
+// person's and stops Herdr App's default updates of it (the README gives the
+// lines to bind forge.watch and forge.sync by hand).
+function installForgeMod(): string {
+  const source = join(repoRoot(), "herdr", "mods", "forge");
+  const target = join(herdrAppModsDir(), "forge");
+  try {
+    mkdirSync(target, { recursive: true });
+    cpSync(source, target, { recursive: true, force: true });
+  } catch (e) {
+    throw new ForgeError(`could not copy the forge mod from ${source} to ${target}: ${(e as Error).message}`);
+  }
+  return `copied to ${target}`;
+}
+
+export const herdrAppSettingsPath = (): string => join(herdrAppDir(), "settings.json");
 export const herdrAppQuestion = (): string => `Turn Herdr App's telemetry off in ${herdrAppSettingsPath()}?`;
 
 // ~/.local/bin/forge → the checkout's cli/forge, after a confirmation; any
