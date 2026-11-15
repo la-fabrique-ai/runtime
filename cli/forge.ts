@@ -44,7 +44,8 @@ On the forge host:
   team converge [<team>]            Create or start the agents of the configured teams (and the Pilot), refresh the team mirror
   team assign <container> [<task>]  Give a team member a task, the instruction read from stdin (a fresh session)
   team release <container>          Free a team member
-  team status [--json]              Each member's task and session (refreshes the team mirror first)
+  team status [--json] [--quick]    Each member's task, session and wait, the human's questions, the origin mirror's age
+                                    (refreshes the team mirror first, unless --quick)
   team sync <team>                  Refresh the team's origin mirror (needs the forwarded SSH agent), then the team mirror
   relay publish [<task>]            On the contributor's dev VM: publish agent/<task> through the relay
   relay pr <task> --title <text> --body-file <file|->
@@ -88,7 +89,7 @@ With no terminal on stdin (scripts, CI) nothing is asked and the command
 exits with this usage instead.`;
 
 type LaptopOptions = { remote?: string; host?: string; sshPersist?: string };
-type RelayArgs = { title?: string; bodyFile?: string; json?: boolean };
+type RelayArgs = { title?: string; bodyFile?: string; json?: boolean; quick?: boolean };
 type NoticeArgs = { pid?: string; rssKib?: string };
 
 function dispatch(
@@ -105,8 +106,8 @@ function dispatch(
     case "task-base": return cmdTaskBase(ctx, a, b);
     case "relay": return cmdRelay(ctx, a, positionals.slice(2), relay);
     case "team": return currentSide() === "laptop"
-      ? cmdTeamLaptop(ctx, positionals.slice(1), { host: laptop.host, json: relay.json })
-      : cmdTeam(ctx, positionals.slice(1), { json: relay.json });
+      ? cmdTeamLaptop(ctx, positionals.slice(1), { host: laptop.host, json: relay.json, quick: relay.quick })
+      : cmdTeam(ctx, positionals.slice(1), { json: relay.json, quick: relay.quick });
     case "api": return cmdApi(ctx, a);
     case "notify": return cmdNotify(ctx, a, b, notice);
     case "hc-via": return cmdHcVia(ctx, a, b, positionals[3]);
@@ -131,7 +132,7 @@ async function main(): Promise<number> {
         force: { type: "boolean" },
         remote: { type: "string" }, host: { type: "string" }, "ssh-persist": { type: "string" },
         title: { type: "string" }, "body-file": { type: "string" },
-        json: { type: "boolean" },
+        json: { type: "boolean" }, quick: { type: "boolean" },
         pid: { type: "string" }, "rss-kib": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
@@ -155,6 +156,7 @@ async function main(): Promise<number> {
     if ((values.title !== undefined || values["body-file"] !== undefined) && cmd !== "relay") {
       throw new ForgeError("--title and --body-file only go with relay: forge relay pr <task> --title <text> --body-file <file>");
     }
+    if (values.quick && cmd !== "team") throw new ForgeError("--quick only goes with team status: forge team status --quick");
     if (values.json && cmd !== "team") throw new ForgeError("--json only goes with team status: forge team status --json");
     if ((values.pid !== undefined || values["rss-kib"] !== undefined) && cmd !== "notify") {
       throw new ForgeError("--pid and --rss-kib only go with notify");
@@ -164,7 +166,7 @@ async function main(): Promise<number> {
     }
     const laptop = { remote: values.remote, host: values.host, sshPersist: values["ssh-persist"] };
     return await dispatch(ctx, positionals, values.force === true, laptop,
-      { title: values.title, bodyFile: values["body-file"], json: values.json },
+      { title: values.title, bodyFile: values["body-file"], json: values.json, quick: values.quick },
       { pid: values.pid, rssKib: values["rss-kib"] });
   } catch (e) {
     // Le préfixe "Error: " est ajouté ici, une seule fois : une ForgeError ne

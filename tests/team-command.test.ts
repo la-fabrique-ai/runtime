@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
 import type { ExecOptions } from "../cli/lib/context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
-import { cmdTeam } from "../cli/lib/commands/team.ts";
+import { cmdTeam, type TeamStatus } from "../cli/lib/commands/team.ts";
 
 let home: string;
 beforeEach(() => {
@@ -115,13 +115,52 @@ test("converge starts the session of a pilot it has just created", async () => {
   assert.ok(launch >= 0 && run > launch, calls.join("\n"));
 });
 
-test("status --json prints one JSON array and nothing else on stdout", async () => {
-  const { ctx } = setup();
+const lead = "agent-web-lead";
+
+// Une question ouverte du Lead au journal, comme `forge-team ask` la laisse.
+function writeJournal(...lines: object[]): void {
+  mkdirSync(join(home, ".local", "share", "agent-forge", "api"), { recursive: true });
+  writeFileSync(join(home, ".local", "share", "agent-forge", "api", "journal.jsonl"), lines.map((l) => `${JSON.stringify(l)}\n`).join(""));
+}
+const ASK = { id: 7, time: new Date(Date.now() - 120_000).toISOString(), caller: lead, op: "ask-human", to: null, task: null, outcome: "ok", error: null, summary: "Quel séparateur ?", text: null };
+
+test("status --json prints one TeamStatus object and nothing else on stdout", async () => {
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+    teams: { web: { repo: "o/web", roles: { lead: { capabilities: ["repo", "ask-human"] }, dev: { count: 1, capabilities: ["repo", "publish"] } } } },
+  }));
+  writeJournal(ASK);
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", lead, { status: "Running", config: { "user.forge.task": "fix", "user.forge.assigned_by": "human" } });
+  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "-- hc get agent", code: 1 }] });
   await cmdTeam(ctx, ["status"], { json: true });
   assert.equal(ctx.out_lines.length, 1);
-  const rows = JSON.parse(ctx.out_lines[0]) as { name: string; session: string; busy: unknown }[];
-  assert.deepEqual(rows.map((r) => r.name), ["agent-web-dev-1", "agent-web-dev-2"]);
-  assert.deepEqual(rows.map((r) => r.busy), [null, null]);
+  const s = JSON.parse(ctx.out_lines[0]) as TeamStatus;
+  assert.deepEqual(s.members.map((m) => [m.name, m.present, m.task, m.assignedBy, m.session, m.waitingOn]), [
+    [lead, true, "fix", "human", "none", "human"],
+    ["agent-web-dev-1", false, null, null, "none", null],
+  ]);
+  assert.deepEqual(s.inbox.map((q) => [q.id, q.from, q.summary]), [[7, lead, "Quel séparateur ?"]]);
+  assert.deepEqual(s.mirrors, [{ team: "web", originAgeSeconds: null }]);
+});
+
+test("status --quick refreshes no mirror; without it the team mirror is refreshed", async () => {
+  const quick = setup();
+  await cmdTeam(quick.ctx, ["status"], { json: true, quick: true });
+  assert.ok(!quick.ctx.calls.some((c) => c[0] === "git"), quick.ctx.calls.map((c) => c.join(" ")).join("\n"));
+  const full = setup();
+  await cmdTeam(full.ctx, ["status"], { json: true });
+  assert.ok(full.ctx.calls.some((c) => c[0] === "git"), "the team mirror is refreshed (created) as before");
+});
+
+test("the text status has a WAITING column, the INBOX and the origin mirror's age; a control character in a summary is dropped", async () => {
+  writeJournal({ ...ASK, summary: "Quel\u001b[2J séparateur ?" });
+  const { ctx } = setup();
+  await cmdTeam(ctx, ["status"], { quick: true });
+  assert.match(ctx.out_lines[0], /^NAME\s+ROLE\s+TASK\s+SESSION\s+WAITING$/);
+  assert.ok(ctx.out_lines.includes("INBOX"));
+  assert.ok(ctx.out_lines.some((l) => l === `#7 ${lead} 2 min: Quel[2J séparateur ?`), ctx.out_lines.join("\n"));
+  assert.ok(ctx.out_lines.some((l) => l === "web: origin mirror never synced"));
+  assert.ok(!ctx.out_lines.join("\n").includes("\u001b"));
 });
 
 test("for-repo prints the team that holds the repository, and nothing (exit 1) for another", async () => {

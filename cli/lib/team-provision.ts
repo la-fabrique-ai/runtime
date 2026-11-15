@@ -15,14 +15,14 @@ import {
 import { configSet, configUnset, execAsAgent, execAsAgentArgv, forgeProject, incus, pullText, pushText, waitReady } from "./incus.ts";
 import {
   cloneWorkspace, ensureMirror, ensureTeamMirror, MIRROR_MOUNT, mirrorRepo, ORIGIN_DEVICE, pointOriginAtMirror,
-  requireMirrorOf, TEAM_DEVICE, TEAM_MOUNT, teamMirrorPath,
+  originMirrorPath, requireMirrorOf, TEAM_DEVICE, TEAM_MOUNT, teamMirrorPath,
 } from "./mirror.ts";
 import {
   hostGitIdentity, LFS_FILTERS_INSTALL, LFS_HOOKS_INSTALL, pushClaudeToken, pushFile, refreshClaude,
   requireClaudeToken, requireHookBlocks, requireRuntime, workspaceIsReusable,
 } from "./commands/provision.ts";
 import { egressNames, PROFILE } from "./objects.ts";
-import { mirrorPath, repoRoot, workspacesDir } from "./paths.ts";
+import { repoRoot, workspacesDir } from "./paths.ts";
 import { applyStrictSettings, requireStrictRuntime, strictLaunchArgs } from "./strict.ts";
 import type { Member } from "./team.ts";
 import { ensureApiAccess } from "./api/access.ts";
@@ -38,7 +38,7 @@ const MARKETPLACES: Record<string, string> = {
 // Les deux miroirs d'une équipe se nomment d'après elle : l'origine de son
 // dépôt (comme celui d'un container, mais partagé par ses membres) et le miroir
 // des branches des développeurs (teamMirrorPath).
-export const originMirrorPath = (team: string) => mirrorPath(`team-${team}`);
+export { originMirrorPath };
 
 export { ensureTeamMirror, teamMirrorPath };
 

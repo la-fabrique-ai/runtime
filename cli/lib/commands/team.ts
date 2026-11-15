@@ -4,16 +4,18 @@
 import type { Context } from "../context.ts";
 import { ForgeError } from "../context.ts";
 import { restartApiService } from "../api/access.ts";
+import { inbox, journalPath, readEntries, waitingOn, type Question } from "../api/journal.ts";
 import { INSTRUCTION_MAX } from "../api/protocol.ts";
 import type { ForgeConfig } from "../config.ts";
 import { loadConfig } from "../config.ts";
 import { baseKey, provisioningMarker } from "../containers.ts";
 import { forgeProject, listInstances, type Instance } from "../incus.ts";
-import { refreshMirror } from "../mirror.ts";
+import { originMirrorAge, refreshMirror } from "../mirror.ts";
 import { configPath } from "../paths.ts";
 import { ensureRunning } from "../session.ts";
 import { sessionState, startSession, type SessionState } from "../hc-session.ts";
-import { assign, busyState, release, type Busy } from "../tasks.ts";
+import { assign, busyState, release } from "../tasks.ts";
+import { printableText } from "../printable.ts";
 import { columnWidths, formatRow } from "../table.ts";
 import { members, type Member } from "../team.ts";
 import { installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
@@ -25,13 +27,13 @@ import { containerConfig, safeRef } from "./task-base.ts";
 const USAGE = `Usage: forge team converge [<team>]
        forge team assign <container> [<task>]   (the instruction is read from stdin)
        forge team release <container>
-       forge team status [--json]
+       forge team status [--json] [--quick]
        forge team sync <team>
        forge team for-repo <owner/repo> | task-base <team> | upload-pack <team>   (read by forge fetch and forge ship)`;
 
 
 // `hostMemory` : la RAM de l'hôte, en octets ; les tests la fixent.
-export type TeamOptions = { json?: boolean; stdin?: () => Promise<string>; hostMemory?: number };
+export type TeamOptions = { json?: boolean; quick?: boolean; stdin?: () => Promise<string>; hostMemory?: number };
 
 async function readStdin(): Promise<string> {
   // Un terminal ne donne pas de consigne : le dire plutôt qu'attendre sans rien afficher.
@@ -49,6 +51,7 @@ async function readStdin(): Promise<string> {
 export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = {}): Promise<number> {
   const [sub, a, b] = args;
   if (opts.json && sub !== "status") throw new ForgeError(`--json only goes with status: forge team status --json\n${USAGE}`);
+  if (opts.quick && sub !== "status") throw new ForgeError(`--quick only goes with status: forge team status --quick\n${USAGE}`);
   if (!["converge", "assign", "release", "status", "sync", "for-repo", "task-base", "upload-pack"].includes(sub ?? "")) {
     throw new ForgeError(USAGE);
   }
@@ -62,7 +65,7 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
     case "converge": return converge(ctx, cfg, a, opts);
     case "assign": return assignCommand(ctx, cfg, a, b, opts.stdin ?? readStdin);
     case "release": return releaseCommand(ctx, cfg, a);
-    case "status": return status(ctx, cfg, opts.json === true);
+    case "status": return status(ctx, cfg, opts);
     case "task-base": return taskBase(ctx, cfg, a);
     case "upload-pack": return uploadPack(ctx, cfg, a);
     default: return sync(ctx, cfg, a);
@@ -137,7 +140,7 @@ async function printMembers(ctx: Context, cfg: ForgeConfig, wanted: Member[], te
   const rows: string[][] = [];
   for (const m of wanted) {
     const busy = await busyState(ctx, m.name);
-    rows.push([m.name, m.role, instances.find((i) => i.name === m.name)?.status ?? "Missing", taskLabel(busy)]);
+    rows.push([m.name, m.role, instances.find((i) => i.name === m.name)?.status ?? "Missing", taskLabel(busy?.task ?? null)]);
   }
   const widths = columnWidths(rows);
   for (const row of rows) ctx.out(formatRow(row, widths));
@@ -150,7 +153,7 @@ async function printMembers(ctx: Context, cfg: ForgeConfig, wanted: Member[], te
   }
 }
 
-const taskLabel = (busy: Busy) => (busy === null ? "free" : busy.task);
+const taskLabel = (task: string | null) => task ?? "free";
 
 async function assignCommand(
   ctx: Context, cfg: ForgeConfig, to: string | undefined, task: string | undefined, stdin: () => Promise<string>,
@@ -170,38 +173,82 @@ async function releaseCommand(ctx: Context, cfg: ForgeConfig, to: string | undef
   return 0;
 }
 
-type Row = { name: string; team: string | null; role: string; present: boolean; busy: Busy; session: SessionState };
+// Ce que l'hôte sait d'un membre : l'objet que `forge team status --json` donne
+// aux affichages (watch, le mod de Herdr App, `team up`).
+export type MemberStatus = {
+  name: string; team: string | null; role: string; present: boolean;
+  task: string | null; // la branche, ou NO_BRANCH ; null quand il est libre
+  assignedBy: string | null;
+  session: SessionState; // "none" quand il est absent ou arrêté
+  waitingOn: string | null; // null tant que sa session travaille
+};
+export type TeamStatus = {
+  members: MemberStatus[];
+  inbox: Question[];
+  mirrors: { team: string; originAgeSeconds: number | null }[];
+};
 
-// Le miroir d'équipe se rafraîchit d'abord (§5.5) : un échec est un
-// avertissement sur stderr, jamais un échec de status.
-async function status(ctx: Context, cfg: ForgeConfig, json: boolean): Promise<number> {
-  for (const t of Object.keys(cfg.teams)) {
-    try {
-      const r = await refreshTeamMirror(ctx, cfg, t);
-      for (const name of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${name}.`);
-    } catch (e) {
-      ctx.err(`WARNING: could not refresh the team mirror of ${t}: ${e instanceof Error ? e.message : String(e)}`);
+// `--quick` : sans rafraîchir le miroir d'équipe, que ses clients interrogent
+// toutes les quelques secondes (§5.4). Sinon, le miroir d'équipe se rafraîchit
+// d'abord (§5.5) : un échec est un avertissement sur stderr, jamais un échec de status.
+async function status(ctx: Context, cfg: ForgeConfig, opts: TeamOptions): Promise<number> {
+  if (opts.quick !== true) {
+    for (const t of Object.keys(cfg.teams)) {
+      try {
+        const r = await refreshTeamMirror(ctx, cfg, t);
+        for (const name of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${name}.`);
+      } catch (e) {
+        ctx.err(`WARNING: could not refresh the team mirror of ${t}: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
   }
   const instances = new Map((await listInstances(ctx)).map((i: Instance) => [i.name, i]));
-  const rows: Row[] = [];
+  const journal = readEntries(journalPath());
+  const members_: MemberStatus[] = [];
   for (const m of members(cfg)) {
     const running = instances.get(m.name)?.status === "Running";
-    rows.push({
+    const busy = instances.has(m.name) ? await busyState(ctx, m.name) : null;
+    const session = running ? await sessionState(ctx, m.name) : "none";
+    members_.push({
       name: m.name, team: m.team, role: m.role, present: instances.has(m.name),
-      busy: instances.has(m.name) ? await busyState(ctx, m.name) : null,
-      session: running ? await sessionState(ctx, m.name) : "none",
+      task: busy?.task ?? null, assignedBy: busy === null || busy.assignedBy === "" ? null : busy.assignedBy,
+      session, waitingOn: session === "working" ? null : waitingOn(journal, m.name),
     });
   }
-  if (json) {
-    ctx.out(JSON.stringify(rows));
+  const now = new Date();
+  const result: TeamStatus = {
+    members: members_, inbox: inbox(journal),
+    mirrors: Object.keys(cfg.teams).map((team) => ({ team, originAgeSeconds: originMirrorAge(team, now) })),
+  };
+  if (opts.json) {
+    ctx.out(JSON.stringify(result));
     return 0;
   }
-  const table = rows.map((r) => [r.name, r.role, taskLabel(r.busy), r.session]);
-  const widths = columnWidths([["NAME", "ROLE", "TASK", "SESSION"], ...table]);
-  ctx.out(formatRow(["NAME", "ROLE", "TASK", "SESSION"], widths));
+  // Ce qui vient d'un agent (un résumé) passe par printableText, comme partout où il atteint un terminal.
+  const head = ["NAME", "ROLE", "TASK", "SESSION", "WAITING"];
+  const table = members_.map((r) => [r.name, r.role, taskLabel(r.task), r.session, r.waitingOn ?? "-"].map(printableText));
+  const widths = columnWidths([head, ...table]);
+  ctx.out(formatRow(head, widths));
   for (const row of table) ctx.out(formatRow(row, widths));
+  if (result.inbox.length > 0) {
+    ctx.out("INBOX");
+    for (const q of result.inbox) {
+      ctx.out(`#${q.id} ${printableText(q.from)} ${ageLabel(now.getTime() - Date.parse(q.time))}: ${printableText(q.summary)}`);
+    }
+  }
+  for (const m of result.mirrors) {
+    ctx.out(`${m.team}: origin mirror ${m.originAgeSeconds === null ? "never synced" : `synced ${ageLabel(m.originAgeSeconds * 1000)} ago`}`);
+  }
   return 0;
+}
+
+// « 2 min », « 3 h » : assez pour savoir si une question attend depuis longtemps.
+export function ageLabel(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h`;
+  return `${Math.floor(s / 86400)} d`;
 }
 
 // Le miroir d'origine de l'équipe (GitHub, par l'agent SSH transmis), puis le

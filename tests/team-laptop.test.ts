@@ -40,7 +40,7 @@ test("assign forwards the instruction as stdin, with the host's own command and 
 });
 
 test("up checks hc, converges with the agent forwarded, then registers the machines of every declared container", async () => {
-  const rows = JSON.stringify([{ name: "agent-web-lead" }, { name: "agent-web-dev-1" }]);
+  const rows = JSON.stringify({ members: [{ name: "agent-web-lead" }, { name: "agent-web-dev-1" }], inbox: [], mirrors: [] });
   const ctx = fakeContext({ rules: [
     HC, { match: "'forge' 'team' 'status' '--json'", stdout: rows },
     { match: "hc machine ls --json", stdout: JSON.stringify({ machines: [] }) },
@@ -66,11 +66,12 @@ test("a cloud host never gets the forwarded agent", () => {
 });
 
 // Le même `forge team status --json`, avant puis après la convergence de l'hôte.
-function upContext(before: unknown[], after: unknown[], machines: unknown[]) {
+// Le nouvel objet de l'hôte, ou le tableau d'un hôte plus ancien (`asArray`).
+function upContext(before: unknown[], after: unknown[], machines: unknown[], asArray = false) {
   const base = fakeContext({ rules: [HC, { match: "hc machine ls --json", stdout: JSON.stringify({ machines }) }] });
   let statuses = 0;
   const ctx = { ...base, exec: async (argv: string[], o?: Parameters<typeof base.exec>[1]) => argv.join(" ").includes("'team' 'status' '--json'")
-    ? { code: 0, stderr: "", stdout: JSON.stringify(statuses++ === 0 ? before : after) } : base.exec(argv, o) };
+    ? { code: 0, stderr: "", stdout: JSON.stringify(((rows) => asArray ? rows : { members: rows, inbox: [], mirrors: [] })(statuses++ === 0 ? before : after)) } : base.exec(argv, o) };
   return { base, ctx };
 }
 const row = (name: string, present: boolean) => ({ name, present });
@@ -100,8 +101,14 @@ test("up never re-pins a machine whose container it did not recreate: it says to
 
 test("up assumes nothing about what converge created when the host cannot say (no `present`)", async () => {
   const old = [{ name: "agent-web-lead" }];
-  const { base, ctx } = upContext(old, old, [machine("agent-web-lead")]);
+  const { base, ctx } = upContext(old, old, [machine("agent-web-lead")], true);
   await cmdTeamLaptop(ctx, ["up"]);
   assert.deepEqual(base.calls.filter((c) => c[0] === "hc" && c[1] === "machine" && c[2] !== "ls"), []);
   assert.deepEqual(base.out_lines, ["Herdr App's machines are up to date."]);
+});
+
+test("status relays --json and --quick to the host's own command", async () => {
+  const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'status'", stdout: "{}\n" }] });
+  assert.equal(await cmdTeamLaptop(ctx, ["status"], { json: true, quick: true }), 0);
+  assert.ok(String(ctx.calls[0].at(-1)).endsWith("'forge' 'team' 'status' '--json' '--quick'"), ctx.calls[0].join(" "));
 });

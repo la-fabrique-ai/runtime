@@ -40,6 +40,15 @@ function parseLines(path: string, text: string, first: number, into: Entry[]): v
   });
 }
 
+// Lecture seule, pour les commandes qui montrent le journal sans l'écrire : un
+// fichier absent est un journal vide, et rien n'est créé.
+export function readEntries(path: string): Entry[] {
+  if (!existsSync(path)) return [];
+  const list: Entry[] = [];
+  parseLines(path, readFileSync(path, "utf8"), 0, list);
+  return list;
+}
+
 export function journalPath(): string {
   return join(apiDataDir(), "journal.jsonl");
 }
