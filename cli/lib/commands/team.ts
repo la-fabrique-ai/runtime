@@ -30,6 +30,7 @@ import { containerConfig, safeRef } from "./task-base.ts";
 const USAGE = `Usage: forge team converge [<team>]
        forge team assign <container> [<task>]   (the instruction is read from stdin)
        forge team release <container>
+       forge team question <question id>   (the summary and the detail of a question of the Inbox)
        forge team answer <question id>   (the answer is read from stdin, as JSON: {"summary": "…", "body": "…"})
        forge team status [--json] [--quick]
        forge team sync <team>
@@ -60,7 +61,7 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
   const [sub, a, b] = args;
   if (opts.json && sub !== "status") throw new ForgeError(`--json only goes with status: forge team status --json\n${USAGE}`);
   if (opts.quick && sub !== "status") throw new ForgeError(`--quick only goes with status: forge team status --quick\n${USAGE}`);
-  if (!["converge", "assign", "release", "answer", "status", "sync", "for-repo", "task-base", "upload-pack"].includes(sub ?? "")) {
+  if (!["converge", "assign", "release", "answer", "question", "status", "sync", "for-repo", "task-base", "upload-pack"].includes(sub ?? "")) {
     throw new ForgeError(USAGE);
   }
   const cfg = loadConfig(configPath());
@@ -73,6 +74,7 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
     case "converge": return converge(ctx, cfg, a, opts);
     case "assign": return assignCommand(ctx, cfg, a, b, opts.stdin ?? readStdin);
     case "release": return releaseCommand(ctx, cfg, a);
+    case "question": return questionCommand(ctx, a);
     case "answer": return answerCommand(ctx, cfg, a, opts.stdin ?? readAnswer);
     case "status": return status(ctx, cfg, opts);
     case "task-base": return taskBase(ctx, cfg, a);
@@ -181,6 +183,24 @@ async function releaseCommand(ctx: Context, cfg: ForgeConfig, to: string | undef
   if (to === undefined) throw new ForgeError(`a container name is required.\n${USAGE}`);
   await release(ctx, cfg, { to, by: "human" });
   ctx.out(`Released ${to}.`);
+  return 0;
+}
+
+// Le résumé et le corps d'une question, pour que l'humain puisse y répondre. Le
+// texte vient d'un agent : il passe par printableText (le saut de ligne reste).
+async function questionCommand(ctx: Context, idArg: string | undefined): Promise<number> {
+  if (idArg === undefined || !/^[0-9]{1,15}$/.test(idArg)) throw new ForgeError(`a question number is required.\n${USAGE}`);
+  const id = Number(idArg);
+  const entries = readEntries(journalPath());
+  const ask = entries.find((e) => e.id === id && e.op === "ask-human" && e.outcome === "ok");
+  if (ask === undefined) throw new ForgeError(`no question ${id}: forge team status lists the open ones`);
+  const state = findQuestion(entries, id) === "answered" ? "answered" : "open";
+  ctx.out(`#${id} from ${printableText(ask.caller)}, ${ageLabel(Date.now() - Date.parse(ask.time))} ago (${state})`);
+  ctx.out(printableText(ask.summary ?? ""));
+  if (ask.text !== null) {
+    ctx.out("");
+    ctx.out(printableText(ask.text));
+  }
   return 0;
 }
 

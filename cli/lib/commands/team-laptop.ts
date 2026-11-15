@@ -18,6 +18,7 @@ const USAGE = `Usage: forge team up [<team>] [--host <name>]
        forge team release <container> [--host <name>]
        forge team status [--json] [--quick] [--host <name>]
        forge team sync <team> [--host <name>]
+       forge team question <question id> [--host <name>]   (a question's summary and detail)
        forge team inbox --json   (every installed host's questions and counts, one line of JSON: read by the Herdr App mod)
        forge team watch [--host <name>]   (the team, its questions and the origin mirror, redrawn every few seconds; Ctrl-C ends it)`;
 
@@ -92,6 +93,12 @@ export async function cmdTeamLaptop(ctx: Context, args: string[], opts: TeamLapt
       return relayed(ctx, await remoteExec(ctx, await selectHost(ctx, opts.host), ["forge", "team", "release", a]));
     case "status":
       return relayed(ctx, await remoteExec(ctx, await selectHost(ctx, opts.host), ["forge", "team", "status", ...(opts.json ? ["--json"] : []), ...(opts.quick ? ["--quick"] : [])]));
+    case "question": {
+      if (a === undefined) throw new ForgeError(`a question number is required.\n${USAGE}`);
+      const r = await remoteExec(ctx, await selectHost(ctx, opts.host), ["forge", "team", "question", a]);
+      // Le texte est celui d'un agent : jamais tel quel dans le terminal.
+      return relayed(ctx, { ...r, stdout: printableText(r.stdout), stderr: printableText(r.stderr) });
+    }
     case "inbox": return inbox(ctx, opts);
     case "watch": return watchLoop(ctx, await selectHost(ctx, opts.host), {});
     case "sync":

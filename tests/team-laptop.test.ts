@@ -148,3 +148,9 @@ test("inbox answers one line of JSON for every installed host; an unreachable on
   assert.deepEqual(report.hosts[1].members, { working: 0, idle: 0, free: 0 });
   assert.ok(ctx.execOptions.every((o) => o?.timeoutMs === 20000));
 });
+
+test("question asks the host and prints an agent's text without control characters", async () => {
+  const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'question' '7'", stdout: "#7 from x\nDétail\u001b[2J\n" }] });
+  assert.equal(await cmdTeamLaptop(ctx, ["question", "7"]), 0);
+  assert.deepEqual(ctx.out_lines, ["#7 from x\nDétail[2J"]);
+});

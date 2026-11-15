@@ -33,7 +33,7 @@ export function renderWatch(
     lines.push(formatRow(head, widths), ...rows.map((r) => formatRow(r, widths)));
     lines.push("INBOX" + (status.inbox.length === 0 ? "  (empty)" : ""));
     for (const q of status.inbox) {
-      const detail = q.hasBody ? "  (+ detail in the journal)" : "";
+      const detail = q.hasBody ? `  (+ detail: forge team question ${q.id})` : "";
       lines.push(`  #${q.id} ${printableText(q.from)} ${ageLabel(now.getTime() - Date.parse(q.time))}: ${printableText(q.summary)}${detail}`);
     }
     for (const m of status.mirrors) lines.push(printableText(mirrorLine(m.team, m.originAgeSeconds)));

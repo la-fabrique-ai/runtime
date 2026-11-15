@@ -366,3 +366,12 @@ test("converge stops before any container when a .env is open to others", async 
   await assert.rejects(() => cmdTeam(ctx, ["converge"]), (e: Error) => e.message.includes(envFile) && /group or others/.test(e.message));
   assert.ok(!ctx.calls.some((c) => c.includes("launch")));
 });
+
+test("question shows a question's summary and detail without control characters; an unknown id is refused", async () => {
+  writeJournal({ ...ASK, text: "Ligne un\nLigne deux\u001b[2J" });
+  const { ctx } = setup();
+  assert.equal(await cmdTeam(ctx, ["question", "7"]), 0);
+  assert.deepEqual(ctx.out_lines.slice(1), ["Quel séparateur ?", "", "Ligne un\nLigne deux[2J"]);
+  assert.match(ctx.out_lines[0], /^#7 from agent-web-lead, 2 min ago \(open\)$/);
+  await assert.rejects(() => cmdTeam(ctx, ["question", "99"]), /no question 99/);
+});

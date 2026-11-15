@@ -342,7 +342,7 @@ forge team release agent-web-dev-1
 
 An agent with `ask-human` can leave a question for you (`forge-team ask`). It
 waits in the **Inbox**, which `forge team status` lists (`#<id> <agent> <age>:
-<summary>`; a question with a detail keeps it in the host's journal). From your
+<summary>`; a question with a detail says so, and `forge team question <id>` shows it). From your
 machine:
 
 ```bash
