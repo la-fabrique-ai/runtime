@@ -129,3 +129,22 @@ test("refresh reads what another writer appended, once; append does not lose it"
     rmSync(dir, { recursive: true });
   }
 });
+
+test("a line another writer adds right before this one's write never leaves the offset inside a line", () => {
+  const { dir, path } = tmp();
+  try {
+    const service = Journal.open(path);
+    service.append({ ...base, caller: "agent-web-lead", op: "ask-human", summary: "q" }, NOW);
+    // L'autre écrivain passe après la dernière lecture du service et avant son écriture.
+    Journal.open(path).append({ ...base, caller: "human", op: "answer", to: "agent-web-lead", question: 1 }, NOW, 0);
+    service.append({ ...base, caller: "agent-web-dev-1", op: "status" }, NOW);
+    assert.deepEqual(service.entries().map((e) => e.id), [1, 0, 2]);
+    // Et les lectures suivantes ne lèvent rien et ne doublent rien.
+    service.refresh();
+    Journal.open(path).append({ ...base, caller: "forge", op: "notify" }, NOW, 0);
+    service.refresh();
+    assert.deepEqual(service.entries().map((e) => e.id), [1, 0, 2, 0]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});

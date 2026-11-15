@@ -80,9 +80,8 @@ export class Journal {
     return new Journal(path, list, raw.length);
   }
 
-  // Relit les lignes ajoutées au fichier depuis la dernière lecture, par un autre
-  // écrivain. Ce que ce journal a écrit lui-même est déjà en mémoire : son
-  // décalage avance avec l'écriture, il n'est pas lu deux fois.
+  // Relit les lignes ajoutées au fichier depuis la dernière lecture, par n'importe
+  // quel écrivain, ce journal compris.
   refresh(): void {
     const raw = readFileSync(this.path);
     if (raw.length <= this.offset) return;
@@ -103,14 +102,13 @@ export class Journal {
     return this.next++;
   }
 
+  // La liste n'est nourrie que par `refresh` : la ligne écrite ici y entre en
+  // même temps que celles qu'un autre écrivain a ajoutées avant ou après elle, et
+  // le décalage ne tombe jamais au milieu d'une ligne.
   append(e: NewEntry, now: Date, id?: number): Entry {
-    // Les lignes d'un autre écrivain d'abord : le décalage ne saute rien.
-    this.refresh();
     const entry: Entry = { id: id ?? this.reserve(), time: now.toISOString(), ...e, question: e.question ?? null };
-    const line = `${JSON.stringify(entry)}\n`;
-    appendFileSync(this.path, line);
-    this.offset += Buffer.byteLength(line);
-    this.list.push(entry);
+    appendFileSync(this.path, `${JSON.stringify(entry)}\n`);
+    this.refresh();
     return entry;
   }
 
