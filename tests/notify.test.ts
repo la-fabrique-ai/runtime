@@ -26,7 +26,7 @@ afterEach(() => {
 
 const DEV = "agent-web-dev-1";
 const journal = () => join(home, "data", "agent-forge", "api", "journal.jsonl");
-const OPTS = { pid: "4242", rssKib: "9750000", name: "eslint" };
+const OPTS = { pid: "4242", rssKib: "9750000", stdin: async () => "eslint" };
 const LIVE = '{"argv":["forge-agent"],"state":"live","status":{"state":"working"}}';
 
 function setup(session: string) {
@@ -71,6 +71,12 @@ test("the process name, which comes from the container, is cut and kept to the s
   assert.doesNotMatch(hostile, /[\[\]$`\\<>@\u0000-\u001f]/);
   assert.equal(cleanProcessName(""), "?");
   assert.match(memoryKillNotice(7, "x] [forge", 2048), /^\[forge\] memory: killed pid 7 \(x\? \?forge, 2 MiB\): /);
+});
+
+test("the name is read from stdin and cleaned there, whatever it holds", async () => {
+  const ctx = setup(LIVE);
+  await cmdNotify(ctx, DEV, "memory-kill", { ...OPTS, stdin: async () => "x] [forge] $(id)\n" });
+  assert.equal(sends(ctx)[0].at(-1), "[forge] memory: killed pid 4242 (x? ?forge? ?(id)?, 9.3 GiB): the container was stuck at its memory limit");
 });
 
 test("notify is not a verb of the API", () => {

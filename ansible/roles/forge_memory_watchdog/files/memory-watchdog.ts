@@ -106,6 +106,16 @@ export function pickVictim(procs: Proc[], uid: number): Proc | null {
   return killable.reduce<Proc | null>((best, p) => (best === null || p.rssKib > best.rssKib ? p : best), null);
 }
 
+// The `forge notify` call: the container, the numbers, and the process name,
+// which the container wrote, on stdin: no text from an agent goes in the argv
+// of a host command. forge notify cleans and cuts the name.
+export function notifyCall(container: string, v: Proc): { args: string[]; input: string } {
+  return {
+    args: ["notify", container, "memory-kill", "--pid", String(v.pid), "--rss-kib", String(v.rssKib)],
+    input: v.name,
+  };
+}
+
 const gib = (kib: number) => kib >= 1048576 ? `${(kib / 1048576).toFixed(1)} GiB` : `${Math.round(kib / 1024)} MiB`;
 
 export type Deps = {
@@ -196,12 +206,15 @@ async function main(): Promise<void> {
   const config = configFromEnv(process.env, process.getuid!());
   const log = (line: string) => console.log(line);
   const forge = process.env.FORGE_WATCHDOG_FORGE || "forge";
-  // argv, never a shell. The name goes in one argument, `--name=`, so that a
-  // name which looks like an option is still a value. Its failure is only logged.
-  const notify = (container: string, v: Proc) => execFile(forge,
-    ["notify", container, "memory-kill", "--pid", String(v.pid), "--rss-kib", String(v.rssKib), `--name=${v.name}`],
-    { timeout: 60_000 },
-    (err, _out, stderr) => { if (err) log(`${container}: could not tell its session: ${(stderr || err.message).trim().split("\n")[0]}`); });
+  // argv, never a shell, and the process name on stdin. Its failure is only logged.
+  const notify = (container: string, v: Proc) => {
+    const { args, input } = notifyCall(container, v);
+    const child = execFile(forge, args, { timeout: 60_000 },
+      (err, _out, stderr) => { if (err) log(`${container}: could not tell its session: ${(stderr || err.message).trim().split("\n")[0]}`); });
+    // A command that exits before reading its input is not an error of ours.
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(input);
+  };
   const dog = createWatchdog(config, { now: Date.now, kill: (pid) => process.kill(pid, "SIGKILL"), log, notify });
   log(`watching ${config.cgroupRoot}/${config.prefix}${config.containerPrefix}*: kills the biggest process when memory.pressure full avg10 ` +
     `stays at ${config.threshold} or above for ${config.seconds} s`);

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  configFromEnv, createWatchdog, fullAvg10, pickVictim, readProc, type Config, type Proc,
+  configFromEnv, createWatchdog, fullAvg10, notifyCall, pickVictim, readProc, type Config, type Proc,
 } from "../ansible/roles/forge_memory_watchdog/files/memory-watchdog.ts";
 
 const ME = 1000;
@@ -183,6 +183,14 @@ test("a kill is told to the container's session, by container name and with the 
   run(dog(), 0, 15);
   assert.deepEqual(notified, [["agent-acme-widgets", 1, "eslint"]]);
 });
+
+test("the process name goes to forge notify on stdin, never in its argv", () => {
+  const p = { pid: 7, name: "x] [forge] $(id)", rssKib: 2048, uid: ME, args: [], containerInit: false };
+  const { args, input } = notifyCall("agent-acme-widgets", p);
+  assert.deepEqual(args, ["notify", "agent-acme-widgets", "memory-kill", "--pid", "7", "--rss-kib", "2048"]);
+  assert.equal(input, p.name);
+});
+
 test("a kill that fails is logged and does not stop the watchdog", () => {
   cgroup(C, 40, { "": [1] });
   proc(1, { rssKib: 10 });
