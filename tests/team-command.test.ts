@@ -232,7 +232,7 @@ test("converge updates an existing member's files; a live pilot is told its inst
   for (const name of ["agent-pilot", "agent-web-dev-1"]) {
     assert.match(claudeMd(name) ?? "", /forge-team status/, `${name} has no current CLAUDE.md`);
   }
-  assert.ok(base.err_lines.some((l) => l.includes("agent-pilot's instructions changed") && l.includes("Herdr App") && l.includes("forge team up")), base.err_lines.join("\n"));
+  assert.ok(base.err_lines.some((l) => l.includes("agent-pilot's instructions or environment changed") && l.includes("Herdr App") && l.includes("forge team up")), base.err_lines.join("\n"));
   assert.ok(!base.err_lines.some((l) => l.includes("hc-exec")), "the host's commands are not the human's");
   // Chaque mise à jour nomme son membre.
   assert.deepEqual(base.out_lines.filter((l) => l.startsWith("Updating ")), ["Updating agent-pilot...", "Updating agent-web-dev-1..."]);
@@ -240,7 +240,7 @@ test("converge updates an existing member's files; a live pilot is told its inst
 
   base.err_lines.length = 0;
   await cmdTeam(ctx, ["converge"]);
-  assert.ok(!base.err_lines.some((l) => l.includes("instructions changed")), "nothing changed the second time");
+  assert.ok(!base.err_lines.some((l) => l.includes("environment changed")), "nothing changed the second time");
 });
 
 // Les limites promises (celle du rôle, sinon celle du profil) contre la RAM moins la réserve de l'hôte.
@@ -327,4 +327,42 @@ test("a summary the API would refuse and a body holding the Claude token are ref
   await assert.rejects(() => cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Oui", body: "le token tok-test" }) }), /secret/);
   assert.deepEqual(typed(), []);
   assert.equal(readFileSync(join(home, ".local", "share", "agent-forge", "api", "journal.jsonl"), "utf8"), before);
+});
+
+// Le .env d'un rôle : poussé (mode 600, uid 1001), retiré quand le rôle le perd, refusé s'il est ouvert aux autres.
+test("converge pushes a role's .env, removes it when the role loses it, and tells a live pilot whose .env changed", async () => {
+  const envFile = join(home, "lead.env");
+  writeFileSync(envFile, "DEMO_GREETING=bonjour\n", { mode: 0o600 });
+  const config = (env: boolean) => JSON.stringify({
+    pilot: { capabilities: ["assign"], talkTo: ["web"], ...(env ? { env: envFile } : {}) },
+    teams: { web: { repo: "o/web", roles: { lead: { capabilities: ["repo"], ...(env ? { env: envFile } : {}) }, dev: { count: 1, capabilities: ["repo", "publish"] } } } },
+  });
+  writeFileSync(join(home, "agent-forge", "config.json"), config(true));
+  const fake = FakeIncus.withRuntime();
+  for (const n of ["agent-pilot", "agent-web-lead", "agent-web-dev-1"]) fake.addInstance("agent-forge", n, { status: "Running" });
+  const base = fakeContext({ incus: fake, rules: RULES });
+  const ctx = { ...base, exec: async (argv: string[], o?: ExecOptions) => argv.join(" ").endsWith("-- hc get agent")
+    ? { code: 0, stderr: "", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}' } : base.exec(argv, o) };
+  const envOf = (n: string) => fake.files.get(`agent-forge/${n}/home/aiuser/.config/forge/env`);
+  await cmdTeam(ctx, ["converge"]);
+  assert.deepEqual([envOf("agent-web-lead")?.content, envOf("agent-web-lead")?.mode, envOf("agent-web-lead")?.uid], ["DEMO_GREETING=bonjour\n", "600", "1001"]);
+  assert.equal(envOf("agent-web-dev-1"), undefined, "a role without env has none");
+  assert.ok(base.err_lines.some((l) => l.includes("agent-pilot") && l.includes("environment changed")));
+
+  // Le rôle perd son env : le fichier est retiré au converge suivant.
+  writeFileSync(join(home, "agent-forge", "config.json"), config(false));
+  base.calls.length = 0;
+  await cmdTeam(ctx, ["converge"]);
+  assert.ok(base.calls.some((c) => c.join(" ").includes("agent-web-lead") && c.join(" ").endsWith("rm -f /home/aiuser/.config/forge/env")));
+});
+
+test("converge stops before any container when a .env is open to others", async () => {
+  const envFile = join(home, "lead.env");
+  writeFileSync(envFile, "A=1\n", { mode: 0o644 });
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+    teams: { web: { repo: "o/web", roles: { lead: { capabilities: ["repo"], env: envFile } } } },
+  }));
+  const { ctx } = setup();
+  await assert.rejects(() => cmdTeam(ctx, ["converge"]), (e: Error) => e.message.includes(envFile) && /group or others/.test(e.message));
+  assert.ok(!ctx.calls.some((c) => c.includes("launch")));
 });

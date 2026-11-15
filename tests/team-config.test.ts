@@ -37,12 +37,12 @@ test("a team parses, and its optional fields default", () => {
     },
   });
   assert.deepEqual(cfg.teams.web.roles.lead,
-    { count: null, capabilities: ["repo", "assign"], talkTo: ["dev", "team"], strict: false, memory: null, cpu: null, plugins: [] });
+    { count: null, capabilities: ["repo", "assign"], talkTo: ["dev", "team"], strict: false, memory: null, cpu: null, plugins: [], env: null });
   assert.equal(cfg.teams.web.roles.dev.count, 3);
   assert.equal(cfg.teams.web.roles.dev.memory, "8GiB");
   assert.equal(cfg.teams.web.prompts, null);
   assert.equal(cfg.teams.web.gitIdentity, null);
-  assert.deepEqual(cfg.pilot, { capabilities: ["assign"], talkTo: ["web"], strict: false, memory: null, plugins: [], prompt: null });
+  assert.deepEqual(cfg.pilot, { capabilities: ["assign"], talkTo: ["web"], strict: false, memory: null, plugins: [], prompt: null, env: null });
 });
 
 test("a team is refused when a field is wrong", () => {
@@ -60,4 +60,12 @@ test("a team is refused when a field is wrong", () => {
 test("the pilot talks to teams only", () => {
   rejects({ pilot: { talkTo: ["nobody"] }, teams: {} }, /pilot\.talkTo/);
   rejects({ pilot: { capabilities: ["push"] } }, /pilot\.capabilities/);
+});
+
+test("a role and the pilot may name a .env file, absolute or under ~", () => {
+  const cfg = parse({ ...web({ lead: { env: "/etc/forge/lead.env" }, dev: {} }), pilot: { talkTo: ["web"], env: "~/pilot.env" } });
+  assert.equal(cfg.teams.web.roles.lead.env, "/etc/forge/lead.env");
+  assert.equal(cfg.teams.web.roles.dev.env, null);
+  assert.equal(cfg.pilot!.env, "~/pilot.env");
+  rejects(web({ lead: { env: "relative.env" } }), /roles\.lead\.env/);
 });

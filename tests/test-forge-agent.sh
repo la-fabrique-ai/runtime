@@ -48,6 +48,29 @@ if [ "$rc" -eq 0 ] || ! printf '%s' "$out" | grep -q 'forge install' || printf '
   FAIL=1
 fi
 
+# Le .env du rôle : une valeur est du texte, jamais exécutée ; claude la voit,
+# et seul lui. Un faux claude qui montre deux variables.
+mkdir "$TMP/bin3"
+cat > "$TMP/bin3/claude" <<'FAKE'
+#!/bin/bash
+echo "X=$X|Y=$Y|Z=$Z"
+FAKE
+chmod +x "$TMP/bin3/claude"
+printf '# note\n\nX=$(touch %s/probe)\nexport Y="ok"\nZ=`touch %s/probe2`\n' "$TMP" "$TMP" > "$TMP/env"
+out=$(PATH="$TMP/bin3:$PATH" FORGE_TOKEN_FILE="$TMP/token" FORGE_ENV_FILE="$TMP/env" bash "$LAUNCHER" --forge-task agent-x-a) || true
+if [ "$out" != "X=\$(touch $TMP/probe)|Y=ok|Z=\`touch $TMP/probe2\`" ] || [ -e "$TMP/probe" ] || [ -e "$TMP/probe2" ]; then
+  echo "FAIL: une valeur du .env est du texte, jamais exécutée (sortie='$out')"
+  FAIL=1
+fi
+# Une ligne mal formée arrête le lanceur avec son numéro, sans répéter la ligne.
+printf 'A=1\nbad key=top-secret\n' > "$TMP/badenv"
+rc=0
+out=$(PATH="$TMP/bin3:$PATH" FORGE_TOKEN_FILE="$TMP/token" FORGE_ENV_FILE="$TMP/badenv" bash "$LAUNCHER" 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] || ! printf '%s' "$out" | grep -q 'ligne 2' || printf '%s' "$out" | grep -q 'top-secret'; then
+  echo "FAIL: un .env mal formé doit arrêter le lanceur en nommant la ligne (rc=$rc, sortie='$out')"
+  FAIL=1
+fi
+
 # Un TERM reçu par le lanceur (forge stop vise son marqueur) atteint claude :
 # sans cela claude resterait orphelin, la tâche passant pour arrêtée.
 mkdir "$TMP/bin2"

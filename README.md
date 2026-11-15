@@ -288,13 +288,37 @@ A role's **capabilities** decide what its containers get:
   to read and compare;
 - `assign`, `ask-human`: what the agent may ask of the team through
   [`forge-team`](#agents-talk-to-each-other);
-- `tickets`, `services`: recorded for the next parts of the work, and not
-  acted on yet.
+- `tickets`, `services`: accepted and not acted on. forge knows nothing of ticket
+  managers: a token a template's roles need goes in the role's
+  [`.env`](#a-role-has-its-own-env).
 
 Other role settings: `count`, `talkTo`, `strict` (the container's egress is
-[strict](#strict-egress-mode)), `memory`, `cpu`, `plugins`. A team also takes
+[strict](#strict-egress-mode)), `memory`, `cpu`, `plugins`, `env`. A team also takes
 `prompts` (a directory of `<role>.md` files appended to each role's
 instructions) and `gitIdentity` (the commits' identity, the host's otherwise).
+
+#### A role has its own `.env`
+
+`"env": "<path on the host>"` on a role (or on `pilot`) names a dotenv file;
+`forge team converge` pushes it into each of the role's containers
+(`/home/aiuser/.config/forge/env`, mode 600) and removes it from a role that
+loses the key. `forge-agent`, which starts the agent, exports its variables to
+the agent's process only, never to the container's other programs. Use it for a
+template's API token or a tool's settings.
+
+```
+# one KEY=VALUE per line; `#` comments; an optional `export `
+DEMO_GREETING=bonjour
+```
+
+The file is parsed, never executed: a value is the rest of the line as text (one
+pair of surrounding quotes is removed), with no `$` expansion, no escapes and no
+multi-line value, so `$(…)` stays literal. `CLAUDE_CODE_OAUTH_TOKEN`, `HOME`,
+`PATH`, `USER` and every `FORGE_…` name are refused. The file must exist and not
+be readable by group or others (`chmod 600`), or `converge` stops. **Its values
+reach the agent and every command it runs, in clear**: give a secret only to the
+roles that need it. They are not in the list of secrets forge refuses in
+messages.
 
 Give an agent a task, with the instruction on stdin; the agent starts a new
 Claude Code session in its own terminal:

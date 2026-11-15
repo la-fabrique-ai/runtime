@@ -43,6 +43,9 @@ Une ligne `[forge] message <id> from <container>: <résumé>` qui apparaît dans
 
 Une ligne `on the task you assigned it` est le compte rendu d'un agent que tu retiens : libère-le quand sa tâche est finie.
 
+## Variables de ta session
+Certaines variables d'environnement de ta session peuvent venir de l'humain (un token, un réglage) : utilise-les, mais ne copie jamais leurs valeurs dans un message, un commit ou un fichier.
+
 ## Périmètre
 - Tes modifications sont limitées au contenu de `/workspace`
 - Tu n'as pas accès au système hôte

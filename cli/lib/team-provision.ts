@@ -25,6 +25,7 @@ import { egressNames, PROFILE } from "./objects.ts";
 import { repoRoot, workspacesDir } from "./paths.ts";
 import { applyStrictSettings, requireStrictRuntime, strictLaunchArgs } from "./strict.ts";
 import type { Member } from "./team.ts";
+import { CONTAINER_ENV_PATH, readEnvFile } from "./dotenv.ts";
 import { ensureApiAccess } from "./api/access.ts";
 
 const MODE = "supervised";
@@ -169,8 +170,11 @@ export async function installMemberFiles(ctx: Context, m: Member): Promise<{ ins
   const rolePrompt = m.prompt === null ? "" : readPrompt(m);
   const instructions = readFileSync(join(repoRoot(), "container", "CLAUDE.md"), "utf8");
   const text = rolePrompt === "" ? instructions : `${instructions}\n${rolePrompt}`;
+  // Le .env du rôle, lu et vérifié avant que quoi que ce soit soit poussé.
+  const env = m.env === null ? null : readEnvFile(m.env);
   const before = await pullText(ctx, m.name, CLAUDE_MD);
   await mustSucceed("push CLAUDE.md", pushText(ctx, m.name, CLAUDE_MD, text, { uid: 1001, gid: 1001, mode: "644" }));
+  const envChanged = await installEnv(ctx, m, env);
   await pushFile(ctx, "push forge-agent", join(repoRoot(), "container", "forge-agent"),
     m.name, "/usr/local/bin/forge-agent", 0, "755");
   await ensureApiAccess(ctx, m);
@@ -185,7 +189,21 @@ export async function installMemberFiles(ctx: Context, m: Member): Promise<{ ins
   await mustSucceed("push Claude settings",
     pushText(ctx, m.name, "/home/aiuser/.claude/settings.json", settingsFor(m), { uid: 0, gid: 0, mode: "644" }));
   await requireHookBlocks(ctx, m.name);
-  return { instructionsChanged: before !== text };
+  return { instructionsChanged: before !== text || envChanged };
+}
+
+// Le .env du rôle : poussé (uid 1001, mode 600) quand le membre en a un, retiré
+// sinon, pour qu'un rôle qui perd son `env` perde ses variables au `converge`
+// suivant. Rend vrai quand le fichier a changé : une session lancée ne le relit pas.
+async function installEnv(ctx: Context, m: Member, env: string | null): Promise<boolean> {
+  const before = await pullText(ctx, m.name, CONTAINER_ENV_PATH);
+  if (env === null) {
+    if (before === null) return false;
+    await mustSucceed("remove the .env", execAsAgentArgv(ctx, m.name, ["rm", "-f", CONTAINER_ENV_PATH]));
+    return true;
+  }
+  await mustSucceed("push the .env", pushText(ctx, m.name, CONTAINER_ENV_PATH, env, { uid: 1001, gid: 1001, mode: "600" }));
+  return before !== env;
 }
 
 // container/settings.json, plus `enabledPlugins` quand le rôle a des plugins.

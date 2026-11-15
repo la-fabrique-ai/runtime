@@ -12,6 +12,7 @@ export type Capability = (typeof CAPABILITIES)[number];
 export type RoleConfig = {
   count: number | null; capabilities: Capability[]; talkTo: string[]; strict: boolean;
   memory: string | null; cpu: number | null; plugins: string[];
+  env: string | null; // a dotenv file on the host, pushed to the role's containers
 };
 export type TeamConfig = {
   repo: string; roles: Record<string, RoleConfig>; prompts: string | null;
@@ -19,7 +20,7 @@ export type TeamConfig = {
 };
 export type PilotConfig = {
   capabilities: Capability[]; talkTo: string[]; strict: boolean; memory: string | null;
-  plugins: string[]; prompt: string | null;
+  plugins: string[]; prompt: string | null; env: string | null;
 };
 
 const TEAM_NAME = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
@@ -48,7 +49,7 @@ export function parseTeams(path: string, raw: unknown): Record<string, TeamConfi
     for (const [role, roleValue] of Object.entries(rolesRaw)) {
       const rat = `${at}.roles.${role}`;
       if (!ROLE_NAME.test(role)) throw invalid(rat, "a role name such as lead or dev ([a-z0-9], no dash)", role);
-      const r = fields(roleValue, rat, ["count", "capabilities", "talkTo", "strict", "memory", "cpu", "plugins"]);
+      const r = fields(roleValue, rat, ["count", "capabilities", "talkTo", "strict", "memory", "cpu", "plugins", "env"]);
       if (r.count !== undefined && r.count !== null &&
           (typeof r.count !== "number" || !Number.isInteger(r.count) || r.count < 1)) {
         throw invalid(`${rat}.count`, "a positive integer", r.count);
@@ -65,6 +66,7 @@ export function parseTeams(path: string, raw: unknown): Record<string, TeamConfi
         memory: memory(invalid, `${rat}.memory`, r.memory),
         cpu: (r.cpu as number | null | undefined) ?? null,
         plugins: plugins(invalid, `${rat}.plugins`, r.plugins),
+        env: envPath(invalid, `${rat}.env`, r.env),
       };
     }
     if (team.prompts !== undefined && team.prompts !== null && (typeof team.prompts !== "string" || team.prompts === "")) {
@@ -88,7 +90,7 @@ export function parseTeams(path: string, raw: unknown): Record<string, TeamConfi
 export function parsePilot(path: string, raw: unknown): PilotConfig | null {
   if (raw === undefined || raw === null) return null;
   const { invalid, fields } = configHelpers(path);
-  const p = fields(raw, "pilot", ["capabilities", "talkTo", "strict", "memory", "plugins", "prompt"]);
+  const p = fields(raw, "pilot", ["capabilities", "talkTo", "strict", "memory", "plugins", "prompt", "env"]);
   if (p.prompt !== undefined && p.prompt !== null && (typeof p.prompt !== "string" || p.prompt === "")) {
     throw invalid("pilot.prompt", "null or a file path", p.prompt);
   }
@@ -99,6 +101,7 @@ export function parsePilot(path: string, raw: unknown): PilotConfig | null {
     memory: memory(invalid, "pilot.memory", p.memory),
     plugins: plugins(invalid, "pilot.plugins", p.plugins),
     prompt: (p.prompt as string | null | undefined) ?? null,
+    env: envPath(invalid, "pilot.env", p.env),
   };
 }
 
@@ -124,6 +127,12 @@ function plugins(invalid: Invalid, key: string, v: unknown): string[] {
     throw invalid(key, "a list of plugin names such as name or name@marketplace", v);
   }
   return v as string[];
+}
+
+function envPath(invalid: Invalid, key: string, v: unknown): string | null {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== "string" || !(v.startsWith("/") || v.startsWith("~/"))) throw invalid(key, "null or an absolute path (or ~/…) to a dotenv file", v);
+  return v;
 }
 
 function bool(invalid: Invalid, key: string, v: unknown): boolean {

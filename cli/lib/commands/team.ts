@@ -4,6 +4,7 @@
 import type { Context } from "../context.ts";
 import { ForgeError } from "../context.ts";
 import { restartApiService } from "../api/access.ts";
+import { readEnvFile } from "../dotenv.ts";
 import { handedOutSecrets } from "./api.ts";
 import { findQuestion, inbox, Journal, journalPath, readEntries, waitingOn, type Question } from "../api/journal.ts";
 import { BODY_MAX, checkSummary, checkText, INSTRUCTION_MAX, REQUEST_MAX } from "../api/protocol.ts";
@@ -91,6 +92,8 @@ function requireTeam(cfg: ForgeConfig, team: string | undefined): string {
 async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined, opts: TeamOptions): Promise<number> {
   if (team !== undefined) requireTeam(cfg, team);
   const wanted = members(cfg).filter((m) => team === undefined || m.team === team);
+  // Un .env illisible, ouvert aux autres ou mal formé arrête tout, avant le premier container.
+  for (const m of wanted) if (m.env !== null) readEnvFile(m.env);
   const existing = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
   // Dites en dernier : stderr et stdout n'arrivent pas dans l'ordre par SSH, et
   // une NOTE au milieu des lignes du membre suivant se lit mal.
@@ -121,7 +124,7 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
       } else if (changed) {
         // Elle ne relit pas ses instructions, et la tuer perdrait la conversation
         // avec l'humain : forge le dit, l'humain choisit le moment.
-        notes.push(`NOTE: ${m.name}'s instructions changed, but its running session keeps the old ones. ` +
+        notes.push(`NOTE: ${m.name}'s instructions or environment changed, but its running session keeps the old ones. ` +
           "To restart it (the conversation is lost): stop its `agent` terminal in Herdr App (or `hc kill <the Pilot's machine>/agent`), " +
           "then run forge team up again.");
       }
