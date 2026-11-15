@@ -1,7 +1,8 @@
 ---
 # The watchdog reads the cgroups and /proc of the host and sends SIGKILL; it
 # configures nothing in Incus (the boundary rule: Ansible never configures the
-# inside of Incus, and forge never touches the host OS).
+# inside of Incus, and forge never touches the host OS). The host's memory
+# reserve (reserve.yml) is host OS: it lives here, next to what it backs up.
 - name: Check the watchdog's settings
   ansible.builtin.assert:
     that:
@@ -9,10 +10,17 @@
       - forge_memory_watchdog_seconds | int(0) > 0
       - forge_memory_watchdog_interval | float(0) > 0
       - forge_memory_watchdog_cgroup_prefix is match('^[A-Za-z0-9._-]+$')
+      - forge_memory_watchdog_container_prefix is match('^[a-z0-9-]+$')
+      - forge_memory_watchdog_reserve_system is match('^[1-9][0-9]*[KMGT]?$')
+      - forge_memory_watchdog_reserve_user is match('^[1-9][0-9]*[KMGT]?$')
+      - forge_memory_watchdog_oom_score_adjust | int(1) in range(-1000, 1)
     fail_msg: >-
       forge_memory_watchdog_threshold must be a percentage (1 to 100),
       forge_memory_watchdog_seconds and forge_memory_watchdog_interval positive
-      numbers, and forge_memory_watchdog_cgroup_prefix a cgroup name prefix.
+      numbers, forge_memory_watchdog_cgroup_prefix a cgroup name prefix,
+      forge_memory_watchdog_container_prefix a container name prefix, the
+      forge_memory_watchdog_reserve_* values a size such as 384M, and
+      forge_memory_watchdog_oom_score_adjust a number from -1000 to 0.
     quiet: true
 
 - name: Create the watchdog's directory
@@ -53,3 +61,6 @@
     enabled: true
     daemon_reload: "{{ forge_memory_watchdog_unit.changed }}"
     state: "{{ 'restarted' if (forge_memory_watchdog_script.changed or forge_memory_watchdog_unit.changed) else 'started' }}"
+
+- name: Keep the host's memory for the host
+  ansible.builtin.import_tasks: reserve.yml

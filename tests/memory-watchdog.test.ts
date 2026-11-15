@@ -12,6 +12,7 @@ let root: string;
 let clock: number;
 let killed: number[];
 let lines: string[];
+let notified: [string, number, string][];
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "forge-watchdog-"));
@@ -20,15 +21,19 @@ beforeEach(() => {
   clock = 0;
   killed = [];
   lines = [];
+  notified = [];
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 const config = (extra: Partial<Config> = {}): Config => ({
-  cgroupRoot: join(root, "cgroup"), prefix: "lxc.payload.agent-forge_", procRoot: join(root, "proc"),
+  cgroupRoot: join(root, "cgroup"), prefix: "lxc.payload.agent-forge_", containerPrefix: "agent-", procRoot: join(root, "proc"),
   threshold: 20, seconds: 15, intervalMs: 1000, uid: ME, ...extra,
 });
 const dog = (extra: Partial<Config> = {}) =>
-  createWatchdog(config(extra), { now: () => clock, kill: (pid) => { killed.push(pid); }, log: (l) => lines.push(l) });
+  createWatchdog(config(extra), {
+    now: () => clock, kill: (pid) => { killed.push(pid); }, log: (l) => lines.push(l),
+    notify: (container, v) => notified.push([container, v.pid, v.name]),
+  });
 
 const PSI = (full: number) =>
   `some avg10=${full + 4} avg60=1.00 avg300=0.10 total=1\nfull avg10=${full.toFixed(2)} avg60=1.00 avg300=0.10 total=1\n`;
@@ -154,7 +159,7 @@ test("after a kill, a second one waits for the threshold to hold again", () => {
 
 test("only cgroups of the watched prefix are looked at, each on its own", () => {
   cgroup(C, 40, { "": [1] });
-  cgroup("lxc.payload.agent-forge_other", 2, { "": [2] });
+  cgroup("lxc.payload.agent-forge_agent-other", 2, { "": [2] });
   cgroup("lxc.payload.forge-selftest_x", 90, { "": [3] });
   cgroup("user.slice", 90, { "": [4] });
   proc(1, { rssKib: 10 }); proc(2, { rssKib: 20 }); proc(3, { rssKib: 30 }); proc(4, { rssKib: 40 });
@@ -163,20 +168,36 @@ test("only cgroups of the watched prefix are looked at, each on its own", () => 
   assert.deepEqual(killed, [1]);
 });
 
+test("forge-proxy, in the same project, is not watched, however long it is under pressure", () => {
+  cgroup("lxc.payload.agent-forge_forge-proxy", 95, { "": [9] });
+  proc(9, { name: "squid", rssKib: 900000 });
+  const d = dog();
+  run(d, 0, 60);
+  assert.deepEqual(killed, []);
+  assert.deepEqual(lines, []);
+});
+
+test("a kill is told to the container's session, by container name and with the process's name as it is", () => {
+  cgroup(C, 40, { "": [1] });
+  proc(1, { name: "eslint", rssKib: 10 });
+  run(dog(), 0, 15);
+  assert.deepEqual(notified, [["agent-acme-widgets", 1, "eslint"]]);
+});
 test("a kill that fails is logged and does not stop the watchdog", () => {
   cgroup(C, 40, { "": [1] });
   proc(1, { rssKib: 10 });
   const d = createWatchdog(config(), {
-    now: () => clock, log: (l) => lines.push(l),
+    now: () => clock, log: (l) => lines.push(l), notify: (c, v) => notified.push([c, v.pid, v.name]),
     kill: () => { throw new Error("EPERM: operation not permitted"); },
   });
   run(d, 0, 15);
   assert.match(lines[0], /agent-acme-widgets: could not kill pid 1 \(node\): EPERM/);
+  assert.deepEqual(notified, [], "nothing was killed: nobody is told");
 });
 
 test("threshold, duration and prefix come from the environment, with defaults", () => {
   assert.deepEqual(configFromEnv({}, 7), {
-    cgroupRoot: "/sys/fs/cgroup", prefix: "lxc.payload.agent-forge_", procRoot: "/proc",
+    cgroupRoot: "/sys/fs/cgroup", prefix: "lxc.payload.agent-forge_", containerPrefix: "agent-", procRoot: "/proc",
     threshold: 20, seconds: 15, intervalMs: 1000, uid: 7,
   });
   const c = configFromEnv({ FORGE_WATCHDOG_THRESHOLD: "35", FORGE_WATCHDOG_SECONDS: "30", FORGE_WATCHDOG_INTERVAL: "2" }, 7);

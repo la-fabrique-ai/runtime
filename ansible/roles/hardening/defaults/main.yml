@@ -14,6 +14,15 @@ hardening_sysctl_overwrite:
   # Ubuntu's default. devsec's 2, with sys_ptrace dropped from containers,
   # leaves no strace or gdb at all inside containers.
   kernel.yama.ptrace_scope: 1
+# devsec mounts /proc with hidepid=2, which hides every process a user may not
+# ptrace: a container's processes (another uid, not dumpable) among them. The
+# kernel exempts the members of one group from it, `gid=` on the mount; the
+# memory watchdog's unit is the only member (SupplementaryGroups=), so that it
+# sees the containers' processes without being able to trace anything. The
+# forge user is not a member: its sessions stay under hidepid.
+hardening_proc_group: forge-procview
+# devsec's own default (proc_mnt_options), to which the group is added.
+hardening_proc_options: rw,nosuid,nodev,noexec,relatime
 # Nobody but the admin and the forge user logs in.
 hardening_ssh_allow_users: "{{ ([forge_admin_user] + forge_users | map(attribute='name') | list) | join(' ') }}"
 # Agent forwarding only for the forge user, for host-side git clone and fetch.

@@ -1,0 +1,69 @@
+---
+# Keeps the host's memory for the host (#143). Host OS only: systemd slices
+# and units, nothing inside Incus.
+- name: Create the drop-in directories
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}.d"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  loop: "{{ ['system.slice', 'user.slice'] + forge_memory_watchdog_oom_services }}"
+
+- name: Keep memory for system.slice and user.slice
+  ansible.builtin.template:
+    src: slice-memory-min.conf.j2
+    dest: "/etc/systemd/system/{{ item.slice }}.d/50-agent-forge-memory.conf"
+    mode: "0644"
+    owner: root
+    group: root
+  vars:
+    reserve: "{{ item.value }}"
+  loop:
+    - {slice: system.slice, value: "{{ forge_memory_watchdog_reserve_system }}"}
+    - {slice: user.slice, value: "{{ forge_memory_watchdog_reserve_user }}"}
+  register: forge_memory_watchdog_slices
+
+- name: Lower the OOM score of sshd and Incus
+  ansible.builtin.template:
+    src: oom-score.conf.j2
+    dest: "/etc/systemd/system/{{ item }}.d/50-agent-forge-oom.conf"
+    mode: "0644"
+    owner: root
+    group: root
+  loop: "{{ forge_memory_watchdog_oom_services }}"
+  register: forge_memory_watchdog_oom
+
+# daemon-reload applies a slice's MemoryMin to its running cgroup; a service's
+# OOMScoreAdjust is only read when it starts, which is done for the running
+# daemons below rather than by restarting sshd and Incus in the middle of a run.
+- name: Reload systemd's units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: forge_memory_watchdog_slices.changed or forge_memory_watchdog_oom.changed
+
+# A read-only query: the systemd module cannot read a unit's main process.
+- name: Read the daemons' main processes  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    cmd: "systemctl show --property=MainPID --value {{ item }}"
+  loop: "{{ forge_memory_watchdog_oom_services }}"
+  register: forge_memory_watchdog_mainpids
+  changed_when: false
+
+# At the next start (a reboot included) the unit's setting applies; this is the
+# running process's, until then. A daemon that is not running (socket
+# activation) has no process: 0.
+- name: Give the running daemons the same OOM score
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      pid="{{ item.stdout | trim }}"
+      test "$pid" -gt 0 || exit 0
+      test "$(cat /proc/$pid/oom_score_adj)" != "{{ forge_memory_watchdog_oom_score_adjust }}" || exit 0
+      echo "{{ forge_memory_watchdog_oom_score_adjust }}" > /proc/$pid/oom_score_adj
+      echo changed
+  loop: "{{ forge_memory_watchdog_mainpids.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: forge_memory_watchdog_live_oom
+  changed_when: "'changed' in forge_memory_watchdog_live_oom.stdout"

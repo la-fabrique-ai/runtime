@@ -24,6 +24,70 @@
     that:
       - verify_wd_ps.stdout | trim == forge_users[0].name
 
+- name: Read the watchdog's capabilities and groups
+  ansible.builtin.command:
+    cmd: "grep -E '^(CapEff|CapAmb|Groups):' /proc/{{ verify_wd_unit.stdout | regex_search('MainPID=(\\d+)', '\\1') | first }}/status"
+  register: verify_wd_status
+  changed_when: false
+
+- name: Read the group exempt from hidepid
+  ansible.builtin.command:
+    cmd: getent group {{ hardening_proc_group | default('forge-procview') }}
+  register: verify_wd_group
+  changed_when: false
+
+# No CAP_SYS_PTRACE (nor any capability): /proc is seen through the group the
+# mount exempts from hidepid.
+- name: Check it holds no capability, and is in the group
+  ansible.builtin.assert:
+    that:
+      - verify_wd_status.stdout is search('CapEff:\\s+0000000000000000')
+      - verify_wd_status.stdout is search('CapAmb:\\s+0000000000000000')
+      - verify_wd_status.stdout is search('Groups:.*\\b' ~ verify_wd_group.stdout.split(':')[2] ~ '\\b')
+
+# The host keeps its memory: MemoryMin on the two slices, in the cgroup tree and
+# not only in the unit files, and a low OOM score on sshd and Incus, in the
+# running processes and in the units (the units are what a reboot applies).
+- name: Read the slices' memory.min
+  ansible.builtin.command:
+    cmd: "cat /sys/fs/cgroup/{{ item }}/memory.min"
+  loop: [system.slice, user.slice]
+  register: verify_wd_min
+  changed_when: false
+
+- name: Check the slices are protected as configured
+  ansible.builtin.assert:
+    that:
+      - verify_wd_min.results[0].stdout | int == (forge_memory_watchdog_reserve_system | default('384M') | human_to_bytes)
+      - verify_wd_min.results[1].stdout | int == (forge_memory_watchdog_reserve_user | default('256M') | human_to_bytes)
+
+# A read-only query: the systemd module has no way to read these properties.
+- name: Read the daemons' OOM score and main process  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    cmd: systemctl show --property=OOMScoreAdjust,MainPID {{ item }}
+  loop: "{{ forge_memory_watchdog_oom_services | default(['ssh.service', 'incus.service']) }}"
+  register: verify_wd_oom
+  changed_when: false
+
+- name: Read the running daemons' OOM score
+  ansible.builtin.command:
+    cmd: "cat /proc/{{ item.stdout | regex_search('MainPID=(\\d+)', '\\1') | first }}/oom_score_adj"
+  loop: "{{ verify_wd_oom.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: verify_wd_oom_live
+  changed_when: false
+
+- name: Check the daemons are the last the kernel kills
+  ansible.builtin.assert:
+    that:
+      - "'OOMScoreAdjust=' ~ forge_memory_watchdog_oom_score_adjust | default(-900) in item.stdout.split('\n')"
+      - verify_wd_oom_live.results[ansible_loop.index0].stdout | int == forge_memory_watchdog_oom_score_adjust | default(-900)
+  loop: "{{ verify_wd_oom.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+    extended: true
+
 - name: Read the watchdog's journal
   ansible.builtin.command:
     cmd: journalctl -u forge-memory-watchdog --no-pager -o cat
@@ -81,7 +145,10 @@
                   chunks.append(bytearray(b"\x01") * (4 * 1024 * 1024))
                   time.sleep(0.02)
 
-        - name: Create the test project, its container and its process
+        # Two containers under the same pressure: a team member (agent-wdtest)
+        # and, in the same project, forge-proxy, which the watchdog must not
+        # watch (killing its squid would cut every strict container off).
+        - name: Create the test project, its containers and their processes
           ansible.builtin.command:
             cmd: runuser -u {{ forge_users[0].name }} -- bash -s
             chdir: /
@@ -93,20 +160,22 @@
               # The forge user's ids, mapped to aiuser's 1001 as forge's profile
               # does: the container's aiuser is the forge user on the host.
               IDMAP="uid $(id -u) 1001"$'\n'"gid $(id -g) 1001"
-              incus launch images:ubuntu/26.04 wdtest --project agent-forge -s default \
-                -c limits.memory=160MiB -c limits.memory.enforce=soft -c limits.memory.swap=false \
-                -c raw.idmap="$IDMAP"
-              incus exec wdtest --project agent-forge -- cat /proc/1/comm --wait || true
-              incus exec wdtest --project agent-forge -- useradd -u 1001 -m aiuser
-              incus file push --mode 0644 /tmp/verify-grow.py wdtest/tmp/grow.py --project agent-forge
-              incus exec wdtest --project agent-forge -- su -s /bin/sh aiuser -c 'nohup python3 /tmp/grow.py >/dev/null 2>&1 &'
+              for c in agent-wdtest forge-proxy; do
+                incus launch images:ubuntu/26.04 "$c" --project agent-forge -s default \
+                  -c limits.memory=160MiB -c limits.memory.enforce=soft -c limits.memory.swap=false \
+                  -c raw.idmap="$IDMAP"
+                incus exec "$c" --project agent-forge -- cat /proc/1/comm --wait || true
+                incus exec "$c" --project agent-forge -- useradd -u 1001 -m aiuser
+                incus file push --mode 0644 /tmp/verify-grow.py "$c"/tmp/grow.py --project agent-forge
+                incus exec "$c" --project agent-forge -- su -s /bin/sh aiuser -c 'nohup python3 /tmp/grow.py >/dev/null 2>&1 &'
+              done
           changed_when: true
 
         - name: Wait for the watchdog to kill it
           ansible.builtin.command:
             cmd: journalctl -u forge-memory-watchdog --no-pager -o cat --since "-10min"
           register: verify_wd_kill
-          until: "'wdtest: killed pid' in verify_wd_kill.stdout"
+          until: "'agent-wdtest: killed pid' in verify_wd_kill.stdout"
           retries: 40
           delay: 3
           changed_when: false
@@ -117,7 +186,7 @@
               - verify_wd_kill.stdout is search(verify_wd_killed)
           vars:
             verify_wd_killed: >-
-              wdtest: killed pid \d+ \(python3, \d+ MiB RSS\), the biggest of its
+              agent-wdtest: killed pid \d+ \(python3, \d+ MiB RSS\), the biggest of its
               processes: memory.pressure full avg10=[\d.]+ has been
               {{ forge_memory_watchdog_threshold | default(20) }} or above for \d+ s
 
@@ -130,8 +199,8 @@
             chdir: /
             stdin: |
               set -e
-              timeout -k 5 60 incus exec wdtest --project agent-forge -- true </dev/null
-              ! timeout -k 5 60 incus exec wdtest --project agent-forge -- pgrep -f grow.py </dev/null
+              timeout -k 5 60 incus exec agent-wdtest --project agent-forge -- true </dev/null
+              ! timeout -k 5 60 incus exec agent-wdtest --project agent-forge -- pgrep -f grow.py </dev/null
           changed_when: false
 
         - name: Check nothing else was killed
@@ -140,8 +209,35 @@
             chdir: /
             stdin: |
               set -e
-              test "$(timeout -k 5 60 incus exec wdtest --project agent-forge -- cat /proc/1/comm </dev/null)" = systemd
+              test "$(timeout -k 5 60 incus exec agent-wdtest --project agent-forge -- cat /proc/1/comm </dev/null)" = systemd
           changed_when: false
+
+        # forge-proxy has stalled for as long as the team member did, and the
+        # threshold's duration has passed twice over: had it been watched, its
+        # process would be dead. It is still there, and the journal never names it.
+        - name: Give a watched container's time to be killed
+          ansible.builtin.pause:
+            seconds: "{{ (forge_memory_watchdog_seconds | default(15) | int) + 10 }}"
+
+        - name: Check forge-proxy is not watched
+          ansible.builtin.command:
+            cmd: runuser -u {{ forge_users[0].name }} -- bash -s
+            chdir: /
+            stdin: |
+              set -e
+              timeout -k 5 120 incus exec forge-proxy --project agent-forge -- pgrep -f grow.py </dev/null
+          changed_when: false
+
+        - name: Read the watchdog's journal again
+          ansible.builtin.command:
+            cmd: journalctl -u forge-memory-watchdog --no-pager -o cat --since "-10min"
+          register: verify_wd_after
+          changed_when: false
+
+        - name: Check the journal never names forge-proxy
+          ansible.builtin.assert:
+            that:
+              - "'forge-proxy' not in verify_wd_after.stdout"
       always:
         - name: Remove the test container and project
           ansible.builtin.command:
@@ -149,7 +245,8 @@
             chdir: /
             stdin: |
               incus() { command incus "$@" </dev/null; }
-              incus delete -f wdtest --project agent-forge || true
+              incus delete -f agent-wdtest --project agent-forge || true
+              incus delete -f forge-proxy --project agent-forge || true
               incus project delete agent-forge
           changed_when: true
           failed_when: false

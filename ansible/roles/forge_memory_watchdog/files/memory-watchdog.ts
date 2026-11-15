@@ -10,10 +10,14 @@
 // This runs on the host, as the forge user, and only reads the cgroup tree
 // and /proc and sends SIGKILL: it configures nothing in Incus. With forge's
 // raw.idmap, the processes of the container's aiuser are the forge user's own
-// on the host, so no privilege is needed to kill them.
+// on the host, so no privilege is needed to kill them. It watches the team
+// containers (agent-*) only, never forge-proxy. After a kill it has `forge
+// notify` tell the agent's session; that command, which only the host can run,
+// writes the line and cleans the process name, which comes from the container.
 //
 // Settings come from the environment (the unit sets them from the Ansible
 // role's variables). What it does goes to stdout, which is the journal.
+import { execFile } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +27,9 @@ export type Config = {
   // cgroup of container <c> in project <p> "lxc.payload.<p>_<c>".
   cgroupRoot: string;
   prefix: string;
+  // The start of the container names in that project: the team containers are
+  // all named agent-<team>-… (and agent-pilot); forge-proxy is not one.
+  containerPrefix: string;
   procRoot: string;
   // `full avg10`, in percent, to reach and hold for `seconds`.
   threshold: number;
@@ -101,7 +108,11 @@ export function pickVictim(procs: Proc[], uid: number): Proc | null {
 
 const gib = (kib: number) => kib >= 1048576 ? `${(kib / 1048576).toFixed(1)} GiB` : `${Math.round(kib / 1024)} MiB`;
 
-export type Deps = { now: () => number; kill: (pid: number) => void; log: (line: string) => void };
+export type Deps = {
+  now: () => number; kill: (pid: number) => void; log: (line: string) => void;
+  // Tells the container's session about the kill; it does not wait.
+  notify: (container: string, victim: Proc) => void;
+};
 
 export function createWatchdog(config: Config, deps: Deps) {
   // Since when each cgroup has been at or above the threshold, without a break.
@@ -113,7 +124,7 @@ export function createWatchdog(config: Config, deps: Deps) {
     let names: string[] = [];
     try {
       names = readdirSync(config.cgroupRoot, { withFileTypes: true })
-        .filter((e) => e.isDirectory() && e.name.startsWith(config.prefix)).map((e) => e.name);
+        .filter((e) => e.isDirectory() && e.name.startsWith(config.prefix + config.containerPrefix)).map((e) => e.name);
     } catch (e) {
       deps.log(`cannot list ${config.cgroupRoot}: ${(e as Error).message}`);
     }
@@ -148,6 +159,7 @@ export function createWatchdog(config: Config, deps: Deps) {
     try {
       deps.kill(victim.pid);
       deps.log(`${container}: killed pid ${victim.pid} (${victim.name}, ${gib(victim.rssKib)} RSS), the biggest of its processes: ${why}`);
+      deps.notify(container, victim);
     } catch (e) {
       deps.log(`${container}: could not kill pid ${victim.pid} (${victim.name}): ${(e as Error).message}`);
     }
@@ -171,6 +183,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv, uid: number): Config {
   return {
     cgroupRoot: env.FORGE_WATCHDOG_CGROUP_ROOT || "/sys/fs/cgroup",
     prefix: env.FORGE_WATCHDOG_PREFIX || "lxc.payload.agent-forge_",
+    containerPrefix: env.FORGE_WATCHDOG_CONTAINER_PREFIX || "agent-",
     procRoot: env.FORGE_WATCHDOG_PROC_ROOT || "/proc",
     threshold: number(env, "FORGE_WATCHDOG_THRESHOLD", 20),
     seconds: number(env, "FORGE_WATCHDOG_SECONDS", 15),
@@ -182,8 +195,15 @@ export function configFromEnv(env: NodeJS.ProcessEnv, uid: number): Config {
 async function main(): Promise<void> {
   const config = configFromEnv(process.env, process.getuid!());
   const log = (line: string) => console.log(line);
-  const dog = createWatchdog(config, { now: Date.now, kill: (pid) => process.kill(pid, "SIGKILL"), log });
-  log(`watching ${config.cgroupRoot}/${config.prefix}*: kills the biggest process when memory.pressure full avg10 ` +
+  const forge = process.env.FORGE_WATCHDOG_FORGE || "forge";
+  // argv, never a shell. The name goes in one argument, `--name=`, so that a
+  // name which looks like an option is still a value. Its failure is only logged.
+  const notify = (container: string, v: Proc) => execFile(forge,
+    ["notify", container, "memory-kill", "--pid", String(v.pid), "--rss-kib", String(v.rssKib), `--name=${v.name}`],
+    { timeout: 60_000 },
+    (err, _out, stderr) => { if (err) log(`${container}: could not tell its session: ${(stderr || err.message).trim().split("\n")[0]}`); });
+  const dog = createWatchdog(config, { now: Date.now, kill: (pid) => process.kill(pid, "SIGKILL"), log, notify });
+  log(`watching ${config.cgroupRoot}/${config.prefix}${config.containerPrefix}*: kills the biggest process when memory.pressure full avg10 ` +
     `stays at ${config.threshold} or above for ${config.seconds} s`);
   for (;;) {
     dog.tick();
