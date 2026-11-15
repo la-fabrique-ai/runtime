@@ -9,7 +9,7 @@ import { awaitLiveSession, deliverMessage, NO_SESSION, sessionState } from "../h
 import { assign, busyState, NO_BRANCH, release } from "../tasks.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { memberNamed, type Member } from "../team.ts";
-import { Journal, waitingOn, type Entry } from "./journal.ts";
+import { Journal, waitingOn, type Entry, type NewEntry } from "./journal.ts";
 import { parseRequest, type ApiRequest } from "./protocol.ts";
 
 export type ApiDeps = { ctx: Context; cfg: ForgeConfig; journal: Journal; secrets: readonly string[]; now: () => Date };
@@ -53,7 +53,7 @@ export async function handleRequest(d: ApiDeps, caller: Member, line: string): P
   }
 }
 
-function entryFields(caller: Member, req: ApiRequest | null, outcome: Entry["outcome"], error: string | null): Omit<Entry, "id" | "time"> {
+function entryFields(caller: Member, req: ApiRequest | null, outcome: Entry["outcome"], error: string | null): NewEntry {
   return {
     caller: caller.name, op: req?.op ?? null,
     to: req !== null && "to" in req ? req.to : null,
@@ -112,6 +112,9 @@ async function run(d: ApiDeps, caller: Member, req: ApiRequest, reserve: (id: nu
       needCapability("ask-human");
       return { reply: (id) => ({ ok: true, id }) };
     case "status": {
+      // `forge team answer` et `forge notify` écrivent au journal sans passer par
+      // ce service : sans cette relecture, une réponse n'effacerait pas `waiting-on=human`.
+      d.journal.refresh();
       // `you` : un agent ne sait de lui-même que ce qu'on lui dit.
       const you = { name: caller.name, role: caller.role, capabilities: caller.capabilities, talkTo: caller.talkTo };
       const team: Record<string, unknown>[] = [];
