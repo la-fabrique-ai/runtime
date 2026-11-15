@@ -243,14 +243,14 @@ example, a pilot, a lead, two developers and a reviewer on one repository:
 
 ```json
 {
-  "pilot": { "capabilities": ["assign"], "talkTo": ["web"] },
+  "pilot": { "memory": "1GiB", "capabilities": ["assign"], "talkTo": ["web"] },
   "teams": {
     "web": {
       "repo": "acme/widgets",
       "roles": {
-        "lead": { "capabilities": ["repo", "read-team", "assign", "ask-human"], "talkTo": ["pilot", "team"] },
-        "dev": { "count": 2, "memory": "8GiB", "capabilities": ["repo", "publish"], "talkTo": ["lead"] },
-        "reviewer": { "capabilities": ["repo", "read-team"], "talkTo": ["lead"] }
+        "lead": { "memory": "1GiB", "capabilities": ["repo", "read-team", "assign", "ask-human"], "talkTo": ["pilot", "team"] },
+        "dev": { "count": 2, "memory": "2GiB", "capabilities": ["repo", "publish"], "talkTo": ["lead"] },
+        "reviewer": { "memory": "1GiB", "capabilities": ["repo", "read-team"], "talkTo": ["lead"] }
       }
     }
   }
@@ -258,7 +258,11 @@ example, a pilot, a lead, two developers and a reviewer on one repository:
 ```
 
 That is five containers: `agent-pilot`, `agent-web-lead`, `agent-web-dev-1`,
-`agent-web-dev-2` and `agent-web-reviewer`. Create them from your machine:
+`agent-web-dev-2` and `agent-web-reviewer`. Every role has a `memory` because a
+role without one gets the profile's 75% of the host's memory, and a few of
+those add up to more than the host has: these 7 GiB fit a VM of 8 GiB minus
+what the host keeps for itself (640 MiB by default), and `forge team converge`
+warns when a team does not. Create them from your machine:
 
 ```bash
 forge team up
