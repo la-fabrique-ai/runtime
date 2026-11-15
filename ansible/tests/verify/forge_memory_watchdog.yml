@@ -220,14 +220,15 @@
           ansible.builtin.pause:
             seconds: "{{ (forge_memory_watchdog_seconds | default(15) | int) + 10 }}"
 
+        # Seen from the host: a stalled container does not answer incus exec,
+        # which is what an unwatched one does. Only forge-proxy's process is
+        # left, the team member's was killed.
         - name: Check forge-proxy is not watched
           ansible.builtin.command:
-            cmd: runuser -u {{ forge_users[0].name }} -- bash -s
-            chdir: /
-            stdin: |
-              set -e
-              timeout -k 5 120 incus exec forge-proxy --project agent-forge -- pgrep -f grow.py </dev/null
+            cmd: pgrep -fc "python3 /tmp/grow.py"
+          register: verify_wd_left
           changed_when: false
+          failed_when: verify_wd_left.stdout | int != 1
 
         - name: Read the watchdog's journal again
           ansible.builtin.command:
