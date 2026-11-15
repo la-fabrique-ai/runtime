@@ -6,7 +6,7 @@ import { configHelpers, SIZE } from "./config-fields.ts";
 import { validateRepo } from "./validate.ts";
 import { ForgeError } from "./context.ts";
 
-export const CAPABILITIES = ["repo", "publish", "read-team", "assign", "ask-human", "tickets", "services"] as const;
+export const CAPABILITIES = ["repo", "publish", "read-team", "assign", "ask-human", "services"] as const;
 export type Capability = (typeof CAPABILITIES)[number];
 
 export type RoleConfig = {
@@ -109,6 +109,10 @@ type Invalid = (key: string, expected: string, got: unknown) => ForgeError;
 
 function capabilities(invalid: Invalid, key: string, v: unknown): Capability[] {
   if (v === undefined) return [];
+  // forge knows nothing of ticket managers: what a template needs goes in the role's `env`.
+  if (Array.isArray(v) && v.includes("tickets")) {
+    throw invalid(key, 'no "tickets" capability: forge knows nothing of ticket managers; put a template\'s token in the role\'s `env` (a .env file)', v);
+  }
   const ok = Array.isArray(v) && v.every((c) => (CAPABILITIES as readonly unknown[]).includes(c)) && new Set(v).size === v.length;
   if (!ok) throw invalid(key, `a list of distinct capabilities among ${CAPABILITIES.join(", ")}`, v);
   return v as Capability[];

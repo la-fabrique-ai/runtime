@@ -295,8 +295,9 @@ A role's **capabilities** decide what its containers get:
   to read and compare;
 - `assign`, `ask-human`: what the agent may ask of the team through
   [`forge-team`](#agents-talk-to-each-other);
-- `tickets`, `services`: accepted and not acted on. forge knows nothing of ticket
-  managers: a token a template's roles need goes in the role's
+- `services`: accepted and not acted on yet. There is no `tickets` capability
+  (a config that names it is refused): forge knows nothing of ticket managers, and
+  a token a template's roles need goes in the role's
   [`.env`](#a-role-has-its-own-env).
 
 Other role settings: `count`, `talkTo`, `strict` (the container's egress is
@@ -674,7 +675,7 @@ Both files live on the host and are optional; `forge setup` reads them.
     single dashes, a role name lowercase letters and digits; a container is
     `agent-<team>-<role>` (with `-<n>` for a role with `count`), 63 characters at
     most. The capabilities are `repo`, `publish`, `read-team`, `assign`,
-    `ask-human`, `tickets` and `services`; a role's `talkTo` names roles of its
+    `ask-human` and `services`; a role's `talkTo` names roles of its
     team, `team` or `pilot` (the pilot's names teams). `forge team converge`
     never deletes a container: lowering a `count` or removing a role leaves the
     extra containers, reported, for you to delete.

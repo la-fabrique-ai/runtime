@@ -69,3 +69,7 @@ test("a role and the pilot may name a .env file, absolute or under ~", () => {
   assert.equal(cfg.pilot!.env, "~/pilot.env");
   rejects(web({ lead: { env: "relative.env" } }), /roles\.lead\.env/);
 });
+
+test("the tickets capability is refused, with a pointer to env", () => {
+  rejects(web({ lead: { capabilities: ["repo", "tickets"] } }), /capabilities.*tickets.*`env`/);
+});
