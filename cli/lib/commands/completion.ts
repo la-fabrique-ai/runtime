@@ -51,7 +51,7 @@ export function completionScript(forgeBin: string): string {
       ;;
     image)      [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=($(compgen -W "build" -- "$cur")) ;;
     api)        [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=($(compgen -W "serve" -- "$cur")) ;;
-    team)       [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=($(compgen -W "converge assign release status sync" -- "$cur")) ;;
+    team)       [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=($(compgen -W "converge assign release answer status sync watch inbox" -- "$cur")) ;;
     completion) [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=($(compgen -W "bash repos" -- "$cur")) ;;
   esac
   return 0

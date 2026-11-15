@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
@@ -270,4 +270,61 @@ test("converge counts a role's own limit before the profile's, and reads the res
   const tight = fakeContext({ incus: fake, rules: [...RULES, reserve] });
   await cmdTeam(tight, ["converge"], { hostMemory: 2.5 * GIB });
   assert.ok(tight.err_lines.some((l) => l.includes("add up to 2.0 GiB, more than the 1.5 GiB")), tight.err_lines.join("\n"));
+});
+
+// `forge team answer` : l'humain répond à une question du Lead.
+const LIVE: ExecRule = { match: "-- hc get agent", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}' };
+const SENT: ExecRule = { match: "hc send", stdout: '{"turn":3,"status":"working","started":true}' };
+
+function answerSetup(session: ExecRule = LIVE) {
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+    teams: { web: { repo: "o/web", roles: { lead: { capabilities: ["repo", "ask-human"] } } } },
+  }));
+  writeJournal(ASK);
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", lead, { status: "Running" });
+  const ctx = fakeContext({ incus: fake, rules: [...RULES, session, SENT] });
+  const typed = () => ctx.calls.filter((c) => c.includes("send")).map((c) => c.at(-1));
+  const last = () => JSON.parse(readFileSync(join(home, ".local", "share", "agent-forge", "api", "journal.jsonl"), "utf8").trim().split("\n").at(-1)!);
+  return { fake, ctx, typed, last };
+}
+const answer = (o: object) => async () => JSON.stringify(o);
+
+test("answer types the summary to a live session, records it and closes the question; a second one is refused", async () => {
+  const { ctx, typed, last } = answerSetup();
+  assert.equal(await cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Garde le français" }) }), 0);
+  assert.deepEqual(typed(), ["[forge] answer 7 from human: Garde le français"]);
+  assert.deepEqual(ctx.out_lines, [`Answered #7 (delivered to ${lead}).`]);
+  const e = last();
+  assert.deepEqual([e.id, e.caller, e.op, e.to, e.question, e.summary, e.outcome, e.error], [0, "human", "answer", lead, 7, "Garde le français", "ok", null]);
+  await assert.rejects(() => cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Encore" }) }), /already answered/);
+  await assert.rejects(() => cmdTeam(ctx, ["answer", "99"], { stdin: answer({ summary: "Non" }) }), /no question 99/);
+  assert.equal(typed().length, 1);
+});
+
+test("an answer's body goes to a file the typed line names, byte for byte", async () => {
+  const { fake, ctx, typed } = answerSetup();
+  await cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Voir le détail", body: "x\u001b[201~" }) });
+  assert.equal(fake.files.get(`agent-forge/${lead}/home/aiuser/.forge/messages/a7.md`)!.content, "x\u001b[201~");
+  assert.equal(typed()[0], "[forge] answer 7 from human: Voir le détail (detail: /home/aiuser/.forge/messages/a7.md)");
+});
+
+for (const [state, rule] of [["none", { match: "-- hc get agent", code: 1 }], ["lost", { match: "-- hc get agent", stdout: '{"argv":["/bin/bash"],"keep":true,"state":"live","status":null}' }]] as const) {
+  test(`an answer to a session in state ${state} types nothing, is recorded, closes the question and says so`, async () => {
+    const { ctx, typed, last } = answerSetup(rule);
+    assert.equal(await cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Oui" }) }), 0);
+    assert.deepEqual(typed(), []);
+    assert.equal(last().error, `not delivered: ${lead} has no live session`);
+    assert.match(ctx.out_lines[0], /has no live session, the answer is recorded but not delivered/);
+    await assert.rejects(() => cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Oui" }) }), /already answered/);
+  });
+}
+
+test("a summary the API would refuse and a body holding the Claude token are refused before anything is recorded or typed", async () => {
+  const { ctx, typed } = answerSetup();
+  const before = readFileSync(join(home, ".local", "share", "agent-forge", "api", "journal.jsonl"), "utf8");
+  await assert.rejects(() => cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "voir @x" }) }), /not allowed in a summary/);
+  await assert.rejects(() => cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Oui", body: "le token tok-test" }) }), /secret/);
+  assert.deepEqual(typed(), []);
+  assert.equal(readFileSync(join(home, ".local", "share", "agent-forge", "api", "journal.jsonl"), "utf8"), before);
 });

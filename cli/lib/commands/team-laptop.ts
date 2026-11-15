@@ -3,6 +3,7 @@
 // container of the teams as a machine in Herdr App.
 import type { Context, ExecResult } from "../context.ts";
 import { ForgeError } from "../context.ts";
+import { BODY_MAX } from "../api/protocol.ts";
 import { checkLocalHc } from "../hc.ts";
 import { syncMachines } from "../laptop/machines.ts";
 import { remoteAttachForwarding, remoteExec } from "../laptop/remote.ts";
@@ -15,6 +16,36 @@ const USAGE = `Usage: forge team up [<team>] [--host <name>]
        forge team sync <team> [--host <name>]`;
 
 const MAX_INSTRUCTION = 64 * 1024;
+
+// forge answer <question id> "<summary>" [--host <name>] : the human's answer to
+// an agent's question. The text never goes into the host's argv: the host's
+// `forge team answer` reads {"summary", "body"?} on stdin, like assign does.
+// The body is read from stdin when it is not a terminal.
+export async function cmdAnswer(
+  ctx: Context, id: string | undefined, summary: string | undefined,
+  opts: { host?: string; body?: () => Promise<string | null> } = {},
+): Promise<number> {
+  if (id === undefined || !/^[0-9]{1,15}$/.test(id) || summary === undefined) {
+    throw new ForgeError('Usage: forge answer <question id> "<summary>" [--host <name>]   (the body is read from stdin when it is piped)');
+  }
+  const body = await (opts.body ?? readBody)();
+  const host = await selectHost(ctx, opts.host);
+  const payload = JSON.stringify(body === null ? { summary } : { summary, body });
+  return relayed(ctx, await remoteExec(ctx, host, ["forge", "team", "answer", id], payload));
+}
+
+async function readBody(): Promise<string | null> {
+  if (process.stdin.isTTY) return null;
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of process.stdin) {
+    size += (chunk as Buffer).length;
+    if (size > BODY_MAX) throw new ForgeError(`the body is longer than ${BODY_MAX} bytes: put it in a file of the agent's branch and send its path`);
+    chunks.push(chunk as Buffer);
+  }
+  const text = Buffer.concat(chunks).toString("utf8");
+  return text.trim() === "" ? null : text;
+}
 
 export type TeamLaptopOptions = { host?: string; json?: boolean; quick?: boolean; stdin?: () => Promise<string> };
 

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
-import { cmdTeamLaptop } from "../cli/lib/commands/team-laptop.ts";
+import { cmdAnswer, cmdTeamLaptop } from "../cli/lib/commands/team-laptop.ts";
 import { remoteAttachForwarding } from "../cli/lib/laptop/remote.ts";
 import { viaCommand } from "../cli/lib/laptop/machines.ts";
 import { saveHost, type LaptopHost } from "../cli/lib/laptop/state.ts";
@@ -111,4 +111,15 @@ test("status relays --json and --quick to the host's own command", async () => {
   const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'status'", stdout: "{}\n" }] });
   assert.equal(await cmdTeamLaptop(ctx, ["status"], { json: true, quick: true }), 0);
   assert.ok(String(ctx.calls[0].at(-1)).endsWith("'forge' 'team' 'status' '--json' '--quick'"), ctx.calls[0].join(" "));
+});
+
+test("answer sends the summary as JSON on the host's stdin, never in its argv; a piped body is set", async () => {
+  const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'answer'", stdout: "Answered #7 (delivered to agent-web-lead).\n" }] });
+  assert.equal(await cmdAnswer(ctx, "7", "Garde le français", { body: async () => null }), 0);
+  assert.ok(String(ctx.calls[0].at(-1)).endsWith("'forge' 'team' 'answer' '7'"), ctx.calls[0].join(" "));
+  assert.ok(!ctx.calls[0].join(" ").includes("Garde"));
+  assert.deepEqual(JSON.parse(ctx.execOptions[0]!.input!), { summary: "Garde le français" });
+  await cmdAnswer(ctx, "7", "Voir", { body: async () => "le détail\n" });
+  assert.deepEqual(JSON.parse(ctx.execOptions[1]!.input!), { summary: "Voir", body: "le détail\n" });
+  await assert.rejects(() => cmdAnswer(ctx, "x", "Oui"), /Usage/);
 });
