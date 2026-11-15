@@ -143,6 +143,19 @@ test("status --json prints one TeamStatus object and nothing else on stdout", as
   assert.deepEqual(s.mirrors, [{ team: "web", originAgeSeconds: null }]);
 });
 
+test("status: a member released after a question left open waits on no one", async () => {
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+    teams: { web: { repo: "o/web", roles: { lead: { capabilities: ["repo", "ask-human"] } } } },
+  }));
+  writeJournal(ASK);
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", lead, { status: "Running" });
+  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "-- hc get agent", code: 1 }] });
+  await cmdTeam(ctx, ["status"], { json: true, quick: true });
+  const [m] = (JSON.parse(ctx.out_lines[0]) as TeamStatus).members;
+  assert.deepEqual([m.task, m.waitingOn], [null, null]);
+});
+
 test("status --quick refreshes no mirror; without it the team mirror is refreshed", async () => {
   const quick = setup();
   await cmdTeam(quick.ctx, ["status"], { json: true, quick: true });

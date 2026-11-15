@@ -9,7 +9,7 @@ import { awaitLiveSession, deliverMessage, NO_SESSION, sessionState } from "../h
 import { assign, busyState, NO_BRANCH, release } from "../tasks.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { memberNamed, type Member } from "../team.ts";
-import { Journal, waitingOn, type Entry, type NewEntry } from "./journal.ts";
+import { Journal, memberWaitingOn, type Entry, type NewEntry } from "./journal.ts";
 import { parseRequest, type ApiRequest } from "./protocol.ts";
 
 export type ApiDeps = { ctx: Context; cfg: ForgeConfig; journal: Journal; secrets: readonly string[]; now: () => Date };
@@ -126,7 +126,7 @@ async function run(d: ApiDeps, caller: Member, req: ApiRequest, reserve: (id: nu
           name, role: m.role, publishes: m.capabilities.includes("publish"), busy: busy !== null,
           assignedByYou: busy !== null && busy.assignedBy === caller.name,
           task: busy === null || busy.task === NO_BRANCH ? null : busy.task,
-          session, waitingOn: session === "working" ? null : waitingOn(d.journal.entries(), name),
+          session, waitingOn: memberWaitingOn(d.journal.entries(), name, { hasTask: busy !== null, session }),
         });
       }
       return { reply: () => ({ ok: true, you, team }) };

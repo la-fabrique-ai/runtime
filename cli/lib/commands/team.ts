@@ -6,7 +6,7 @@ import { ForgeError } from "../context.ts";
 import { restartApiService } from "../api/access.ts";
 import { readEnvFile } from "../dotenv.ts";
 import { handedOutSecrets } from "./api.ts";
-import { findQuestion, inbox, Journal, journalPath, readEntries, waitingOn, type Question } from "../api/journal.ts";
+import { findQuestion, inbox, Journal, journalPath, memberWaitingOn, readEntries, type Question } from "../api/journal.ts";
 import { BODY_MAX, checkSummary, checkText, INSTRUCTION_MAX, REQUEST_MAX } from "../api/protocol.ts";
 import type { ForgeConfig } from "../config.ts";
 import { loadConfig } from "../config.ts";
@@ -255,7 +255,7 @@ export type MemberStatus = {
   task: string | null; // la branche, ou NO_BRANCH ; null quand il est libre
   assignedBy: string | null;
   session: SessionState; // "none" quand il est absent ou arrêté
-  waitingOn: string | null; // null tant que sa session travaille
+  waitingOn: string | null; // null sans tâche, et tant que sa session travaille
 };
 export type TeamStatus = {
   members: MemberStatus[];
@@ -287,7 +287,7 @@ async function status(ctx: Context, cfg: ForgeConfig, opts: TeamOptions): Promis
     members_.push({
       name: m.name, team: m.team, role: m.role, present: instances.has(m.name),
       task: busy?.task ?? null, assignedBy: busy === null || busy.assignedBy === "" ? null : busy.assignedBy,
-      session, waitingOn: session === "working" ? null : waitingOn(journal, m.name),
+      session, waitingOn: memberWaitingOn(journal, m.name, { hasTask: busy !== null, session }),
     });
   }
   const now = new Date();

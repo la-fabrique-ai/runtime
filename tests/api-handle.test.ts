@@ -240,6 +240,11 @@ test("status lists the lead's talk-to, with who each one waits on until its sess
   assert.equal(await assignedBy(LEAD, DEV1), false, "assigned by someone else");
   sessions[DEV1] = "working";
   assert.equal((await rows()).find((r) => r.name === DEV1)!.waitingOn, null);
+  // Released after a message left unanswered: a free member waits on no one.
+  sessions[DEV1] = "idle";
+  assert.equal((await rows()).find((r) => r.name === DEV1)!.waitingOn, LEAD);
+  for (const k of ["user.forge.task", "user.forge.assigned_by"]) delete keys(DEV1)[k];
+  assert.equal((await rows()).find((r) => r.name === DEV1)!.waitingOn, null);
 });
 
 test("two leads' assigns of the same free developer at once: one wins, the other is told it is busy", async () => {
@@ -260,6 +265,7 @@ test("an unreadable line is refused and journaled without a verb or a text", asy
 });
 
 test("status sees an answer another process wrote to the journal: waiting-on=human clears without a restart", async () => {
+  keys(LEAD)["user.forge.task"] = "(no branch)";
   await call(LEAD, { op: "ask-human", summary: "Quel séparateur ?" });
   const leadRow = async () => ((await call(PILOT, { op: "status" })) as unknown as { team: { name: string; waitingOn: string | null }[] }).team.find((r) => r.name === LEAD)!;
   assert.equal((await leadRow()).waitingOn, "human");

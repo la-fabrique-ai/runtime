@@ -138,8 +138,8 @@ export function findQuestion(entries: readonly Entry[], id: number): Question | 
 }
 
 // Ce que `container` attend : `human` après une question, le nom d'un container
-// après un message, tant que celui-ci n'a pas répondu par un message. La moitié
-// « sa session ne travaille pas » de la règle est celle de l'appelant.
+// après un message, tant que celui-ci n'a pas répondu par un message. Voir
+// `memberWaitingOn` pour ce qui l'écarte.
 export function waitingOn(entries: readonly Entry[], container: string): string | null {
   const ok = entries.filter((e) => e.outcome === "ok");
   const answered = answeredIds(ok);
@@ -149,4 +149,11 @@ export function waitingOn(entries: readonly Entry[], container: string): string 
   if (last.op === "ask-human") return answered.has(last.id) ? null : "human";
   const replied = ok.slice(lastIndex + 1).some((e) => e.op === "message" && e.caller === last.to && e.to === container);
   return replied ? null : last.to;
+}
+
+// La règle des deux affichages (`forge team status`, le `status` de l'API) : un
+// membre libre n'attend personne, la libération clôt l'attente, et celui dont la
+// session travaille n'attend pas non plus tant qu'il n'a pas fini.
+export function memberWaitingOn(entries: readonly Entry[], container: string, state: { hasTask: boolean; session: string }): string | null {
+  return !state.hasTask || state.session === "working" ? null : waitingOn(entries, container);
 }
