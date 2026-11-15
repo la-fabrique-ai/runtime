@@ -15,10 +15,13 @@ export const remoteCommand = (argv: string[]): string => argv.map(shellQuote).jo
 const NO_AGENT = ["-o", "ForwardAgent=no"];
 
 // Never prompts (BatchMode): a missing key fails instead of hanging.
-export function remoteExec(ctx: Context, host: LaptopHost, argv: string[], input?: string): Promise<ExecResult> {
+// `timeoutMs`: a display that polls the host never waits for it longer than that
+// (the result then has code 124 and `timedOut`).
+export function remoteExec(ctx: Context, host: LaptopHost, argv: string[], input?: string, timeoutMs?: number): Promise<ExecResult> {
   const cmd = ["ssh", "-o", "BatchMode=yes", ...NO_AGENT, host.name, "--", remoteCommand(argv)];
   // Stdin, never argv: a secret must not show in a process list.
-  return input === undefined ? ctx.exec(cmd) : ctx.exec(cmd, { input });
+  if (input === undefined && timeoutMs === undefined) return ctx.exec(cmd);
+  return ctx.exec(cmd, { ...(input === undefined ? {} : { input }), ...(timeoutMs === undefined ? {} : { timeoutMs }) });
 }
 
 // Inherits the terminal; `tty` for a command that asks the user something.

@@ -7,13 +7,15 @@ import { BODY_MAX } from "../api/protocol.ts";
 import { checkLocalHc } from "../hc.ts";
 import { syncMachines } from "../laptop/machines.ts";
 import { remoteAttachForwarding, remoteExec } from "../laptop/remote.ts";
+import { watchLoop } from "../laptop/watch.ts";
 import { selectHost, type LaptopHost } from "../laptop/state.ts";
 
 const USAGE = `Usage: forge team up [<team>] [--host <name>]
        forge team assign <container> [<task>] [--host <name>]   (the instruction is read from stdin)
        forge team release <container> [--host <name>]
        forge team status [--json] [--quick] [--host <name>]
-       forge team sync <team> [--host <name>]`;
+       forge team sync <team> [--host <name>]
+       forge team watch [--host <name>]   (the team, its questions and the origin mirror, redrawn every few seconds; Ctrl-C ends it)`;
 
 const MAX_INSTRUCTION = 64 * 1024;
 
@@ -86,6 +88,7 @@ export async function cmdTeamLaptop(ctx: Context, args: string[], opts: TeamLapt
       return relayed(ctx, await remoteExec(ctx, await selectHost(ctx, opts.host), ["forge", "team", "release", a]));
     case "status":
       return relayed(ctx, await remoteExec(ctx, await selectHost(ctx, opts.host), ["forge", "team", "status", ...(opts.json ? ["--json"] : []), ...(opts.quick ? ["--quick"] : [])]));
+    case "watch": return watchLoop(ctx, await selectHost(ctx, opts.host), {});
     case "sync":
       if (a === undefined) throw new ForgeError(`a team name is required.\n${USAGE}`);
       return remoteAttachForwarding(ctx, await selectHost(ctx, opts.host), ["forge", "team", "sync", a]);

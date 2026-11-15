@@ -16,6 +16,7 @@ import { configPath } from "../paths.ts";
 import { ensureRunning } from "../session.ts";
 import { deliverAnswer, sessionState, startSession, type SessionState } from "../hc-session.ts";
 import { assign, busyState, release } from "../tasks.ts";
+import { ageLabel, mirrorLine } from "../age.ts";
 import { printableText } from "../printable.ts";
 import { columnWidths, formatRow } from "../table.ts";
 import { members, type Member } from "../team.ts";
@@ -288,18 +289,9 @@ async function status(ctx: Context, cfg: ForgeConfig, opts: TeamOptions): Promis
     }
   }
   for (const m of result.mirrors) {
-    ctx.out(`${m.team}: origin mirror ${m.originAgeSeconds === null ? "never synced" : `synced ${ageLabel(m.originAgeSeconds * 1000)} ago`}`);
+    ctx.out(mirrorLine(m.team, m.originAgeSeconds));
   }
   return 0;
-}
-
-// « 2 min », « 3 h » : assez pour savoir si une question attend depuis longtemps.
-export function ageLabel(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s} s`;
-  if (s < 3600) return `${Math.floor(s / 60)} min`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h`;
-  return `${Math.floor(s / 86400)} d`;
 }
 
 // Le miroir d'origine de l'équipe (GitHub, par l'agent SSH transmis), puis le
