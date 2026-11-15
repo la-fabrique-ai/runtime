@@ -203,3 +203,32 @@ test("converge updates an existing member's files; a live pilot is told its inst
   await cmdTeam(ctx, ["converge"]);
   assert.ok(!base.err_lines.some((l) => l.includes("instructions changed")), "nothing changed the second time");
 });
+
+// Les limites promises (celle du rôle, sinon celle du profil) contre la RAM moins la réserve de l'hôte.
+const GIB = 2 ** 30;
+
+test("converge warns, without refusing, when the members' limits add up to more than the RAM minus the reserve", async () => {
+  // Deux membres sans limite de rôle : 75 % de 4 GiB chacun, soit 6 GiB.
+  const { ctx } = setup();
+  const code = await cmdTeam(ctx, ["converge"], { hostMemory: 4 * GIB });
+  assert.equal(code, 0);
+  const warning = ctx.err_lines.find((l) => l.startsWith("WARNING: the 2 members' memory limits add up to 6.0 GiB"));
+  assert.ok(warning?.includes("4.0 GiB of RAM, 0.0 GiB kept for the host"), ctx.err_lines.join("\n"));
+});
+
+test("converge counts a role's own limit before the profile's, and reads the reserve the host keeps", async () => {
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+    teams: { web: { repo: "o/web", roles: { dev: { count: 2, capabilities: ["repo", "publish"], memory: "1GiB" } } } },
+  }));
+  const reserve = { match: "systemctl show -p MemoryMin --value", stdout: `${GIB / 2}\n` };
+  const fake = FakeIncus.withRuntime();
+  for (const n of ["agent-web-dev-1", "agent-web-dev-2"]) fake.addInstance("agent-forge", n, { status: "Running" });
+  // 2 GiB promis ; 4 GiB moins 2 × 0,5 GiB (system.slice, user.slice) = 3 GiB : rien à dire.
+  const fits = fakeContext({ incus: fake, rules: [...RULES, reserve] });
+  await cmdTeam(fits, ["converge"], { hostMemory: 4 * GIB });
+  assert.ok(!fits.err_lines.some((l) => l.includes("memory limits")), fits.err_lines.join("\n"));
+  // Sur 2,5 GiB de RAM, il ne reste que 1,5 GiB.
+  const tight = fakeContext({ incus: fake, rules: [...RULES, reserve] });
+  await cmdTeam(tight, ["converge"], { hostMemory: 2.5 * GIB });
+  assert.ok(tight.err_lines.some((l) => l.includes("add up to 2.0 GiB, more than the 1.5 GiB")), tight.err_lines.join("\n"));
+});
