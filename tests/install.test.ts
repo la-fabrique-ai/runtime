@@ -1278,7 +1278,9 @@ test("an install copies the forge mod on every run and leaves an existing keys.j
   writeFileSync(join(app, "keys.json"), '{ "my": "shortcuts" }\n');
   writeFileSync(join(app, "mods/forge/logic.js"), "// an old copy\n");
   const world: World = { vm: null };
-  assert.equal(await cmdInstall(laptop(world, { answers: [2, 2] }), OPTS), 0);
+  const ctx = laptop(world, { answers: [2, 2] });
+  assert.equal(await cmdInstall(ctx, OPTS), 0);
+  assert.ok(ctx.out_lines.includes("  Herdr App forge bar: Herdr App is not running"), ctx.out_lines.join("\n"));
   for (const f of ["main.js", "logic.js", "mod.json"]) {
     assert.equal(readFileSync(join(app, "mods/forge", f), "utf8"), readFileSync(join("herdr/mods/forge", f), "utf8"), f);
   }

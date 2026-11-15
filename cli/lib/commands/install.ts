@@ -27,6 +27,7 @@ import {
   ensureLimaVm, forgetHostKeys, HOST_KEY_ALIAS, LIMA_DEFAULT_PORT, LIMA_NAME, limaInstance, type LimaInstance,
   type LimaOptions,
 } from "../laptop/lima.ts";
+import { anchorForgeBar } from "../laptop/herdr-bar.ts";
 import { checkPrerequisites } from "../laptop/prereqs.ts";
 import { adminSsh } from "../laptop/remote.ts";
 import {
@@ -193,12 +194,14 @@ export async function cmdInstall(ctx: Context, opts: InstallOptions = {}): Promi
   await linkForge(ctx, checkout);
   const telemetry = await herdrAppTelemetry(ctx);
   const mod = installForgeMod();
+  const bar = await anchorForgeBar(ctx);
 
   // 12. What was done, what was already there; then herdr.
   ctx.out(`${host.name}:`);
   for (const [s, outcome] of outcomes) ctx.out(`  ${label(s, host.kind)}: ${outcome}`);
   ctx.out(`  Herdr App telemetry: ${telemetry}`);
   ctx.out(`  Herdr App forge mod: ${mod}`);
+  ctx.out(`  Herdr App forge bar: ${bar}`);
   return cmdOpen(ctx, { host: host.name });
 }
 

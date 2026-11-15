@@ -109,6 +109,8 @@ It asks little:
 - whether to turn Herdr App's telemetry off in
   `~/.config/herdr-app/settings.json` (`"telemetry": false`, the other settings
   of that file kept; a refusal is asked again on every run);
+- while Herdr App runs, whether to copy the layout it shows, when the app ships
+  that layout and it has no forge bar (a refusal is asked again on every run);
 - the Claude token, once: run `claude setup-token` on your machine and paste
   the token it prints (it is not echoed). The token lasts a year, covers model
   requests only and is revocable in claude.ai.
@@ -136,7 +138,9 @@ In between it does, in order:
 8. builds `agent-base` (about 10 minutes) when it is missing or older than the
    checkout's image inputs;
 9. turns Herdr App's telemetry off, if you say yes: it is a setting of your
-   machine's app, not of the host;
+   machine's app, not of the host; and, if the layout Herdr App shows is one it
+   ships, copies it so that the forge bar can anchor there (see
+   [the forge mod](#see-the-team-answer-its-questions));
 10. prints a summary and opens herdr (the TUI).
 
 A run that fails stops with the step to fix; run `forge install` again and it
@@ -363,6 +367,11 @@ they never pile up SSH sessions on a small host.
 at the bottom of Herdr App (a mod runs only where it is shown): how many agents
 work and how many questions wait, a notification for each new question, whose
 click opens `forge team watch`, and the spaces of the agents named after them.
+The bar needs a layout of its own: Herdr App ships its layouts (`main`, …) and
+takes no new block in them. When the layout shown is one of those, `forge install`
+offers to copy it (`herdr-app do layout.clone '{"name":"main","as":"forge"}'`,
+asked while Herdr App runs): the copy is yours, and the app never updates it
+again. Restart Herdr App if the bar does not appear by itself.
 It exposes two commands, `forge.watch` and `forge.sync` (`forge team sync` for
 each team, in a terminal). forge never edits your `keys.json` (any edit makes
 that file yours, and Herdr App stops updating its defaults): to bind them, add
