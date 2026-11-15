@@ -324,6 +324,10 @@ Linux, it also needs QEMU and a writable `/dev/kvm`: be in the `kvm` group.
     inside containers (Chrome's sandbox, rootless Docker).
   - `kernel.yama.ptrace_scope=1`, Ubuntu's default, so strace and gdb work in
     containers.
+- **/proc.** devsec's `hidepid=2` stays, with `gid=` naming the system group
+  `forge-procview` (`hardening_proc_group`): its members see every process.
+  Only the memory watchdog's unit is one (`SupplementaryGroups=`), so it needs
+  no `CAP_SYS_PTRACE`.
 - **UFW.** `ufw_manage_defaults: false`, since nftables is used instead.
 - **Password ageing.** The admin is exempt
   (`os_users_without_password_ageing`): the playbook never changes the
@@ -354,21 +358,40 @@ Linux, it also needs QEMU and a writable `/dev/kvm`: be in the `kvm` group.
 A container at its memory limit does not always get an OOM kill: the kernel
 frees the file pages of its own programs, which are read back from disk at
 once, and the container thrashes for hours (#126). `roles/forge_memory_watchdog`
-installs `forge-memory-watchdog.service`, which watches the cgroups of the
-`agent-forge` project's containers (`lxc.payload.agent-forge_*`) and, when
-`memory.pressure`'s `full avg10` stays at or above a threshold for a while,
-kills the container's process with the biggest RSS. It spares the container's
-PID 1 and `claude`, and what it kills goes to the journal:
+installs `forge-memory-watchdog.service`, which watches the cgroups of the team
+containers (`lxc.payload.agent-forge_agent-*`: every member is named
+`agent-<team>-…`, the Pilot `agent-pilot`; `forge-proxy` is never watched) and,
+when `memory.pressure`'s `full avg10` stays at or above a threshold for a
+while, kills the container's process with the biggest RSS. It spares the
+container's PID 1 and `claude`, only picks the forge user's own processes, and
+what it kills goes to the journal:
 
 ```bash
 journalctl -u forge-memory-watchdog
 ```
 
+After a kill it runs `forge notify`, which types one line written by forge
+(`[forge] memory: killed pid <n> (<name>, <size>): …`) in the agent's session,
+if that session is alive, and appends it to the API's journal. The process name
+comes from the container: `forge notify` cuts it and keeps it to the summary's
+characters. `notify` is a command of the host, not a verb of the API: agents
+cannot call it. Processes of an agent's Docker containers run under other
+uids and are out of the watchdog's reach.
+
 It reads the cgroups and `/proc` and sends `SIGKILL`; it configures nothing in
 Incus. It runs as the forge user, not root: with forge's `raw.idmap`, the
 container's `aiuser` is that user on the host. Under `hidepid=2` (see Hardening
-choices) the host hides those processes, so the unit holds `CAP_SYS_PTRACE`
-and nothing else.
+choices) the host hides those processes, so the unit joins the group that
+the `/proc` mount exempts (`gid=`, `hardening_proc_group`), which lets it see
+them and trace nothing: it holds no capability.
+
+The same role keeps the host's own memory (the host stays, the containers
+vary): `MemoryMin` on `system.slice` (sshd, Incus) and `user.slice` (the forge
+user's session, `forge`, `forge-api`), and a low `OOMScoreAdjust` on `ssh` and
+`incus`. `MemoryMin` is protection, not allocation: the unused part stays free
+for the containers. `forge team converge` warns when the members' memory limits
+(the role's, else the profile's, 75 % of the RAM by default) add up to more than
+the RAM minus what `MemoryMin` keeps.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -376,10 +399,17 @@ and nothing else.
 | `forge_memory_watchdog_seconds` | `15` | how long it must hold |
 | `forge_memory_watchdog_interval` | `1` | seconds between two looks |
 | `forge_memory_watchdog_cgroup_prefix` | `lxc.payload.agent-forge_` | which cgroups |
+| `forge_memory_watchdog_container_prefix` | `agent-` | which containers of that project |
+| `forge_memory_watchdog_reserve_system` | `384M` | `MemoryMin` of `system.slice` |
+| `forge_memory_watchdog_reserve_user` | `256M` | `MemoryMin` of `user.slice` |
+| `forge_memory_watchdog_oom_score_adjust` | `-900` | OOM score of `ssh` and `incus` |
 
 `vm-test.sh` reproduces the saturation (a process that keeps growing in a
 container whose `memory.high` is lower, which stalls without ever being
-OOM-killed), then checks that the watchdog killed it and the container answers.
+OOM-killed), then checks that the watchdog killed it and the container answers,
+and that a `forge-proxy` container under the same pressure was left alone. It
+also checks, before and after the reboot, that the watchdog holds no capability
+and that `MemoryMin` and `OOMScoreAdjust` are in place.
 
 ## Incus storage pool
 
