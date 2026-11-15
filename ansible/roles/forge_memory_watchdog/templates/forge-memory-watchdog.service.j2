@@ -1,0 +1,45 @@
+# Managed by Ansible (role forge_memory_watchdog).
+[Unit]
+Description=agent-forge memory watchdog: kills the biggest process of a container stuck at its memory limit
+
+[Service]
+# The forge user, not root: with raw.idmap the container's aiuser is this user
+# on the host, so its processes can be killed without any privilege.
+User={{ forge_user.name }}
+# The host mounts /proc with hidepid=2 (devsec's hardening), under which a
+# process only sees the processes it may ptrace, and the container's, which
+# changed user and so are not dumpable, are not among them. The mount exempts
+# the members of one group (`gid=`, role hardening): this unit joins it, which
+# lets it see them, to rank them by RSS and tell PID 1 and claude, without any
+# right to trace or signal one more process.
+SupplementaryGroups={{ hardening_proc_group }}
+Environment=FORGE_WATCHDOG_THRESHOLD={{ forge_memory_watchdog_threshold }}
+Environment=FORGE_WATCHDOG_SECONDS={{ forge_memory_watchdog_seconds }}
+Environment=FORGE_WATCHDOG_INTERVAL={{ forge_memory_watchdog_interval }}
+Environment=FORGE_WATCHDOG_PREFIX={{ forge_memory_watchdog_cgroup_prefix }}
+Environment=FORGE_WATCHDOG_CONTAINER_PREFIX={{ forge_memory_watchdog_container_prefix }}
+Environment=FORGE_WATCHDOG_FORGE={{ forge_memory_watchdog_forge }}
+ExecStart={{ forge_memory_watchdog_node }} {{ forge_memory_watchdog_dir }}/memory-watchdog.ts
+Restart=on-failure
+RestartSec=5
+# It reads /sys/fs/cgroup and /proc, sends a signal to processes of its own
+# user, and runs `forge notify` after a kill: that tells the agent's session
+# (through Incus, which the forge user, in incus-admin, may use) and appends to
+# the API's journal. No capability, no new privilege.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+# `forge notify` reads the user's configuration and Incus's client files, and
+# writes only the API's journal: the one writable path under the home (made by
+# forge-api, hence the dash: the unit starts without it).
+ProtectHome=read-only
+ReadWritePaths=-{{ forge_users_account.home }}/.local/share/agent-forge/api
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

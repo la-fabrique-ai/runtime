@@ -19,6 +19,7 @@ import { members, type Member } from "../team.ts";
 import { installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { teamMirrorPath } from "../mirror.ts";
+import { hostReserveBytes, memoryWarning } from "../team-memory.ts";
 import { containerConfig, safeRef } from "./task-base.ts";
 
 const USAGE = `Usage: forge team converge [<team>]
@@ -29,7 +30,8 @@ const USAGE = `Usage: forge team converge [<team>]
        forge team for-repo <owner/repo> | task-base <team> | upload-pack <team>   (read by forge fetch and forge ship)`;
 
 
-export type TeamOptions = { json?: boolean; stdin?: () => Promise<string> };
+// `hostMemory` : la RAM de l'hôte, en octets ; les tests la fixent.
+export type TeamOptions = { json?: boolean; stdin?: () => Promise<string>; hostMemory?: number };
 
 async function readStdin(): Promise<string> {
   // Un terminal ne donne pas de consigne : le dire plutôt qu'attendre sans rien afficher.
@@ -57,7 +59,7 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
     throw new ForgeError(`no team in ${configPath()}: declare "teams" (and optionally "pilot") there first.`);
   }
   switch (sub) {
-    case "converge": return converge(ctx, cfg, a);
+    case "converge": return converge(ctx, cfg, a, opts);
     case "assign": return assignCommand(ctx, cfg, a, b, opts.stdin ?? readStdin);
     case "release": return releaseCommand(ctx, cfg, a);
     case "status": return status(ctx, cfg, opts.json === true);
@@ -75,7 +77,7 @@ function requireTeam(cfg: ForgeConfig, team: string | undefined): string {
   return team;
 }
 
-async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined): Promise<number> {
+async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined, opts: TeamOptions): Promise<number> {
   if (team !== undefined) requireTeam(cfg, team);
   const wanted = members(cfg).filter((m) => team === undefined || m.team === team);
   const existing = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
@@ -121,6 +123,9 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
     for (const name of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${name}.`);
   }
   await printMembers(ctx, cfg, wanted, team);
+  // Un avertissement, jamais un refus : les limites ne sont pas toutes atteintes en même temps.
+  const overbooked = memoryWarning(cfg, await hostReserveBytes(ctx), opts.hostMemory);
+  if (overbooked !== null) ctx.err(overbooked);
   for (const note of notes) ctx.err(note);
   return 0;
 }

@@ -184,10 +184,16 @@ export async function deliverMessage(
   const onTask = retained === null ? "" :
     `, on the task you assigned it (${retained.task ?? "without a branch"}; forge-team release ${from} once it is finished)`;
   const notice = `[forge] message ${id} from ${from}${onTask}: ${summary}${body === null ? "" : ` (detail: ${path})`}`;
+  return { turn: await typeNotice(ctx, container, notice) };
+}
+
+// Tape une ligne que forge a écrite dans la session `agent` du container : un
+// seul élément d'argv, jamais un shell. Rend le numéro de tour de hc.
+export async function typeNotice(ctx: Context, container: string, notice: string): Promise<number> {
   const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   for (let attempt = 1; ; attempt++) {
     const r = await ctx.exec(hcArgv(container, ["send", "--json", SESSION, notice]));
-    if (r.code === 0) return { turn: sentTurn(container, r.stdout) };
+    if (r.code === 0) return sentTurn(container, r.stdout);
     const why = hcError(r);
     if (why.includes("has finished")) throw new ForgeError(`${container} ${NO_SESSION}`);
     if (why.includes("is still starting") && attempt < SEND_ATTEMPTS) {

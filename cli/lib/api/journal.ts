@@ -7,8 +7,12 @@ import { apiDataDir } from "../paths.ts";
 import type { Op } from "./protocol.ts";
 
 // `op` est null pour une ligne que le protocole n'a pas pu lire : elle n'a pas de verbe.
+// `notify` n'est pas un verbe : c'est un avis que forge a écrit de lui-même
+// (`forge notify`), de l'hôte, sans passer par une socket. Il a l'identifiant 0,
+// hors de la suite que le service numérote en mémoire : deux écrivains ne
+// peuvent donc jamais prendre le même numéro.
 export type Entry = {
-  id: number; time: string; caller: string; op: Op | null; to: string | null; task: string | null;
+  id: number; time: string; caller: string; op: Op | "notify" | null; to: string | null; task: string | null;
   outcome: "ok" | "refused"; error: string | null;
   summary: string | null; // message, ask-human
   text: string | null; // le corps d'un message ou d'une question, la consigne d'un assign

@@ -7,7 +7,7 @@ Tu es un agent Claude Code tournant dans un container Incus isolé, membre d'une
 - **Répertoire de travail** : `/workspace`, ton clone du dépôt de l'équipe. Une tâche à la fois : forge te place sur la branche `agent/<tâche>` avant de te donner la consigne.
 - **Branche** : elle est choisie par forge. Tu ne changes jamais de branche et tu ne crées pas d'autre branche.
 - **Utilisateur** : `aiuser` (pas de sudo, pas de root)
-- **Mémoire** : ce container a une limite mémoire, sans swap. Ne lance pas en parallèle des commandes qui en consomment beaucoup : à la limite, le container ralentit jusqu'à ne plus répondre
+- **Mémoire** : ce container a une limite mémoire, sans swap. Les commandes gourmandes passent mieux l'une après l'autre qu'en parallèle : à la limite, le container ralentit jusqu'à ne plus répondre. Si forge voit le container bloqué à sa limite, il tue son plus gros processus pour le débloquer (jamais `claude`) et tape dans ta session une ligne `[forge] memory: killed pid <n> (<nom>, <taille>): …`. Relance alors la commande en plus petit, ou découpe-la
 
 ## Git
 - Tu commites sur ta branche, sous l'identité git de l'équipe, **sans signature** (aucune clé dans ce container). Messages clairs et conventionnels (`feat:`, `fix:`, `chore:`…).

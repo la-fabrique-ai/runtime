@@ -19,6 +19,7 @@ import { cmdFetch } from "./lib/commands/fetch.ts";
 import { cmdShip } from "./lib/commands/ship.ts";
 import { cmdRelay } from "./lib/commands/relay.ts";
 import { cmdApi } from "./lib/commands/api.ts";
+import { cmdNotify } from "./lib/commands/notify.ts";
 import { cmdTeam } from "./lib/commands/team.ts";
 import { cmdTeamLaptop } from "./lib/commands/team-laptop.ts";
 import { cmdHcVia } from "./lib/commands/hc-via.ts";
@@ -53,6 +54,9 @@ On the forge host:
                                     Comment on a pull request, or reply to one of its comments
   relay read <number>               Read an issue or pull request thread (trusted accounts only)
   relay ci <pr> [<job-id>]          List a pull request's CI runs, or print one job's log
+  notify <container> memory-kill --pid <n> --rss-kib <n>
+                                    Tell a team member's session that the memory watchdog killed one of its
+                                    processes (the watchdog runs it; the agents have no such verb)
   api serve                         Answer the team containers' requests (the forge-api user service runs it)
   image build                       Build the agent-base image (Ansible, through Incus)
   image commit                      Print the commit agent-base was built from (nothing if no image)
@@ -85,9 +89,10 @@ exits with this usage instead.`;
 
 type LaptopOptions = { remote?: string; host?: string; sshPersist?: string };
 type RelayArgs = { title?: string; bodyFile?: string; json?: boolean };
+type NoticeArgs = { pid?: string; rssKib?: string };
 
 function dispatch(
-  ctx: Context, positionals: string[], force: boolean, laptop: LaptopOptions, relay: RelayArgs,
+  ctx: Context, positionals: string[], force: boolean, laptop: LaptopOptions, relay: RelayArgs, notice: NoticeArgs,
 ): Promise<number> {
   const [cmd, a, b] = positionals;
   switch (cmd) {
@@ -103,6 +108,7 @@ function dispatch(
       ? cmdTeamLaptop(ctx, positionals.slice(1), { host: laptop.host, json: relay.json })
       : cmdTeam(ctx, positionals.slice(1), { json: relay.json });
     case "api": return cmdApi(ctx, a);
+    case "notify": return cmdNotify(ctx, a, b, notice);
     case "hc-via": return cmdHcVia(ctx, a, b, positionals[3]);
     case "hc-exec": return cmdHcExec(ctx, a, b);
     case "image": return cmdImage(ctx, a, b);
@@ -126,6 +132,7 @@ async function main(): Promise<number> {
         remote: { type: "string" }, host: { type: "string" }, "ssh-persist": { type: "string" },
         title: { type: "string" }, "body-file": { type: "string" },
         json: { type: "boolean" },
+        pid: { type: "string" }, "rss-kib": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
       allowPositionals: true,
@@ -149,12 +156,16 @@ async function main(): Promise<number> {
       throw new ForgeError("--title and --body-file only go with relay: forge relay pr <task> --title <text> --body-file <file>");
     }
     if (values.json && cmd !== "team") throw new ForgeError("--json only goes with team status: forge team status --json");
+    if ((values.pid !== undefined || values["rss-kib"] !== undefined) && cmd !== "notify") {
+      throw new ForgeError("--pid and --rss-kib only go with notify");
+    }
     if (values["ssh-persist"] !== undefined && cmd !== "install") {
       throw new ForgeError("--ssh-persist only goes with install: forge install --ssh-persist 2h");
     }
     const laptop = { remote: values.remote, host: values.host, sshPersist: values["ssh-persist"] };
     return await dispatch(ctx, positionals, values.force === true, laptop,
-      { title: values.title, bodyFile: values["body-file"], json: values.json });
+      { title: values.title, bodyFile: values["body-file"], json: values.json },
+      { pid: values.pid, rssKib: values["rss-kib"] });
   } catch (e) {
     // Le préfixe "Error: " est ajouté ici, une seule fois : une ForgeError ne
     // porte que son message.
