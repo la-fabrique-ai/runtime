@@ -13,14 +13,13 @@ import {
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ForgeError, type Context } from "../context.ts";
-import { addLaptopBlock, laptopToasts, readConfig } from "../herdr-config.ts";
-import { forgeHome, herdrConfigPath, laptopDataDir, limaHome, repoRoot, sshDir } from "../paths.ts";
+import { forgeHome, laptopDataDir, limaHome, repoRoot, sshDir } from "../paths.ts";
 import {
   applyInteractive, askCloudSettings, askRelaySettings, checkNestedVirt, currentPublicIp, infraFor, infraOutputs,
   loadCloudSettings, saveCloudSettings,
 } from "../laptop/cloud.ts";
 import {
-  ensureClaudeLogin, ensureClaudeToken, ensureGitIdentity, ensureImage, ensureRelayCredentials, runSetup,
+  ensureClaudeToken, ensureGitIdentity, ensureImage, ensureRelayCredentials, runSetup,
 } from "../laptop/host-steps.ts";
 import { renderInventory, renderRelayInventory, writeInventoryOnce } from "../laptop/inventory.ts";
 import { chooseKey, githubAgent, keyLabel, listAgentKeys } from "../laptop/keys.ts";
@@ -36,14 +35,14 @@ import {
 } from "../laptop/ssh-config.ts";
 import {
   forgeKeyPath, forgetHost, hostDir, inventoryPath, knownHostsPath, loadHosts, relayClientKeyPath, relayInventoryPath,
-  relayLinkPath, saveHost, selectHost, validHostName, type InstallStep, type LaptopHost,
+  PERSIST, relayLinkPath, saveHost, selectHost, validHostName, type InstallStep, type LaptopHost,
 } from "../laptop/state.ts";
 import { cmdOpen } from "./open.ts";
 
 // `lima` lets the tests skip ensureLimaVm's waits, `sleep` the wait for a
 // cloud VM's sshd. `cloud` installs a new cloud host (forge cloud create).
 export type InstallOptions = {
-  remote?: string; host?: string; cloud?: boolean; checkout?: string; lima?: LimaOptions;
+  remote?: string; host?: string; cloud?: boolean; checkout?: string; lima?: LimaOptions; sshPersist?: string;
   sleep?: (ms: number) => Promise<void>;
 };
 
@@ -66,7 +65,7 @@ const stepsFor = (kind: LaptopHost["kind"]): InstallStep[] => (kind === "cloud" 
 const UPDATE: InstallStep[] = ["playbook", "setup", "image", "relay"];
 const LABELS: Record<InstallStep, string> = {
   vm: "VM", inventory: "inventory", playbook: "playbook", ssh: "SSH configuration", identity: "git identity",
-  claude: "Claude login", setup: "forge setup", image: "agent-base image", relay: "relay setup",
+  claude: "Claude token", setup: "forge setup", image: "agent-base image", relay: "relay setup",
 };
 const USER_NAME = /^[a-z_][a-z0-9_-]*$/;
 // A host name or an IP address: never an ssh option, never user@host.
@@ -77,12 +76,9 @@ const CLOUD_ADMIN = "ubuntu";
 const SSH_WAIT_MS = 5000;
 const SSH_TRIES = 36;
 
-// A remote's VM step is its first connection (it has no VM to create); a cloud
-// host's Claude step stores a token, not a login.
+// A remote's VM step is its first connection (it has no VM to create).
 const label = (step: InstallStep, kind: LaptopHost["kind"]): string =>
-  step === "vm" && kind === "remote" ? "first SSH connection"
-    : step === "claude" && kind === "cloud" ? "Claude token"
-    : LABELS[step];
+  step === "vm" && kind === "remote" ? "first SSH connection" : LABELS[step];
 
 // The command that resumes a host's install.
 const resumeCommand = (host: LaptopHost): string =>
@@ -92,6 +88,9 @@ const resumeCommand = (host: LaptopHost): string =>
 
 export async function cmdInstall(ctx: Context, opts: InstallOptions = {}): Promise<number> {
   const checkout = opts.checkout ?? repoRoot();
+  if (opts.sshPersist !== undefined && !PERSIST.test(opts.sshPersist)) {
+    throw new ForgeError(`--ssh-persist takes a number and s, m, h, d or w (30m, 8h, 2d), not ${opts.sshPersist}`);
+  }
   // 1-3. Which host, the laptop's tools, the key GitHub accepts.
   const target = await whichHost(ctx, opts);
   await checkPrerequisites(ctx, target.kind);
@@ -107,6 +106,13 @@ export async function cmdInstall(ctx: Context, opts: InstallOptions = {}): Promi
   if (target.kind === "lima") ({ host, vm } = await limaHost(ctx, target.listed, key, agent));
   else if (target.kind === "cloud") host = target.listed ?? (await newCloudHost(ctx, key, agent));
   else host = target.listed ?? (await newRemoteHost(ctx, target.address, key, agent));
+
+  // The shared SSH connection's duration, kept on the host record: the ssh
+  // step below writes it into forge's SSH file.
+  if (opts.sshPersist !== undefined && host.sshPersist !== opts.sshPersist) {
+    host.sshPersist = opts.sshPersist;
+    saveHost(host);
+  }
 
   const steps = stepsFor(host.kind);
   const finished = steps.every((s) => host.done.includes(s));
@@ -174,22 +180,23 @@ export async function cmdInstall(ctx: Context, opts: InstallOptions = {}): Promi
   await step("ssh", () => sshConfig(ctx, host), true);
   // 10. The host's account and runtime, over the alias.
   await step("identity", async () => ((await ensureGitIdentity(ctx, host)) === "set" ? "done" : "already there"));
-  await step("claude", async () => (host.kind === "cloud"
-    ? ((await ensureClaudeToken(ctx, host)) === "stored" ? "done" : "already there")
-    : ((await ensureClaudeLogin(ctx, host)) === "logged-in" ? "done" : "already there")));
+  // Every run: a host installed before the token has this step recorded done
+  // with a login and no token file. The call probes first, so a host that has
+  // its token is not asked again.
+  await step("claude", async () => ((await ensureClaudeToken(ctx, host)) === "stored" ? "done" : "already there"), true);
   await step("setup", async () => { await runSetup(ctx, host); return "done"; });
   await step("image", async () => ((await ensureImage(ctx, host, checkout)) === "built" ? "done" : "already there"));
   // A cloud host's relay: the bot's token, then its setup, as the admin.
   await step("relay", async () => ((await ensureRelayCredentials(ctx, host)) === "stored" ? "done" : "already there"));
-  // 11. Not recorded steps: asked while the link, or herdr's notifications,
-  // are missing.
+  // 11. Not recorded steps: asked while the link, or Herdr App's telemetry
+  // setting, are missing.
   await linkForge(ctx, checkout);
-  const toasts = await herdrToasts(ctx);
+  const telemetry = await herdrAppTelemetry(ctx);
 
   // 12. What was done, what was already there; then herdr.
   ctx.out(`${host.name}:`);
   for (const [s, outcome] of outcomes) ctx.out(`  ${label(s, host.kind)}: ${outcome}`);
-  ctx.out(`  herdr notifications: ${toasts}`);
+  ctx.out(`  Herdr App telemetry: ${telemetry}`);
   return cmdOpen(ctx, { host: host.name });
 }
 
@@ -565,7 +572,7 @@ async function firstConnection(ctx: Context, host: LaptopHost, address: string):
 // agent's role, then its relay's.
 async function playbook(ctx: Context, host: LaptopHost, checkout: string): Promise<void> {
   const collections = join(laptopDataDir(), "collections");
-  const opts = { env: { ANSIBLE_COLLECTIONS_PATH: collections }, cwd: checkout };
+  const opts = { env: { ANSIBLE_COLLECTIONS_PATH: collections, ANSIBLE_PIPELINING: "True" }, cwd: checkout };
   const requirements = join(checkout, "ansible", "requirements.yml");
   const galaxy = await ctx.attach(["ansible-galaxy", "collection", "install", "-r", requirements, "-p", collections], opts);
   if (galaxy !== 0) throw new ForgeError(`ansible-galaxy collection install failed (exit code ${galaxy})`);
@@ -652,41 +659,43 @@ function writeKeepingMode(path: string, text: string): void {
   renameSync(tmp, target);
 }
 
-// herdr draws a notification, the start popup's warnings among them, only if
-// the laptop's herdr config turns toasts on (spec, sub-project 1, Finding):
-// forge's laptop block, after a confirmation, unless the developer's config
-// sets them itself. Declining is not an error.
-async function herdrToasts(ctx: Context): Promise<string> {
-  const path = herdrConfigPath();
-  let text: string;
-  let state: ReturnType<typeof laptopToasts>;
-  try {
-    text = readConfig(path);
-    state = laptopToasts(text);
-  } catch (e) {
-    ctx.out(`${path}: ${(e as Error).message}; herdr's notifications left as they are`);
-    return "left as they are";
+// Herdr App sends anonymous usage data unless its settings file says
+// `"telemetry": false`: ~/.config/herdr-app/settings.json, the key and the path
+// as the app's own guide gives them (defaults/AGENTS.md of herdrdev/herdr-app, read
+// on 2026-11-12; the guide states no version). A file outside forge's directories:
+// written after a confirmation, the other settings of the file kept, and a file
+// forge cannot read as a JSON object left alone. Declining is not an error. Not a
+// recorded step: asked on each run until it is there.
+async function herdrAppTelemetry(ctx: Context): Promise<string> {
+  const file = herdrAppSettingsPath();
+  let settings: Record<string, unknown> = {};
+  if (existsSync(file)) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not a JSON object");
+      settings = parsed as Record<string, unknown>;
+    } catch (e) {
+      ctx.out(`${file}: ${(e as Error).message}; Herdr App's telemetry left as it is`);
+      return "left as it is";
+    }
+    if (settings.telemetry === false) return "already off";
   }
-  if (state === "forge") return "already there";
-  // The developer's own toasts, already delivered by herdr: nothing to say.
-  if (state === "user-on") return "set in your config";
-  if (state === "user") {
-    ctx.out(`${path} sets [ui.toast] or ui = {…}: forge leaves it alone. herdr's toasts must be on ` +
-      `(delivery = "herdr") for the start popup's warnings to show.`);
-    return "set in your config";
-  }
-  if ((await ctx.prompt.pick(`Turn herdr's notifications on in ${path}?`, ["yes", "no"])) !== 1) {
-    ctx.out("herdr's notifications stay as they are: with them off, the start popup's warnings will go unseen.");
+  if ((await ctx.prompt.pick(herdrAppQuestion(), ["yes", "no"])) !== 1) {
+    ctx.out("Herdr App's telemetry stays as it is: it sends anonymous usage data until it is turned off in its Settings.");
     return "declined";
   }
   try {
-    addLaptopBlock(path, text);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${JSON.stringify({ ...settings, telemetry: false }, null, 2)}\n`);
   } catch (e) {
-    ctx.out(`${path}: ${(e as Error).message}; herdr's notifications left as they are`);
-    return "left as they are";
+    ctx.out(`${file}: ${(e as Error).message}; Herdr App's telemetry left as it is`);
+    return "left as it is";
   }
-  return "done";
+  return "off";
 }
+
+export const herdrAppSettingsPath = (): string => join(forgeHome(), ".config", "herdr-app", "settings.json");
+export const herdrAppQuestion = (): string => `Turn Herdr App's telemetry off in ${herdrAppSettingsPath()}?`;
 
 // ~/.local/bin/forge → the checkout's cli/forge, after a confirmation; any
 // other file there is left alone.

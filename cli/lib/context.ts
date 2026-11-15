@@ -25,9 +25,9 @@ export type Context = {
   prompt: Prompt;
   out(line: string): void;
   err(line: string): void;
-  // Une ligne de résultat que l'utilisateur doit voir : imprimée sur stdout et,
-  // dans la popup herdr, reprise dans la notification de fin d'exécution.
-  notify(line: string): void;
+  // Une attente courte entre deux regards sur un état ; les tests la rendent
+  // immédiate. Absente : setTimeout.
+  sleep?(ms: number): Promise<void>;
 };
 
 // Erreur métier : le message est affiché tel quel par forge.ts, préfixé une
@@ -138,7 +138,6 @@ export function createContext(): Context {
     prompt: createPrompt(),
     out: (line) => process.stdout.write(line + "\n"),
     err: (line) => process.stderr.write(line + "\n"),
-    // forge.ts l'enveloppe pour la notification ; seul, notify n'est qu'un out.
-    notify: (line) => process.stdout.write(line + "\n"),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   };
 }

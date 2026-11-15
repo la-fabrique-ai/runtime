@@ -9,7 +9,7 @@ for (const k of ["HERDR_ENV", "HERDR_BIN_PATH", "HERDR_PANE_ID", "HERDR_SOCKET_P
   delete process.env[k];
 }
 
-export type ExecRule = { match: string; code?: number; stdout?: string; stderr?: string };
+export type ExecRule = { match: string; code?: number; stdout?: string; stderr?: string; timedOut?: boolean };
 
 export type FakeOptions = {
   rules?: ExecRule[];
@@ -36,8 +36,6 @@ export type FakeContext = Context & {
   attachCalls: { argv: string[]; opts?: AttachOptions }[];
   out_lines: string[];
   err_lines: string[];
-  // Chaque ligne passée à ctx.notify() (aussi présente dans out_lines).
-  notified: string[];
 };
 
 export function fakeContext(opts: FakeOptions = {}): FakeContext {
@@ -49,7 +47,6 @@ export function fakeContext(opts: FakeOptions = {}): FakeContext {
   const attachCalls: { argv: string[]; opts?: AttachOptions }[] = [];
   const out_lines: string[] = [];
   const err_lines: string[] = [];
-  const notified: string[] = [];
 
   const exec = async (argv: string[], callOpts?: ExecOptions): Promise<ExecResult> => {
     calls.push(argv);
@@ -57,7 +54,7 @@ export function fakeContext(opts: FakeOptions = {}): FakeContext {
     const joined = argv.join(" ");
     for (const rule of rules) {
       if (joined.includes(rule.match)) {
-        return { code: rule.code ?? 0, stdout: rule.stdout ?? "", stderr: rule.stderr ?? "" };
+        return { code: rule.code ?? 0, stdout: rule.stdout ?? "", stderr: rule.stderr ?? "", ...(rule.timedOut ? { timedOut: true } : {}) };
       }
     }
     // Après les règles : un test peut toujours forcer la réponse d'un appel
@@ -95,6 +92,7 @@ export function fakeContext(opts: FakeOptions = {}): FakeContext {
 
   const fake: FakeContext = {
     exec,
+    sleep: async () => {},
     attach: async (argv, attachOpts) => {
       calls.push(argv);
       attachCalls.push({ argv, opts: attachOpts });
@@ -107,13 +105,11 @@ export function fakeContext(opts: FakeOptions = {}): FakeContext {
     prompt,
     out: (line) => out_lines.push(line),
     err: (line) => err_lines.push(line),
-    notify: (line) => { out_lines.push(line); notified.push(line); },
     calls,
     execOptions,
     attachCalls,
     out_lines,
     err_lines,
-    notified,
   };
   return fake;
 }

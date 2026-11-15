@@ -11,6 +11,12 @@ which removes Ubuntu's `npm` and the packages that depend on it (NodeSource's
 profiles, image) is `forge setup`'s job. Design:
 `docs/superpowers/specs/2026-10-15-v2-host-ansible-design.md`.
 
+The forge user also gets a systemd user service, `forge-api.service` (`forge api
+serve`, the API the team containers call, see the main README), with lingering
+on so that it runs without a login and after a reboot. A new release restarts
+it, and so does `forge team converge`: the unit is the forge user's, not
+root's, for that reason.
+
 ## Running it
 
 On the controller (your machine), from a git checkout of this repository.
@@ -19,8 +25,11 @@ On the controller (your machine), from a git checkout of this repository.
 ```bash
 ansible-galaxy collection install -r ansible/requirements.yml
 cp ansible/inventory.example.yml ~/forge-inventory.yml   # then edit it
-ansible-playbook -i ~/forge-inventory.yml ansible/site.yml
+ANSIBLE_PIPELINING=True ansible-playbook -i ~/forge-inventory.yml ansible/site.yml
 ```
+
+`ANSIBLE_PIPELINING=True` is optional and makes the run much faster on a remote host
+(one SSH session per task); `forge install` sets it.
 
 - **Requirements.** The controller needs ansible-core 2.20 or newer and git.
 - **Account.** Ansible connects as the machine's existing sudo account
@@ -122,7 +131,7 @@ your copy of `inventory.example.yml` to `-i` instead:
 
 ```bash
 ansible-galaxy collection install -r ansible/requirements.yml
-ansible-playbook -i ~/forge-local-inventory.yml ansible/site.yml
+ANSIBLE_PIPELINING=True ansible-playbook -i ~/forge-local-inventory.yml ansible/site.yml
 ```
 
 A second run must report `changed=0`.
@@ -177,7 +186,9 @@ every run.
 
 ```bash
 ssh forge-local                        # accept the host key once
-claude auth login
+# the Claude token: run `claude setup-token` on your machine, paste what it prints
+mkdir -p ~/.config/agent-forge
+(umask 077; cat > ~/.config/agent-forge/claude-token)   # paste, Enter, Ctrl-D
 git config --global user.name "Alice Example"
 git config --global user.email "alice@example.com"
 forge setup
@@ -188,12 +199,11 @@ exit
 Then `herdr --remote forge-local --remote-keybindings server` (for a remote
 host, your alias: `herdr --remote forge-vm --remote-keybindings server`).
 
-On your machine, turn herdr's notifications on, or the start popup's warnings
-go unseen: put `[ui.toast]` then `delivery = "herdr"` in
-`~/.config/herdr/config.toml`, unless that file already sets `[ui.toast]` or
-an inline `ui = {…}`. It is a setting of the client: the host's herdr config changes
-nothing. `forge install` adds those two lines in a block of its own, after
-asking.
+Declare a team in `~/.config/agent-forge/config.json` on the host and run
+`forge team converge` there (README, step 3). To see its agents in Herdr App
+without `forge team up`, add each container yourself, on your machine, with
+your `hc` at the version forge pins:
+`hc machine add --name <alias>-<container without agent-> --via '<path to forge> hc-via <alias> <container>'`.
 
 ### Fetch the agents' branches by hand
 
@@ -201,19 +211,21 @@ asking.
 your clone of the repository, with your SSH alias in place of `forge-local`:
 
 ```bash
-git remote add agent-acme-widgets forge-local:agent-acme-widgets
-git config remote.agent-acme-widgets.uploadpack "forge upload-pack agent-acme-widgets"
-git config remote.agent-acme-widgets.tagOpt --no-tags
-git config remote.agent-acme-widgets.pruneTags false
-git fetch agent-acme-widgets
+git remote add forge-web forge-local:team-web
+git config remote.forge-web.uploadpack "forge team upload-pack web"
+git config remote.forge-web.tagOpt --no-tags
+git config remote.forge-web.pruneTags false
+git fetch forge-web
 ```
 
-`forge upload-pack` runs on the host and serves the repository from inside the
-container, so the host never runs git in the agent's workspace. `tagOpt` and
-`pruneTags` keep the agent's tags out of your clone, even with
-`fetch.pruneTags` in your git configuration: a tag named `origin/main` would
-take that branch's place in `git log origin/main..` and other git commands.
-Review the branch, then sign and push it yourself.
+(`web` is the team's name in the host's configuration.) `forge team
+upload-pack` runs on the host: it refreshes the team mirror, a repository of
+the host's own that holds the branches the developers own, and serves it, so
+the host never runs git in an agent's workspace. `tagOpt` and `pruneTags` keep
+the agent's tags out of your clone, even with `fetch.pruneTags` in your git
+configuration: a tag named `origin/main` would take that branch's place in
+`git log origin/main..` and other git commands. Review the branch, then sign
+and push it yourself.
 
 ### Troubleshooting a manual install
 

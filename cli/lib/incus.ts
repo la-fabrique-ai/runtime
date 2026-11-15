@@ -112,6 +112,9 @@ export async function deviceNames(ctx: Context, name: string): Promise<string[]>
 // c'est l'appelant qui décide (via mustSucceed) d'échouer bruyamment. Renvoyer
 // void revenait à avaler le code de sortie ET le stderr capturé.
 export function configSet(ctx: Context, name: string, key: string, value: string): Promise<ExecResult> {
+  // Le client incus lit la valeur sur stdin quand elle vaut `-` (aussi dans
+  // `clé=-`) : stdin vide, valeur vide, clé retirée.
+  if (value === "-") throw new Error(`incus config set ${key}: a value of "-" is read from stdin`);
   return ctx.exec(incus("config", "set", name, key, value));
 }
 
@@ -137,21 +140,6 @@ export function stopInstance(ctx: Context, name: string): Promise<ExecResult> {
 
 export function deleteInstance(ctx: Context, name: string): Promise<ExecResult> {
   return ctx.exec(incus("delete", name, "--force"));
-}
-
-// La commande de l'agent doit rester l'enfant direct de `incus exec` : avec un
-// `su - aiuser -c` intermédiaire, SIGWINCH n'atteint jamais l'agent quand le
-// terminal hôte est redimensionné (diagnostiqué le 2026-08-31, commit c34a145).
-// --user/--group/--cwd remplacent `su - aiuser` + `cd`. HOME vient du profil,
-// mais pas TERM : plus aucun shell de login ne le pose, on le transmet.
-export function attachArgv(container: string, task: string, term: string, command: string[]): string[] {
-  return [
-    ...incus("exec", container),
-    "--user", "1001", "--group", "1001",
-    "--cwd", `/workspace/.trees/${task}`,
-    "--env", `TERM=${term}`,
-    "--", ...command,
-  ];
 }
 
 export type ServerInfo = { environment?: { firewall?: string; server_version?: string } };

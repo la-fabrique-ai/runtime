@@ -2,7 +2,7 @@
 // yet on GitHub, push agent/<task> as a fast-forward and open or find its PR.
 // A stacked task ships with the whole chain under it, bottom first.
 import { ForgeError, mustSucceed, type Context } from "../context.ts";
-import { fetchAgents } from "./fetch.ts";
+import { agentTasks, fetchAgents } from "./fetch.ts";
 import { printable } from "../printable.ts";
 import { ensurePr, prState, requireGh } from "../laptop/pr.ts";
 import { replayAndPush } from "../laptop/replay.ts";
@@ -19,13 +19,13 @@ export async function cmdShip(
 ): Promise<number> {
   const sign = opts.sign ?? true;
   await requireGh(ctx, opts.cwd ?? process.cwd());
-  const { root, ownerRepo, container, bases: recorded } = await fetchAgents(ctx, { host: opts.host, cwd: opts.cwd });
+  const { root, ownerRepo, remote, bases: recorded } = await fetchAgents(ctx, { host: opts.host, cwd: opts.cwd });
   const git = async (...args: string[]) =>
     (await mustSucceed(`git ${args[0]}`, ctx.exec(["git", ...args], { cwd: root }))).stdout;
   const names = async (prefix: string) =>
     (await git("for-each-ref", "--format=%(refname)", prefix)).split("\n").filter(Boolean).map((r) => r.slice(prefix.length));
 
-  const tasks = await names(`refs/remotes/${container}/agent/`);
+  const tasks = await agentTasks(ctx, git, remote);
   const wanted = await pickTask(ctx, tasks, task);
 
   // A recorded base names a branch on GitHub when the fetch brought it as
@@ -46,14 +46,14 @@ export async function cmdShip(
     // A merged task under the requested one is done: the task above goes onto
     // its PR's base. Commits it still has are left for `forge ship <t>`.
     if (t !== wanted && merged) {
-      const left = await notShipped(ctx, root, container, t, base, below);
+      const left = await notShipped(ctx, root, remote, t, base, below);
       ctx.out(left ? `agent/${t}: merged, skipped (${commits(left)} not shipped: forge ship ${t})` : `agent/${t}: merged, skipped`);
       below = { prBase: prBaseFor(base, below), merged: true };
       continue;
     }
     // Only the bottom of a chain has a branch base.
     if (base.kind === "branch" && base.assumed) await confirmMain(ctx, t, recorded.get(t));
-    const plan = await planTask(ctx, root, container, t, base, below);
+    const plan = await planTask(ctx, root, remote, t, base, below);
     if (t !== wanted && plan.commits.length === 0 && !plan.shipped) {
       throw new ForgeError(`agent/${t} has no commits of its own and no branch on GitHub, so agent/${chain[i + 1]} has nothing to go onto: nothing shipped`);
     }
@@ -136,7 +136,7 @@ async function pickTask(ctx: Context, tasks: string[], task: string | undefined)
   }
   // agent/<t> as printed by fetch and ship: task names never hold a slash.
   const name = task.replace(/^agent\//, "");
-  if (!tasks.includes(name)) throw new ForgeError(`unknown task ${task}: the agents' tasks are ${tasks.join(", ")}`);
+  if (!tasks.includes(name)) throw new ForgeError(`unknown task ${printable(task)}: the agents' tasks are ${tasks.join(", ")}`);
   return name;
 }
 

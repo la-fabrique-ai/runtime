@@ -14,7 +14,7 @@ test("validateRepo accepts owner/repo and rejects anything else", () => {
 test("validateTaskName allows [A-Za-z0-9._-] only", () => {
   validateTaskName("cli");
   validateTaskName("terminal-resize.fix_2");
-  for (const bad of ["with space", "a/b", "semi;colon", "$(whoami)", "tick`x`", ""]) {
+  for (const bad of ["-", "--help", "-x", "with space", "a/b", "semi;colon", "$(whoami)", "tick`x`", ""]) {
     assert.throws(() => validateTaskName(bad), ForgeError, `should reject: ${bad}`);
   }
 });
