@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // logic.js is a plain ES module with no import of the app's view library.
 // @ts-expect-error: a JavaScript module, not typed
-import { barText, newQuestions, notificationFor, shouldPoll, spaceRenames } from "../herdr/mods/forge/logic.js";
+import { barText, newQuestions, notificationFor, shouldPoll, spaceRenames, syncSpace, watchSpace } from "../herdr/mods/forge/logic.js";
 
 const q = (id: number, from = "agent-web-lead", summary = "Quel séparateur ?") => ({ id, from, time: "2026-11-15T10:00:00Z", summary, hasBody: false });
 const host = (name: string, over: object = {}) => ({ host: name, members: { working: 0, idle: 0, free: 0 }, questions: [], teams: [], error: null, ...over });
@@ -46,4 +46,9 @@ test("notificationFor: the title names the asker, the body is the summary cut to
   assert.equal(n.title, "Question from agent-web-lead");
   assert.equal(n.body.length, 120);
   assert.equal(notificationFor("h", q(1, "a", "a\u0007b")).body, "ab");
+});
+
+test("watchSpace and syncSpace: opened on the dev machine (machine \"\"), the tab named like the space", () => {
+  assert.deepEqual(watchSpace("h"), { name: "forge team h", tab: "forge team h", machine: "", argv: ["forge", "team", "watch", "--host", "h"] });
+  assert.deepEqual(syncSpace("h", "web"), { name: "forge sync web", tab: "forge sync web", machine: "", argv: ["forge", "team", "sync", "web", "--host", "h"] });
 });

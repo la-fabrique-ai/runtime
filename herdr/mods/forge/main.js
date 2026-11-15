@@ -5,7 +5,7 @@
 // file only calls it and the app's API (`herdr.d.ts`, `gpui-kit.d.ts`).
 import { View, div } from "gpui-kit";
 import { exec, nextCommand, notify, run, spaces, theme } from "herdr";
-import { barText, newQuestions, notificationFor, shouldPoll, spaceRenames } from "./logic.js";
+import { barText, newQuestions, notificationFor, shouldPoll, spaceRenames, syncSpace, watchSpace } from "./logic.js";
 
 const SEEN_KEY = "forge.seen";
 const TICK_MS = 5000;
@@ -93,17 +93,17 @@ export default class ForgeBar extends View {
   // Select the space that already shows the watch, or open it.
   watch(host = this.firstHost()) {
     if (host === undefined) return;
-    const name = `forge team ${host}`;
-    const open = spaces().find((s) => s.name === name);
+    const args = watchSpace(host);
+    const open = spaces().find((s) => s.name === args.name);
     if (open !== undefined) run("space.select", { id: open.id });
-    else run("space.new", { name, argv: ["forge", "team", "watch", "--host", host] });
+    else run("space.new", args);
   }
 
   // `forge team sync <team>` needs the forwarded SSH agent: a terminal, one space per team.
   sync() {
     for (const h of this.report?.hosts ?? []) {
       for (const team of h.teams ?? []) {
-        run("space.new", { name: `forge sync ${team}`, argv: ["forge", "team", "sync", team, "--host", h.host] });
+        run("space.new", syncSpace(h.host, team));
       }
     }
   }

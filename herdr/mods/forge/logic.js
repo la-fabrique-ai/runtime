@@ -70,3 +70,17 @@ export function notificationFor(host, question) {
     body: [...clean(question.summary)].slice(0, BODY_MAX).join(""),
   };
 }
+
+// The arguments of `space.new` for the watch of `host` and for the sync of `team`
+// on `host`. `machine: ""` is the dev machine: without it a click would open the
+// space on the machine of the space being looked at, an agent's container. `tab`
+// names the tab, which would otherwise take the name of the process.
+export function watchSpace(host) {
+  const name = `forge team ${host}`;
+  return { name, tab: name, machine: "", argv: ["forge", "team", "watch", "--host", host] };
+}
+
+export function syncSpace(host, team) {
+  const name = `forge sync ${team}`;
+  return { name, tab: name, machine: "", argv: ["forge", "team", "sync", team, "--host", host] };
+}
