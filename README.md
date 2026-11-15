@@ -364,10 +364,18 @@ at the bottom of Herdr App (a mod runs only where it is shown): how many agents
 work and how many questions wait, a notification for each new question, whose
 click opens `forge team watch`, and the spaces of the agents named after them.
 It exposes two commands, `forge.watch` and `forge.sync` (`forge team sync` for
-each team, in a terminal). forge never edits your `keys.json`: to bind them,
-add to it by hand, in the format of that file (see Herdr App's guide), a binding
-of your choice to the command `forge.watch` and one to `forge.sync`. Check the
-mod with `herdr-app check ~/.config/herdr-app/mods/forge`.
+each team, in a terminal). forge never edits your `keys.json` (any edit makes
+that file yours, and Herdr App stops updating its defaults): to bind them, add
+the lines below to it by hand, with the keys you like:
+
+```json
+{ "global": { "ctrl-alt-shift-w": "forge.watch", "ctrl-alt-shift-s": "forge.sync" } }
+```
+
+A notification passes no argument to the mod: with several hosts installed, its
+click (like the bar's, and the key) opens the watch of the first host that
+answers. For another host, run `forge team watch --host <name>` in a terminal.
+Check the mod with `herdr-app check ~/.config/herdr-app/mods/forge`.
 
 A developer takes one task at a time, on a new branch `agent/<task>` from
 `origin/main`, and a task name belongs to one developer. An agent that has
