@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  configFromEnv, createWatchdog, fullAvg10, notifyCall, pickVictim, readProc, type Config, type Proc,
+  configFromEnv, commandName, createWatchdog, fullAvg10, notifyCall, pickVictim, readProc, type Config, type Proc,
 } from "../ansible/roles/forge_memory_watchdog/files/memory-watchdog.ts";
 
 const ME = 1000;
@@ -185,10 +185,24 @@ test("a kill is told to the container's session, by container name and with the 
 });
 
 test("the process name goes to forge notify on stdin, never in its argv", () => {
-  const p = { pid: 7, name: "x] [forge] $(id)", rssKib: 2048, uid: ME, args: [], containerInit: false };
+  const p = { pid: 7, name: "comm", label: "x] [forge] $(id)", rssKib: 2048, uid: ME, args: [], containerInit: false };
   const { args, input } = notifyCall("agent-acme-widgets", p);
   assert.deepEqual(args, ["notify", "agent-acme-widgets", "memory-kill", "--pid", "7", "--rss-kib", "2048"]);
-  assert.equal(input, p.name);
+  assert.equal(input, p.label);
+});
+
+test("a process is named from its command line, not from its comm, which Node sets to MainThread", () => {
+  assert.equal(commandName(["node", "-e", "setInterval(()=>{},1)"]), "node");
+  assert.equal(commandName(["/usr/bin/node", "--max-old-space-size=900", "/srv/app/grow.js", "x"]), "node grow.js");
+  assert.equal(commandName(["python3", "/home/aiuser/grow.py"]), "python3 grow.py");
+  assert.equal(commandName(["/usr/local/bin/vite", "build"]), "vite");
+  assert.equal(commandName([]), null);
+  // From the /proc entry: the comm is MainThread, the command line says what it is.
+  proc(21, { name: "MainThread", rssKib: 600000, args: ["node", "/work/serve.js"] });
+  assert.equal(readProc(join(root, "proc"), 21)?.label, "node serve.js");
+  // No command line: the comm.
+  proc(22, { name: "worker", rssKib: 10, args: [] });
+  assert.equal(readProc(join(root, "proc"), 22)?.label, "worker");
 });
 
 test("a kill that fails is logged and does not stop the watchdog", () => {

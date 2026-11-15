@@ -39,7 +39,8 @@ export type Config = {
   uid: number;
 };
 
-export type Proc = { pid: number; name: string; rssKib: number; uid: number; args: string[]; containerInit: boolean };
+// `name` is the kernel's comm; `label` is what the agent is told, from the command line.
+export type Proc = { pid: number; name: string; label: string; rssKib: number; uid: number; args: string[]; containerInit: boolean };
 
 const read = (path: string): string | null => {
   try {
@@ -72,6 +73,23 @@ function cgroupPids(dir: string): number[] {
   return pids;
 }
 
+// The command's name from its command line: the base name of argv[0] and, for
+// an interpreter, that of its script (`node grow.js`). The comm is not that:
+// Node renames its main thread `MainThread`. Null for an empty command line.
+const INTERPRETERS = /^(node|python[0-9.]*|bash|sh)$/;
+// The options that take the code itself, which is no script's name.
+const CODE_OPTIONS = new Set(["-e", "-p", "-c", "--eval", "--print"]);
+export function commandName(args: string[]): string | null {
+  if (args.length === 0) return null;
+  const command = basename(args[0]);
+  if (!INTERPRETERS.test(command)) return command;
+  for (const a of args.slice(1)) {
+    if (CODE_OPTIONS.has(a)) break;
+    if (!a.startsWith("-")) return `${command} ${basename(a)}`;
+  }
+  return command;
+}
+
 // null for a process that has exited since, or a kernel thread (no VmRSS).
 export function readProc(procRoot: string, pid: number): Proc | null {
   const status = read(join(procRoot, String(pid), "status"));
@@ -85,9 +103,10 @@ export function readProc(procRoot: string, pid: number): Proc | null {
   // rootless Docker container) has a third, so "1" there is not the
   // container's init.
   const nspid = (field("NSpid") ?? "").split(/\s+/);
+  const args = (read(join(procRoot, String(pid), "cmdline")) ?? "").split("\0").filter(Boolean);
+  const name = field("Name") ?? "?";
   return {
-    pid, name: field("Name") ?? "?", rssKib: Number(rss), uid: Number(uid),
-    args: (read(join(procRoot, String(pid), "cmdline")) ?? "").split("\0").filter(Boolean),
+    pid, name, label: commandName(args) ?? name, rssKib: Number(rss), uid: Number(uid), args,
     containerInit: nspid[1] === "1",
   };
 }
@@ -112,7 +131,7 @@ export function pickVictim(procs: Proc[], uid: number): Proc | null {
 export function notifyCall(container: string, v: Proc): { args: string[]; input: string } {
   return {
     args: ["notify", container, "memory-kill", "--pid", String(v.pid), "--rss-kib", String(v.rssKib)],
-    input: v.name,
+    input: v.label,
   };
 }
 
@@ -168,10 +187,10 @@ export function createWatchdog(config: Config, deps: Deps) {
     }
     try {
       deps.kill(victim.pid);
-      deps.log(`${container}: killed pid ${victim.pid} (${victim.name}, ${gib(victim.rssKib)} RSS), the biggest of its processes: ${why}`);
+      deps.log(`${container}: killed pid ${victim.pid} (${victim.label}, ${gib(victim.rssKib)} RSS), the biggest of its processes: ${why}`);
       deps.notify(container, victim);
     } catch (e) {
-      deps.log(`${container}: could not kill pid ${victim.pid} (${victim.name}): ${(e as Error).message}`);
+      deps.log(`${container}: could not kill pid ${victim.pid} (${victim.label}): ${(e as Error).message}`);
     }
     // The pressure average takes about 10 s to fall: wait for the threshold
     // to hold again before killing a second process.

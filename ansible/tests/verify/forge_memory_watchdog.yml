@@ -199,7 +199,7 @@
               - verify_wd_kill.stdout is search(verify_wd_killed)
           vars:
             verify_wd_killed: >-
-              agent-wdtest: killed pid \d+ \(python3, \d+ MiB RSS\), the biggest of its
+              agent-wdtest: killed pid \d+ \(python3 grow.py, \d+ MiB RSS\), the biggest of its
               processes: memory.pressure full avg10=[\d.]+ has been
               {{ forge_memory_watchdog_threshold | default(20) }} or above for \d+ s
 
