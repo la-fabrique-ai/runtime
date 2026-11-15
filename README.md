@@ -238,31 +238,38 @@ Lima and Ansible, which may use them for other things.
 ### 3. Build a team
 
 A team lives in the host's `~/.config/agent-forge/config.json`, next to the
-settings of [Configuration](#configuration): a repository and its roles. For
-example, a pilot, a lead, two developers and a reviewer on one repository:
+settings of [Configuration](#configuration): a repository and its roles. forge
+ships a small reference team, a pilot, a lead and two developers on one
+repository, whose role prompts are in `teams/reference/prompts`:
 
 ```json
 {
-  "pilot": { "memory": "1GiB", "capabilities": ["assign"], "talkTo": ["web"] },
+  "pilot": { "memory": "1GiB", "prompt": "reference", "capabilities": ["assign"], "talkTo": ["web"] },
   "teams": {
     "web": {
       "repo": "acme/widgets",
+      "prompts": "reference",
       "roles": {
         "lead": { "memory": "1GiB", "capabilities": ["repo", "read-team", "assign", "ask-human"], "talkTo": ["pilot", "team"] },
-        "dev": { "count": 2, "memory": "2GiB", "capabilities": ["repo", "publish"], "talkTo": ["lead"] },
-        "reviewer": { "memory": "1GiB", "capabilities": ["repo", "read-team"], "talkTo": ["lead"] }
+        "dev": { "count": 2, "memory": "2GiB", "capabilities": ["repo", "publish"], "talkTo": ["lead"] }
       }
     }
   }
 }
 ```
 
-That is five containers: `agent-pilot`, `agent-web-lead`, `agent-web-dev-1`,
-`agent-web-dev-2` and `agent-web-reviewer`. Every role has a `memory` because a
-role without one gets the profile's 75% of the host's memory, and a few of
-those add up to more than the host has: these 7 GiB fit a VM of 8 GiB minus
-what the host keeps for itself (640 MiB by default), and `forge team converge`
-warns when a team does not. Create them from your machine:
+`"prompts": "reference"` and the pilot's `"prompt": "reference"` are opt-in:
+without them nothing changes. The reference roles are `lead` and `dev` (and the
+pilot); any other role name is refused at `converge` with that list. To compose
+your own team, point `prompts` at a directory of `<role>.md` files, with the
+roles you want.
+
+That is four containers: `agent-pilot`, `agent-web-lead`, `agent-web-dev-1` and
+`agent-web-dev-2`. Every role has a `memory` because a role without one gets the
+profile's 75% of the host's memory, and a few of those add up to more than the
+host has: these 6 GiB fit a VM of 8 GiB minus what the host keeps for itself
+(640 MiB by default), and `forge team converge` warns when a team does not.
+Create them from your machine:
 
 ```bash
 forge team up
@@ -327,9 +334,39 @@ Claude Code session in its own terminal:
 forge team assign agent-web-dev-1 fix-login <<'EOF'
 The login form accepts an empty password. Fix it, with a test.
 EOF
-forge team status          # each agent's task and session (--json for a program)
+forge team status          # each agent's task, session and wait, the Inbox, the mirror's age (--json for a program)
 forge team release agent-web-dev-1
 ```
+
+#### See the team, answer its questions
+
+An agent with `ask-human` can leave a question for you (`forge-team ask`). It
+waits in the **Inbox**, which `forge team status` lists (`#<id> <agent> <age>:
+<summary>`; a question with a detail keeps it in the host's journal). From your
+machine:
+
+```bash
+forge team watch                       # the team, the Inbox and the mirror's age, redrawn every 5 s; Ctrl-C ends it
+forge answer 7 "Keep the French"       # the summary is typed to the agent, after forge's own prefix
+forge answer 7 "See the detail" < answer.md   # a body on stdin goes to a file the agent reads
+```
+
+An answer is typed only into a live `forge-agent` session. If the agent's
+session is gone (released, restarted), the answer is recorded, the question
+closed, and the command says it was not delivered. The displays ask the host
+one call at a time, with a timeout, and say how long it has been unreachable:
+they never pile up SSH sessions on a small host.
+
+`forge install` also copies a **forge mod** into Herdr App's mods directory
+(`~/.config/herdr-app/mods/forge/`, replaced at each run). It is a one-line bar
+at the bottom of Herdr App (a mod runs only where it is shown): how many agents
+work and how many questions wait, a notification for each new question, whose
+click opens `forge team watch`, and the spaces of the agents named after them.
+It exposes two commands, `forge.watch` and `forge.sync` (`forge team sync` for
+each team, in a terminal). forge never edits your `keys.json`: to bind them,
+add to it by hand, in the format of that file (see Herdr App's guide), a binding
+of your choice to the command `forge.watch` and one to `forge.sync`. Check the
+mod with `herdr-app check ~/.config/herdr-app/mods/forge`.
 
 A developer takes one task at a time, on a new branch `agent/<task>` from
 `origin/main`, and a task name belongs to one developer. An agent that has
@@ -463,7 +500,9 @@ link):
 | `forge install [--remote <address>] [--host <name>]` | Install or update a host: the local VM by default, a new remote VM with `--remote`, an installed host with `--host` |
 | `forge open [--host <name>]` | Open the herdr TUI on a host |
 | `forge team up [<team>] [--host <name>]` | Converge the teams on the host (with your SSH agent forwarded), then add each container as a Herdr App machine |
-| `forge team assign <container> [<task>]`, `release <container>`, `status [--json]`, `sync <team>` | The same commands as on the host, over SSH; `assign` reads the instruction on stdin |
+| `forge team assign <container> [<task>]`, `release <container>`, `status [--json] [--quick]`, `sync <team>` | The same commands as on the host, over SSH; `assign` reads the instruction on stdin |
+| `forge team watch [--host <name>]` | The team, its Inbox and the mirror's age, redrawn every 5 s |
+| `forge answer <id> "<summary>" [--host <name>]` | Answer an agent's question; a body piped on stdin goes to a file the agent reads |
 | `forge fetch [--host <name>]` | In your clone: fetch the developers' branches from the team mirror and list the tasks (needs no `gh`) |
 | `forge ship <task> [--host <name>]` | In your clone: re-sign, push and open the PR; needs `gh auth login` |
 
@@ -472,7 +511,7 @@ Run on the host, over `ssh`:
 | Command | What it does |
 |---|---|
 | `forge team converge [<team>]` | Create the missing containers of the configured teams (and the pilot), start the stopped ones, refresh the team mirror, and list every agent; a container the configuration no longer declares is reported and left alone |
-| `forge team assign`, `release`, `status`, `sync` | Give an agent a task, free it, show each agent's task and session, refresh the mirrors |
+| `forge team assign`, `release`, `status`, `sync`, `answer` | Give an agent a task, free it, show each agent's task and session and the Inbox, refresh the mirrors, record an answer (`forge answer` from your machine is the way in; `--quick` skips the team mirror's refresh) |
 | `forge list` | Every container: repository, mode, egress, state, image build |
 | `forge stop [<owner/repo>] [--force]` | Stop a container; refused while a task has uncommitted changes, unless `--force`. Commits are not checked: fetch them first |
 | `forge delete [<owner/repo>] [--force]` | Delete a single-agent container, with the same guard. Its workspace and the host's mirror stay |

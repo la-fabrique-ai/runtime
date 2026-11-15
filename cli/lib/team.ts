@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { ForgeConfig } from "./config.ts";
 import { ForgeError } from "./context.ts";
 import type { Capability } from "./team-config.ts";
-import { forgeHome } from "./paths.ts";
+import { forgeHome, repoRoot } from "./paths.ts";
 import { validateContainerName } from "./validate.ts";
 
 export const PILOT = "agent-pilot";
@@ -18,6 +18,20 @@ export type Member = {
   env: string | null; // the role's .env, as an expanded host path
 };
 
+// The reference team shipped in the repository (teams/reference): opt-in, with
+// `"prompts": "reference"` on a team and `"prompt": "reference"` on the Pilot.
+export const REFERENCE_PROMPTS = join(repoRoot(), "teams", "reference", "prompts");
+const REFERENCE_ROLES = ["dev", "lead"];
+
+function rolePrompt(prompts: string | null, role: string): string | null {
+  if (prompts === null) return null;
+  if (prompts !== "reference") return `${prompts}/${role}.md`;
+  if (!REFERENCE_ROLES.includes(role)) {
+    throw new ForgeError(`no reference prompt for role ${role} (reference roles: ${REFERENCE_ROLES.join(", ")})`);
+  }
+  return join(REFERENCE_PROMPTS, `${role}.md`);
+}
+
 const hostPath = (p: string | null): string | null => (p !== null && p.startsWith("~/") ? join(forgeHome(), p.slice(2)) : p);
 
 // Pilot first, then the teams in key order, the roles in key order.
@@ -28,7 +42,7 @@ export function members(cfg: ForgeConfig): Member[] {
     out.push({
       name: PILOT, team: null, role: "pilot", index: null, repo: null, capabilities: cfg.pilot.capabilities,
       talkTo: [], strict: cfg.pilot.strict, memory: cfg.pilot.memory, cpu: null, plugins: cfg.pilot.plugins,
-      prompt: cfg.pilot.prompt, env: hostPath(cfg.pilot.env),
+      prompt: cfg.pilot.prompt === "reference" ? join(REFERENCE_PROMPTS, "pilot.md") : cfg.pilot.prompt, env: hostPath(cfg.pilot.env),
     });
   }
   for (const [team, t] of Object.entries(cfg.teams)) {
@@ -41,7 +55,7 @@ export function members(cfg: ForgeConfig): Member[] {
         out.push({
           name, team, role, index, repo: r.capabilities.includes("repo") ? t.repo : null,
           capabilities: r.capabilities, talkTo: [], strict: r.strict, memory: r.memory, cpu: r.cpu,
-          plugins: r.plugins, prompt: t.prompts === null ? null : `${t.prompts}/${role}.md`, env: hostPath(r.env),
+          plugins: r.plugins, prompt: rolePrompt(t.prompts, role), env: hostPath(r.env),
         });
       }
     }
