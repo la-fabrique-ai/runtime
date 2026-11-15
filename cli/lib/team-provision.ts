@@ -12,7 +12,7 @@ import type { ForgeConfig } from "./config.ts";
 import {
   BASE_IMAGE, latestImageCommit, PROVISIONING_KEY, PROVISIONING_WORKSPACE_KEY,
 } from "./containers.ts";
-import { configSet, configUnset, execAsAgent, execAsAgentArgv, forgeProject, incus, pushText, waitReady } from "./incus.ts";
+import { configSet, configUnset, execAsAgent, execAsAgentArgv, forgeProject, incus, pullText, pushText, waitReady } from "./incus.ts";
 import {
   cloneWorkspace, ensureMirror, ensureTeamMirror, MIRROR_MOUNT, mirrorRepo, ORIGIN_DEVICE, pointOriginAtMirror,
   requireMirrorOf, TEAM_DEVICE, TEAM_MOUNT, teamMirrorPath,
@@ -25,8 +25,10 @@ import { egressNames, PROFILE } from "./objects.ts";
 import { mirrorPath, repoRoot, workspacesDir } from "./paths.ts";
 import { applyStrictSettings, requireStrictRuntime, strictLaunchArgs } from "./strict.ts";
 import type { Member } from "./team.ts";
+import { ensureApiAccess } from "./api/access.ts";
 
 const MODE = "supervised";
+const CLAUDE_MD = "/home/aiuser/.claude/CLAUDE.md";
 // Le seul marché de plugins que forge sait ajouter (comme Superpowers l'était
 // avant la partie 1a) ; un plugin `nom@autre` est refusé avant toute création.
 const MARKETPLACES: Record<string, string> = {
@@ -45,7 +47,7 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   // Préconditions, toutes vérifiées avant de rien créer.
   requireClaudeToken();
   requirePlugins(m);
-  const rolePrompt = m.prompt === null ? "" : readPrompt(m);
+  if (m.prompt !== null) readPrompt(m); // lisible avant de rien créer
   const identity = team?.gitIdentity ?? await hostGitIdentity(ctx);
   await requireRuntime(ctx);
   const plan = m.strict ? await requireStrictRuntime(ctx) : null;
@@ -130,23 +132,7 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   await pushFile(ctx, "push onboarding state", join(repoRoot(), "container", "claude.json"),
     m.name, "/home/aiuser/.claude.json", 1001, "600");
 
-  ctx.out("Installing Claude team instructions...");
-  const instructions = readFileSync(join(repoRoot(), "container", "CLAUDE.md"), "utf8");
-  await mustSucceed("push CLAUDE.md", pushText(ctx, m.name, "/home/aiuser/.claude/CLAUDE.md",
-    rolePrompt === "" ? instructions : `${instructions}\n${rolePrompt}`, { uid: 1001, gid: 1001, mode: "644" }));
-  await pushFile(ctx, "push forge-agent", join(repoRoot(), "container", "forge-agent"),
-    m.name, "/usr/local/bin/forge-agent", 0, "755");
-
-  // Le hook et les réglages appartiennent à root : l'agent ne peut pas les
-  // réécrire en place.
-  ctx.out("Installing Claude security hooks...");
-  await mustSucceed("create hooks directory",
-    ctx.exec(incus("exec", m.name, "--", "mkdir", "-p", "/home/aiuser/.claude/hooks")));
-  await pushFile(ctx, "push pre-bash.sh", join(repoRoot(), "container", "pre-bash.sh"),
-    m.name, "/home/aiuser/.claude/hooks/pre-bash.sh", 0, "755");
-  await mustSucceed("push Claude settings",
-    pushText(ctx, m.name, "/home/aiuser/.claude/settings.json", settingsFor(m), { uid: 0, gid: 0, mode: "644" }));
-  await requireHookBlocks(ctx, m.name);
+  await installMemberFiles(ctx, m);
 
   await refreshClaude(ctx, m.name, m.strict);
   await installPlugins(ctx, m);
@@ -171,6 +157,35 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   await mustSucceed("clear provisioning marker", configUnset(ctx, m.name, PROVISIONING_KEY));
   await mustSucceed("clear provisioning marker", configUnset(ctx, m.name, PROVISIONING_WORKSPACE_KEY));
   ctx.out(`Container ${m.name} provisioned.`);
+}
+
+// Ce que forge pose dans un membre et qu'une mise à jour de forge ou du prompt
+// d'un rôle change : les instructions (avec le prompt du rôle), le lanceur, le
+// canal d'API et forge-team, le hook et les réglages. `provisionMember` l'appelle
+// pour un container neuf, `converge` pour un container déjà là. Rend vrai quand
+// les instructions ont changé : une session déjà lancée ne les relit pas.
+export async function installMemberFiles(ctx: Context, m: Member): Promise<{ instructionsChanged: boolean }> {
+  ctx.out("Installing Claude team instructions...");
+  const rolePrompt = m.prompt === null ? "" : readPrompt(m);
+  const instructions = readFileSync(join(repoRoot(), "container", "CLAUDE.md"), "utf8");
+  const text = rolePrompt === "" ? instructions : `${instructions}\n${rolePrompt}`;
+  const before = await pullText(ctx, m.name, CLAUDE_MD);
+  await mustSucceed("push CLAUDE.md", pushText(ctx, m.name, CLAUDE_MD, text, { uid: 1001, gid: 1001, mode: "644" }));
+  await pushFile(ctx, "push forge-agent", join(repoRoot(), "container", "forge-agent"),
+    m.name, "/usr/local/bin/forge-agent", 0, "755");
+  await ensureApiAccess(ctx, m);
+
+  // Le hook et les réglages appartiennent à root : l'agent ne peut pas les
+  // réécrire en place.
+  ctx.out("Installing Claude security hooks...");
+  await mustSucceed("create hooks directory",
+    ctx.exec(incus("exec", m.name, "--", "mkdir", "-p", "/home/aiuser/.claude/hooks")));
+  await pushFile(ctx, "push pre-bash.sh", join(repoRoot(), "container", "pre-bash.sh"),
+    m.name, "/home/aiuser/.claude/hooks/pre-bash.sh", 0, "755");
+  await mustSucceed("push Claude settings",
+    pushText(ctx, m.name, "/home/aiuser/.claude/settings.json", settingsFor(m), { uid: 0, gid: 0, mode: "644" }));
+  await requireHookBlocks(ctx, m.name);
+  return { instructionsChanged: before !== text };
 }
 
 // container/settings.json, plus `enabledPlugins` quand le rôle a des plugins.

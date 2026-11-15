@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
 import { parseConfig } from "../cli/lib/config.ts";
-import { assign, busyState, release } from "../cli/lib/tasks.ts";
+import { assign, busyState, NO_BRANCH, release } from "../cli/lib/tasks.ts";
 
 const cfg = parseConfig("/c.json", {
   teams: {
@@ -37,6 +37,7 @@ test("a free developer gets a new branch from origin/main, the keys, then a sess
   const order = ["git -C /workspace status --porcelain", "git -C /workspace fetch origin",
     "git -C /workspace switch -c agent/fix-login origin/main", "-- hc run --bg --name agent"].map((s) => calls.findIndex((c) => c.includes(s)));
   assert.ok(order.every((i) => i >= 0) && order.every((i, k) => k === 0 || i > order[k - 1]), calls.join("\n"));
+  assert.ok(calls.some((c) => c.includes("find /home/aiuser/.forge/messages -mindepth 1 -delete")), "the messages are cleared");
   assert.deepEqual(
     [keys(DEV1)["user.forge.base.fix-login"], keys(DEV1)["user.forge.task"], keys(DEV1)["user.forge.assigned_by"]],
     ["origin/main", "fix-login", HUMAN]);
@@ -56,8 +57,9 @@ test("refusals change nothing: no state, no git switch, no session", async () =>
       { to: DEV1, task: "a", text: "x", by: HUMAN }, /busy with other.*assigned by human/],
     ["a task owned by another developer", { [DEV1]: { "user.forge.base.fix-login": "origin/main" } },
       { to: DEV2, task: "fix-login", text: "x", by: HUMAN }, /owned by agent-web-dev-1/],
-    ["a developer without a task", {}, { to: DEV1, task: null, text: "x", by: HUMAN }, /task name/],
-    ["a task for a member without publish", {}, { to: REV, task: "a", text: "x", by: HUMAN }, /no publish capability/],
+    ["a developer without a task", {}, { to: DEV1, task: null, text: "x", by: HUMAN }, /\(forge team assign agent-web-dev-1 <task>/],
+    ["a task for a member without publish", {}, { to: REV, task: "a", text: "x", by: HUMAN }, /no publish capability: give it no task name \(forge team assign agent-web-reviewer,/],
+    ["an agent's refusal names forge-team", {}, { to: REV, task: "a", text: "x", by: DEV1 }, /\(forge-team assign agent-web-reviewer,/],
     ["a dirty clone", {}, { to: DEV1, task: "a", text: "x", by: HUMAN }, /2 uncommitted changes/,
       [{ match: "status --porcelain", stdout: " M a.ts\n?? b.ts\n" }]],
     ["an invalid task name", {}, { to: DEV1, task: "a b", text: "x", by: HUMAN }, /task-name/],
@@ -72,10 +74,11 @@ test("refusals change nothing: no state, no git switch, no session", async () =>
   }
 });
 
-test("a reviewer takes a task without a branch: marked '-', no git", async () => {
-  const { ctx, keys, flat } = setup();
+test("a reviewer takes a task without a branch: marked as such, no git", async () => {
+  const { fake, ctx, keys, flat } = setup();
   await assign(ctx, cfg, { to: REV, task: null, text: "Relis", by: HUMAN });
-  assert.equal(keys(REV)["user.forge.task"], "-");
+  assert.equal(keys(REV)["user.forge.task"], NO_BRANCH);
+  assert.equal(fake.files.get(`agent-forge/${REV}/home/aiuser/.forge/instruction.md`)!.content, "[forge] task without a branch from human\n\nRelis");
   assert.ok(!flat().some((c) => c.includes(" git ")));
 });
 
@@ -87,11 +90,25 @@ test("a stopped member is started, and a failing session leaves it free", async 
   assert.equal(keys(REV)["user.forge.assigned_by"], undefined);
 });
 
+test("a release whose session cannot be stopped still frees the member, and says so", async () => {
+  const { ctx, flat } = setup({ [DEV1]: { "user.forge.task": "a", "user.forge.assigned_by": HUMAN } }, [{ match: "hc kill", code: 1, stderr: "no core" }]);
+  await release(ctx, cfg, { to: DEV1, by: HUMAN });
+  assert.equal(await busyState(ctx, DEV1), null);
+  assert.ok(ctx.err_lines.some((l) => l.startsWith(`WARNING: could not stop ${DEV1}'s session`)), flat().join("\n"));
+});
+
 test("release: by the human or by who assigned; not by anyone else, not when free", async () => {
   const busy = { "user.forge.task": "a", "user.forge.assigned_by": "agent-web-lead" };
   const mine = setup({ [DEV1]: busy });
   await release(mine.ctx, cfg, { to: DEV1, by: "agent-web-lead" });
   assert.equal(await busyState(mine.ctx, DEV1), null);
+  assert.ok(mine.flat().some((c) => c.includes("find /home/aiuser/.forge/messages -mindepth 1 -delete")), "the messages are cleared");
+  // La session s'arrête une fois les clés retirées ; le terminal reste (pas de `hc rm`).
+  const calls = mine.flat();
+  const unset = calls.findLastIndex((c) => c.includes("config unset"));
+  const kill = calls.findIndex((c) => c.endsWith("-- hc kill agent"));
+  assert.ok(unset >= 0 && kill > unset, calls.join("\n"));
+  assert.ok(!calls.some((c) => c.endsWith("-- hc rm agent")), "the terminal stays readable");
   const human = setup({ [DEV1]: busy });
   await release(human.ctx, cfg, { to: DEV1, by: HUMAN });
   assert.equal(await busyState(human.ctx, DEV1), null);

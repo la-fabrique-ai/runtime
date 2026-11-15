@@ -8,15 +8,18 @@ import { ForgeError, mustSucceed } from "./context.ts";
 import type { ForgeConfig } from "./config.ts";
 import { baseKey } from "./containers.ts";
 import { configGet, configSet, configUnset, execAsAgentArgv } from "./incus.ts";
-import { startSession } from "./hc-session.ts";
+import { clearMessages, startSession, stopSession } from "./hc-session.ts";
 import { ensureRunning } from "./session.ts";
 import { members, memberNamed, type Member } from "./team.ts";
 import { validateTaskName } from "./validate.ts";
 
 export const TASK_KEY = "user.forge.task";
 export const ASSIGNED_BY_KEY = "user.forge.assigned_by";
-// Une tâche sans branche (un relecteur, le Pilote) : la valeur de TASK_KEY.
-export const NO_BRANCH = "-";
+// Une tâche sans branche (un relecteur, le Lead) : la valeur de TASK_KEY. Ni
+// `-` (le client incus lit alors la valeur sur stdin : elle serait vide et la
+// clé retirée), ni un nom de tâche possible : les parenthèses et l'espace n'en
+// sont pas. C'est aussi ce que `forge team status` affiche.
+export const NO_BRANCH = "(no branch)";
 
 export type Busy = { task: string; assignedBy: string } | null;
 
@@ -36,6 +39,12 @@ export async function owner(ctx: Context, cfg: ForgeConfig, team: string, task: 
   return null;
 }
 
+// La première ligne d'une session confiée, écrite par forge avant la consigne :
+// de quoi dire à l'agent quelle tâche on lui donne et à qui rendre compte. Même
+// forme que l'avis d'un message ; l'appelant est un nom de container ou `human`.
+export const taskNotice = (task: string | null, by: string) =>
+  `[forge] task ${task ?? "without a branch"} from ${by}`;
+
 type AssignRequest = { to: string; task: string | null; text: string; by: string };
 
 // Les règles d'abord (rien ne change tant qu'elles ne sont pas toutes passées),
@@ -45,11 +54,14 @@ export async function assign(ctx: Context, cfg: ForgeConfig, req: AssignRequest)
   const m = memberNamed(cfg, req.to);
   const publishes = m.capabilities.includes("publish");
   if (req.task !== null) validateTaskName(req.task);
+  // La commande à citer est celle de l'appelant : un agent n'a que forge-team.
+  const command = req.by === "human" ? "forge team" : "forge-team";
   if (publishes && req.task === null) {
-    throw new ForgeError(`${m.name} publishes branches: give it a task name (forge team assign ${m.name} <task>).`);
+    throw new ForgeError(`${m.name} publishes branches: give it a task name (${command} assign ${m.name} <task>, the instruction on stdin).`);
   }
   if (!publishes && req.task !== null) {
-    throw new ForgeError(`${m.name} (role ${m.role}) has no publish capability: it takes a task without a branch.`);
+    throw new ForgeError(`${m.name} (role ${m.role}) has no publish capability: give it no task name ` +
+      `(${command} assign ${m.name}, the instruction on stdin).`);
   }
   const busy = await busyState(ctx, m.name);
   if (busy !== null) {
@@ -71,7 +83,7 @@ export async function assign(ctx: Context, cfg: ForgeConfig, req: AssignRequest)
   await mustSucceed("record the task", configSet(ctx, m.name, TASK_KEY, req.task ?? NO_BRANCH));
   await mustSucceed("record who assigned it", configSet(ctx, m.name, ASSIGNED_BY_KEY, req.by));
   try {
-    await startSession(ctx, m, req.task ?? NO_BRANCH, req.text);
+    await startSession(ctx, m, req.task, `${taskNotice(req.task, req.by)}\n\n${req.text}`);
   } catch (e) {
     // Une session qui ne démarre pas ne laisse pas le membre marqué occupé.
     await configUnset(ctx, m.name, TASK_KEY);
@@ -109,4 +121,10 @@ export async function release(ctx: Context, cfg: ForgeConfig, req: { to: string;
   }
   await mustSucceed("clear the task", configUnset(ctx, m.name, TASK_KEY));
   await mustSucceed("clear who assigned it", configUnset(ctx, m.name, ASSIGNED_BY_KEY));
+  // Un message ne doit pas réveiller l'agent libéré dans le contexte de son
+  // ancienne tâche : sa session s'arrête. Un échec ne défait pas la libération.
+  if (!(await stopSession(ctx, m.name))) {
+    ctx.err(`WARNING: could not stop ${m.name}'s session: it stays as it is until the next assign.`);
+  }
+  await clearMessages(ctx, m.name);
 }

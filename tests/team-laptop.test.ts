@@ -64,3 +64,44 @@ test("a Mac whose hc is not the pinned version converges nothing", async () => {
 test("a cloud host never gets the forwarded agent", () => {
   assert.throws(() => remoteAttachForwarding(fakeContext(), host("forge-dev", "cloud"), ["forge", "team", "sync", "web"]), /cloud host/);
 });
+
+// Le même `forge team status --json`, avant puis après la convergence de l'hôte.
+function upContext(before: unknown[], after: unknown[], machines: unknown[]) {
+  const base = fakeContext({ rules: [HC, { match: "hc machine ls --json", stdout: JSON.stringify({ machines }) }] });
+  let statuses = 0;
+  const ctx = { ...base, exec: async (argv: string[], o?: Parameters<typeof base.exec>[1]) => argv.join(" ").includes("'team' 'status' '--json'")
+    ? { code: 0, stderr: "", stdout: JSON.stringify(statuses++ === 0 ? before : after) } : base.exec(argv, o) };
+  return { base, ctx };
+}
+const row = (name: string, present: boolean) => ({ name, present });
+const machine = (container: string, extra: Record<string, unknown> = {}) =>
+  ({ name: `forge-local-${container.replace(/^agent-/, "")}`, target: viaCommand("forge-local", container), ...extra });
+const REBUILT = { state: "unreachable", why: 'a different core answers there ("abc")' };
+
+test("up replaces the machine of a container it has just created, and says so", async () => {
+  const { base, ctx } = upContext(
+    [row("agent-web-lead", false), row("agent-web-dev-1", true)],
+    [row("agent-web-lead", true), row("agent-web-dev-1", true)],
+    [machine("agent-web-lead", REBUILT), machine("agent-web-dev-1")]);
+  assert.equal(await cmdTeamLaptop(ctx, ["up"]), 0);
+  const hc = base.calls.filter((c) => c[0] === "hc" && c[1] === "machine" && c[2] !== "ls").map((c) => c.slice(0, 5).join(" "));
+  assert.deepEqual(hc, ["hc machine rm forge-local-web-lead", "hc machine add --name forge-local-web-lead"]);
+  assert.deepEqual(base.out_lines, ["Replaced Herdr App machine forge-local-web-lead: its container was recreated."]);
+});
+
+test("up never re-pins a machine whose container it did not recreate: it says to click Connect", async () => {
+  const both = [row("agent-web-lead", true)];
+  const { base, ctx } = upContext(both, both, [machine("agent-web-lead", REBUILT)]);
+  assert.equal(await cmdTeamLaptop(ctx, ["up"]), 0);
+  assert.deepEqual(base.calls.filter((c) => c[0] === "hc" && c[1] === "machine" && c[2] !== "ls"), []);
+  assert.ok(base.err_lines.some((l) => l.includes("forge-local-web-lead") && l.includes("Connect")), base.err_lines.join("\n"));
+  assert.ok(!base.out_lines.some((l) => l.includes("up to date")));
+});
+
+test("up assumes nothing about what converge created when the host cannot say (no `present`)", async () => {
+  const old = [{ name: "agent-web-lead" }];
+  const { base, ctx } = upContext(old, old, [machine("agent-web-lead")]);
+  await cmdTeamLaptop(ctx, ["up"]);
+  assert.deepEqual(base.calls.filter((c) => c[0] === "hc" && c[1] === "machine" && c[2] !== "ls"), []);
+  assert.deepEqual(base.out_lines, ["Herdr App's machines are up to date."]);
+});

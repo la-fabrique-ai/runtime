@@ -3,6 +3,8 @@
 // forge ; chaque membre est un container, que `converge` provisionne.
 import type { Context } from "../context.ts";
 import { ForgeError } from "../context.ts";
+import { restartApiService } from "../api/access.ts";
+import { INSTRUCTION_MAX } from "../api/protocol.ts";
 import type { ForgeConfig } from "../config.ts";
 import { loadConfig } from "../config.ts";
 import { baseKey, provisioningMarker } from "../containers.ts";
@@ -14,7 +16,7 @@ import { sessionState, startSession, type SessionState } from "../hc-session.ts"
 import { assign, busyState, release, type Busy } from "../tasks.ts";
 import { columnWidths, formatRow } from "../table.ts";
 import { members, type Member } from "../team.ts";
-import { originMirrorPath, provisionMember } from "../team-provision.ts";
+import { installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { teamMirrorPath } from "../mirror.ts";
 import { containerConfig, safeRef } from "./task-base.ts";
@@ -26,8 +28,6 @@ const USAGE = `Usage: forge team converge [<team>]
        forge team sync <team>
        forge team for-repo <owner/repo> | task-base <team> | upload-pack <team>   (read by forge fetch and forge ship)`;
 
-// Une consigne ne dépasse pas ceci : c'est du texte, pas un fichier.
-const MAX_INSTRUCTION = 64 * 1024;
 
 export type TeamOptions = { json?: boolean; stdin?: () => Promise<string> };
 
@@ -38,7 +38,7 @@ async function readStdin(): Promise<string> {
   let size = 0;
   for await (const chunk of process.stdin) {
     size += (chunk as Buffer).length;
-    if (size > MAX_INSTRUCTION) throw new ForgeError(`the instruction is longer than ${MAX_INSTRUCTION} bytes.`);
+    if (size > INSTRUCTION_MAX) throw new ForgeError(`the instruction is longer than ${INSTRUCTION_MAX} bytes.`);
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -79,27 +79,49 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
   if (team !== undefined) requireTeam(cfg, team);
   const wanted = members(cfg).filter((m) => team === undefined || m.team === team);
   const existing = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
+  // Dites en dernier : stderr et stdout n'arrivent pas dans l'ordre par SSH, et
+  // une NOTE au milieu des lignes du membre suivant se lit mal.
+  const notes: string[] = [];
   for (const m of wanted) {
     const instance = existing.get(m.name);
+    let changed = false;
     if (!instance) {
       await provisionMember(ctx, cfg, m);
     } else if (await provisioningMarker(ctx, m.name) !== null) {
       ctx.err(`WARNING: ${m.name} is half-provisioned: left as is. Delete it (incus --project ${forgeProject()} delete ${m.name} --force) and run converge again.`);
       continue;
-    } else if (instance.status !== "Running") {
-      await ensureRunning(ctx, m.name);
+    } else {
+      if (instance.status !== "Running") await ensureRunning(ctx, m.name);
+      // Un container déjà là reçoit les fichiers de la version courante de forge
+      // et du prompt de son rôle, comme un neuf : sans cela, une mise à jour
+      // n'atteindrait que les containers créés après elle.
+      ctx.out(`Updating ${m.name}...`);
+      changed = (await installMemberFiles(ctx, m)).instructionsChanged;
     }
     // Le Pilote a une session permanente : elle repart si elle manque ou si elle
     // est morte (startSession retire d'abord l'ancien terminal).
-    if (m.role === "pilot" && ["none", "exited"].includes(await sessionState(ctx, m.name))) {
-      await startSession(ctx, m, "-", "");
+    if (m.role === "pilot") {
+      const state = await sessionState(ctx, m.name);
+      if (["none", "exited", "lost"].includes(state)) {
+        await startSession(ctx, m, null, "");
+        ctx.out(`Started ${m.name}'s session.`);
+      } else if (changed) {
+        // Elle ne relit pas ses instructions, et la tuer perdrait la conversation
+        // avec l'humain : forge le dit, l'humain choisit le moment.
+        notes.push(`NOTE: ${m.name}'s instructions changed, but its running session keeps the old ones. ` +
+          "To restart it (the conversation is lost): stop its `agent` terminal in Herdr App (or `hc kill <the Pilot's machine>/agent`), " +
+          "then run forge team up again.");
+      }
     }
   }
+  // Le service ne connaît que les membres de la config qu'il a lue au démarrage.
+  await restartApiService(ctx);
   for (const t of Object.keys(cfg.teams).filter((x) => team === undefined || x === team)) {
     const r = await refreshTeamMirror(ctx, cfg, t);
     for (const name of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${name}.`);
   }
   await printMembers(ctx, cfg, wanted, team);
+  for (const note of notes) ctx.err(note);
   return 0;
 }
 
@@ -143,7 +165,7 @@ async function releaseCommand(ctx: Context, cfg: ForgeConfig, to: string | undef
   return 0;
 }
 
-type Row = { name: string; team: string | null; role: string; busy: Busy; session: SessionState };
+type Row = { name: string; team: string | null; role: string; present: boolean; busy: Busy; session: SessionState };
 
 // Le miroir d'équipe se rafraîchit d'abord (§5.5) : un échec est un
 // avertissement sur stderr, jamais un échec de status.
@@ -161,7 +183,7 @@ async function status(ctx: Context, cfg: ForgeConfig, json: boolean): Promise<nu
   for (const m of members(cfg)) {
     const running = instances.get(m.name)?.status === "Running";
     rows.push({
-      name: m.name, team: m.team, role: m.role,
+      name: m.name, team: m.team, role: m.role, present: instances.has(m.name),
       busy: instances.has(m.name) ? await busyState(ctx, m.name) : null,
       session: running ? await sessionState(ctx, m.name) : "none",
     });

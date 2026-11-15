@@ -47,7 +47,8 @@ test("assign reads the instruction from stdin and gives the task on behalf of th
   assert.equal(code, 0);
   const keys = fake.instances.get("agent-forge")!.get("agent-web-dev-1")!.config;
   assert.deepEqual([keys["user.forge.task"], keys["user.forge.assigned_by"]], ["fix-login", "human"]);
-  assert.equal(fake.files.get("agent-forge/agent-web-dev-1/home/aiuser/.forge/instruction.md")!.content, "Corrige le login");
+  assert.equal(fake.files.get("agent-forge/agent-web-dev-1/home/aiuser/.forge/instruction.md")!.content,
+    "[forge] task fix-login from human\n\nCorrige le login");
 });
 
 test("an empty instruction is refused before any Incus call", async () => {
@@ -67,7 +68,12 @@ test("converge launches only the missing members and reports a stray one without
   assert.ok(!ctx.calls.some((c) => c.includes("delete")));
 });
 
-test("converge starts the pilot's session again when it has exited", async () => {
+// Sorti, ou un terminal que hc a gardé et relancé en shell (redémarrage de la VM).
+const DEAD_PILOT: [string, string][] = [
+  ["it has exited", '{"state":"finished","reason":"exited","exit_code":1,"status":null}'],
+  ["hc kept its terminal as a shell", '{"argv":["/bin/bash"],"keep":true,"state":"live","status":null}'],
+];
+for (const [why, dead] of DEAD_PILOT) test(`converge starts the pilot's session again when ${why}`, async () => {
   writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
     pilot: { capabilities: ["assign"], talkTo: ["web"] },
     teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo", "publish"] } } } },
@@ -81,8 +87,8 @@ test("converge starts the pilot's session again when it has exited", async () =>
   const ctx = { ...base, exec: async (argv: string[], o?: ExecOptions) => {
     const line = argv.join(" ");
     if (line.includes("agent-pilot") && line.endsWith("-- hc get agent")) {
-      return { code: 0, stderr: "", stdout: ran ? '{"state":"live","status":{"state":"idle"}}'
-        : '{"state":"finished","reason":"exited","exit_code":1,"status":null}' };
+      return { code: 0, stderr: "", stdout: ran ? '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}'
+        : dead };
     }
     if (line.includes("agent-pilot") && line.includes("-- hc run ")) ran = true;
     return base.exec(argv, o);
@@ -91,6 +97,7 @@ test("converge starts the pilot's session again when it has exited", async () =>
   const runs = base.calls.map((c) => c.join(" ")).filter((c) => c.includes("hc run"));
   assert.equal(runs.length, 1, runs.join("\n"));
   assert.ok(runs[0].includes("agent-pilot") && runs[0].includes("--forge-task agent-pilot-session"), runs[0]);
+  assert.ok(base.out_lines.includes("Started agent-pilot's session."), base.out_lines.join("\n"));
 });
 
 test("converge starts the session of a pilot it has just created", async () => {
@@ -147,4 +154,52 @@ test("upload-pack writes nothing to stdout, then attaches git upload-pack on the
   assert.deepEqual(argv.slice(0, 4), ["git", "-c", "core.hooksPath=/dev/null", "upload-pack"]);
   assert.ok(argv[4].endsWith("team-web.agents.git") && argv.length === 5, argv.join(" "));
   await assert.rejects(() => cmdTeam(setup().ctx, ["upload-pack", "nope"]), /not a declared team/);
+});
+
+test("converge gives an existing member its API channel, then restarts the service; a failing restart only warns", async () => {
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+    teams: { web: { repo: "o/web", roles: {
+      lead: { capabilities: ["repo", "assign"], talkTo: ["team"] },
+      dev: { capabilities: ["repo", "publish"], talkTo: ["lead"] },
+    } } },
+  }));
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-web-lead", { status: "Running" });
+  fake.addInstance("agent-forge", "agent-web-dev", { status: "Running" });
+  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "systemctl", code: 1, stderr: "no bus\n" }] });
+  assert.equal(await cmdTeam(ctx, ["converge"]), 0);
+  const calls = ctx.calls.map((c) => c.join(" "));
+  const adds = calls.flatMap((c, i) => (c.includes("config device add") && c.includes("forge-api") ? [i] : []));
+  const restart = calls.indexOf("systemctl --user try-restart forge-api.service");
+  assert.equal(adds.length, 2);
+  assert.ok(restart > Math.max(...adds), calls.join("\n"));
+  assert.ok(ctx.err_lines.some((l) => l.startsWith("WARNING: could not restart forge-api.service")));
+});
+
+test("converge updates an existing member's files; a live pilot is told its instructions changed, not killed, and only once", async () => {
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+    pilot: { capabilities: ["assign"], talkTo: ["web"] },
+    teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo", "publish"] } } } },
+  }));
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-pilot", { status: "Running" });
+  fake.addInstance("agent-forge", "agent-web-dev-1", { status: "Running" });
+  const base = fakeContext({ incus: fake, rules: RULES });
+  const ctx = { ...base, exec: async (argv: string[], o?: ExecOptions) => argv.join(" ").endsWith("-- hc get agent")
+    ? { code: 0, stderr: "", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}' } : base.exec(argv, o) };
+  const claudeMd = (name: string) => fake.files.get(`agent-forge/${name}/home/aiuser/.claude/CLAUDE.md`)?.content;
+
+  await cmdTeam(ctx, ["converge"]);
+  for (const name of ["agent-pilot", "agent-web-dev-1"]) {
+    assert.match(claudeMd(name) ?? "", /forge-team status/, `${name} has no current CLAUDE.md`);
+  }
+  assert.ok(base.err_lines.some((l) => l.includes("agent-pilot's instructions changed") && l.includes("Herdr App") && l.includes("forge team up")), base.err_lines.join("\n"));
+  assert.ok(!base.err_lines.some((l) => l.includes("hc-exec")), "the host's commands are not the human's");
+  // Chaque mise à jour nomme son membre.
+  assert.deepEqual(base.out_lines.filter((l) => l.startsWith("Updating ")), ["Updating agent-pilot...", "Updating agent-web-dev-1..."]);
+  assert.ok(!base.calls.some((c) => c.join(" ").includes("-- hc kill") || c.join(" ").includes("-- hc run ")), "the live session is left alone");
+
+  base.err_lines.length = 0;
+  await cmdTeam(ctx, ["converge"]);
+  assert.ok(!base.err_lines.some((l) => l.includes("instructions changed")), "nothing changed the second time");
 });
