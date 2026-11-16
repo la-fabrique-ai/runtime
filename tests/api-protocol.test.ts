@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BODY_MAX, INSTRUCTION_MAX, parseRequest, SUMMARY_ALLOWED } from "../cli/lib/api/protocol.ts";
+import { BODY_MAX, INSTRUCTION_MAX, parseRequest, splitAnswer, SUMMARY_ALLOWED } from "../cli/lib/api/protocol.ts";
 
 const TOKEN = "tok-123";
 const parse = (o: unknown) => parseRequest(typeof o === "string" ? o : JSON.stringify(o), [TOKEN]);
@@ -67,4 +67,15 @@ test("a secret forge handed out is refused without being echoed", () => {
     { op: "assign", to: "agent-web-dev-1", task: "t", text: "use tok-123" }]) {
     assert.throws(() => parse(o), (e: Error) => /secret/.test(e.message) && !e.message.includes(TOKEN));
   }
+});
+
+test("splitAnswer: a text that is a summary stays one; any other text is the body, summarised by its first line", () => {
+  assert.deepEqual(splitAnswer("  Garde le français "), { summary: "Garde le français", body: null });
+  const long = "Oui, mais [x] :\n- garde le lien\n- retire le numéro";
+  assert.deepEqual(splitAnswer(long), { summary: "Oui, mais x :", body: long });
+  assert.deepEqual(splitAnswer("[$`@<>]\nla suite"), { summary: "(see the body)", body: "[$`@<>]\nla suite" });
+  const cut = splitAnswer("a".repeat(250)).summary;
+  assert.equal([...cut].length, 200);
+  assert.ok(cut.endsWith("...") && SUMMARY_ALLOWED.test(cut));
+  assert.throws(() => splitAnswer(" \n "), /empty/);
 });

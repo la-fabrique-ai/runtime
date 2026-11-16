@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
-import { cmdTeamLaptop } from "../cli/lib/commands/team-laptop.ts";
+import { cmdAnswer, cmdTeamLaptop } from "../cli/lib/commands/team-laptop.ts";
 import { remoteAttachForwarding } from "../cli/lib/laptop/remote.ts";
 import { viaCommand } from "../cli/lib/laptop/machines.ts";
 import { saveHost, type LaptopHost } from "../cli/lib/laptop/state.ts";
@@ -40,7 +40,7 @@ test("assign forwards the instruction as stdin, with the host's own command and 
 });
 
 test("up checks hc, converges with the agent forwarded, then registers the machines of every declared container", async () => {
-  const rows = JSON.stringify([{ name: "agent-web-lead" }, { name: "agent-web-dev-1" }]);
+  const rows = JSON.stringify({ members: [{ name: "agent-web-lead" }, { name: "agent-web-dev-1" }], inbox: [], mirrors: [] });
   const ctx = fakeContext({ rules: [
     HC, { match: "'forge' 'team' 'status' '--json'", stdout: rows },
     { match: "hc machine ls --json", stdout: JSON.stringify({ machines: [] }) },
@@ -66,11 +66,12 @@ test("a cloud host never gets the forwarded agent", () => {
 });
 
 // Le même `forge team status --json`, avant puis après la convergence de l'hôte.
-function upContext(before: unknown[], after: unknown[], machines: unknown[]) {
+// Le nouvel objet de l'hôte, ou le tableau d'un hôte plus ancien (`asArray`).
+function upContext(before: unknown[], after: unknown[], machines: unknown[], asArray = false) {
   const base = fakeContext({ rules: [HC, { match: "hc machine ls --json", stdout: JSON.stringify({ machines }) }] });
   let statuses = 0;
   const ctx = { ...base, exec: async (argv: string[], o?: Parameters<typeof base.exec>[1]) => argv.join(" ").includes("'team' 'status' '--json'")
-    ? { code: 0, stderr: "", stdout: JSON.stringify(statuses++ === 0 ? before : after) } : base.exec(argv, o) };
+    ? { code: 0, stderr: "", stdout: JSON.stringify(((rows) => asArray ? rows : { members: rows, inbox: [], mirrors: [] })(statuses++ === 0 ? before : after)) } : base.exec(argv, o) };
   return { base, ctx };
 }
 const row = (name: string, present: boolean) => ({ name, present });
@@ -100,8 +101,75 @@ test("up never re-pins a machine whose container it did not recreate: it says to
 
 test("up assumes nothing about what converge created when the host cannot say (no `present`)", async () => {
   const old = [{ name: "agent-web-lead" }];
-  const { base, ctx } = upContext(old, old, [machine("agent-web-lead")]);
+  const { base, ctx } = upContext(old, old, [machine("agent-web-lead")], true);
   await cmdTeamLaptop(ctx, ["up"]);
   assert.deepEqual(base.calls.filter((c) => c[0] === "hc" && c[1] === "machine" && c[2] !== "ls"), []);
   assert.deepEqual(base.out_lines, ["Herdr App's machines are up to date."]);
+});
+
+test("status relays --json and --quick to the host's own command", async () => {
+  const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'status'", stdout: "{}\n" }] });
+  assert.equal(await cmdTeamLaptop(ctx, ["status"], { json: true, quick: true }), 0);
+  assert.ok(String(ctx.calls[0].at(-1)).endsWith("'forge' 'team' 'status' '--json' '--quick'"), ctx.calls[0].join(" "));
+});
+
+test("answer sends the summary as JSON on the host's stdin, never in its argv; a piped body is set", async () => {
+  const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'answer'", stdout: "Answered #7 (delivered to agent-web-lead).\n" }] });
+  assert.equal(await cmdAnswer(ctx, "7", "Garde le français", { body: async () => null }), 0);
+  assert.ok(String(ctx.calls[0].at(-1)).endsWith("'forge' 'team' 'answer' '7'"), ctx.calls[0].join(" "));
+  assert.ok(!ctx.calls[0].join(" ").includes("Garde"));
+  assert.deepEqual(JSON.parse(ctx.execOptions[0]!.input!), { summary: "Garde le français" });
+  await cmdAnswer(ctx, "7", "Voir", { body: async () => "le détail\n" });
+  assert.deepEqual(JSON.parse(ctx.execOptions[1]!.input!), { summary: "Voir", body: "le détail\n" });
+  await assert.rejects(() => cmdAnswer(ctx, "x", "Oui"), /Usage/);
+});
+
+test("answer --json (the Herdr App inbox): stdin is not read, a text that is no summary is split, the host answers JSON", async () => {
+  const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'answer'", stdout: '{"id":7,"to":"agent-web-lead","delivered":true}\n' }] });
+  const text = "Oui, mais :\n- garde le lien";
+  const body = async () => { throw new Error("stdin must not be read"); };
+  assert.equal(await cmdAnswer(ctx, "7", text, { json: true, body }), 0);
+  assert.ok(String(ctx.calls[0].at(-1)).endsWith("'forge' 'team' 'answer' '7' '--json'"), ctx.calls[0].join(" "));
+  assert.deepEqual(JSON.parse(ctx.execOptions[0]!.input!), { summary: "Oui, mais :", body: text });
+  assert.deepEqual(ctx.out_lines, ['{"id":7,"to":"agent-web-lead","delivered":true}']);
+});
+
+// `forge team inbox --json` : une ligne de JSON, un hôte injoignable est une entrée en erreur.
+test("inbox answers one line of JSON for every installed host; an unreachable one has its error and empty counts", async () => {
+  saveHost({ ...host("forge-local"), done: ["setup"] });
+  saveHost({ ...host("forge-two"), done: ["setup"] });
+  const status = { members: [
+    { name: "agent-web-lead", present: true, task: "t", session: "working" },
+    { name: "agent-web-dev-1", present: true, task: null, session: "idle" },
+    { name: "agent-web-dev-2", present: false, task: null, session: "none" },
+  ], inbox: [{ id: 7, from: "agent-web-lead", time: "2026-11-15T10:00:00Z", summary: "Quel\u001b[2J nom ?", hasBody: true }], mirrors: [{ team: "web", originAgeSeconds: 5 }] };
+  const ctx = fakeContext({ rules: [
+    { match: "forge-local -- ", stdout: JSON.stringify(status) },
+    { match: "forge-two -- ", code: 255, stderr: "ssh: connect to host: Connection refused\n" },
+  ] });
+  assert.equal(await cmdTeamLaptop(ctx, ["inbox"], { json: true }), 0);
+  assert.equal(ctx.out_lines.length, 1);
+  const report = JSON.parse(ctx.out_lines[0]);
+  assert.deepEqual(report.hosts.map((h: { host: string }) => h.host), ["forge-local", "forge-two"]);
+  assert.deepEqual(report.hosts[0].members, { working: 1, idle: 1, free: 1 });
+  assert.deepEqual(report.hosts[0].questions.map((q: { id: number; summary: string }) => [q.id, q.summary]), [[7, "Quel[2J nom ?"]]);
+  assert.deepEqual(report.hosts[0].teams, ["web"]);
+  assert.equal(report.hosts[1].error, "ssh: connect to host: Connection refused");
+  assert.deepEqual(report.hosts[1].members, { working: 0, idle: 0, free: 0 });
+  assert.ok(ctx.execOptions.every((o) => o?.timeoutMs === 20000));
+});
+
+test("question asks the host and prints an agent's text without control characters", async () => {
+  const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'question' '7'", stdout: "#7 from x\nDétail\u001b[2J\n" }] });
+  assert.equal(await cmdTeamLaptop(ctx, ["question", "7"]), 0);
+  assert.deepEqual(ctx.out_lines, ["#7 from x\nDétail[2J"]);
+});
+
+test("question --json relays the host's object with every agent text cleaned", async () => {
+  const q = { id: 7, from: "agent\u001b[2J", time: "2026-11-15T10:00:00Z", state: "open", summary: "Quel\u0007 nom ?", body: "Ligne\nDeux\u001b[2J" };
+  const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'question' '7' '--json'", stdout: JSON.stringify(q) + "\n" }] });
+  assert.equal(await cmdTeamLaptop(ctx, ["question", "7"], { json: true }), 0);
+  assert.deepEqual(JSON.parse(ctx.out_lines[0]), { ...q, from: "agent[2J", summary: "Quel nom ?", body: "Ligne\nDeux[2J" });
+  const old = fakeContext({ rules: [{ match: "'forge' 'team' 'question'", stdout: "#7 from x\n" }] });
+  await assert.rejects(() => cmdTeamLaptop(old, ["question", "7"], { json: true }), /older forge/);
 });

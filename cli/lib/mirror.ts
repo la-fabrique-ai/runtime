@@ -5,12 +5,12 @@
 // run the agent's commands on the host. Instead forge keeps its own bare
 // mirror, outside the workspaces directory, and only ever runs git on it.
 // The mirror is mounted read-only in the container, which clones from it.
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Context, ExecResult } from "./context.ts";
 import { ForgeError } from "./context.ts";
 import { deviceNames, execAsAgentArgv } from "./incus.ts";
-import { mirrorsDir } from "./paths.ts";
+import { mirrorPath, mirrorsDir } from "./paths.ts";
 import { validateRepo } from "./validate.ts";
 
 export const MIRROR_MOUNT = "/forge/origin.git";
@@ -134,4 +134,19 @@ export async function ensureTeamMirror(ctx: Context, team: string): Promise<"cre
     if (r.code !== 0) throw new ForgeError(`configure team mirror failed: ${r.stderr.trim() || `exit code ${r.code}`}`);
   }
   return "created";
+}
+
+// Le miroir d'origine d'une équipe : une copie du dépôt de l'équipe, que
+// `forge team sync` rafraîchit depuis GitHub.
+export const originMirrorPath = (team: string) => mirrorPath(`team-${team}`);
+
+// Son âge, en secondes : celui de son FETCH_HEAD, que chaque fetch réécrit,
+// même quand il n'apporte rien. Null quand le miroir n'a jamais été rafraîchi.
+export function originMirrorAge(team: string, now: Date): number | null {
+  try {
+    const fetched = statSync(join(originMirrorPath(team), "FETCH_HEAD")).mtimeMs;
+    return Math.max(0, Math.round((now.getTime() - fetched) / 1000));
+  } catch {
+    return null;
+  }
 }

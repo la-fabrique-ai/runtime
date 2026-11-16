@@ -240,6 +240,13 @@ test("status lists the lead's talk-to, with who each one waits on until its sess
   assert.equal(await assignedBy(LEAD, DEV1), false, "assigned by someone else");
   sessions[DEV1] = "working";
   assert.equal((await rows()).find((r) => r.name === DEV1)!.waitingOn, null);
+  // A free member whose session lives (the Pilot, whom no one assigns) still waits;
+  // released, its session is over and it waits on no one.
+  sessions[DEV1] = "idle";
+  for (const k of ["user.forge.task", "user.forge.assigned_by"]) delete keys(DEV1)[k];
+  assert.equal((await rows()).find((r) => r.name === DEV1)!.waitingOn, LEAD);
+  sessions[DEV1] = "exited";
+  assert.equal((await rows()).find((r) => r.name === DEV1)!.waitingOn, null);
 });
 
 test("two leads' assigns of the same free developer at once: one wins, the other is told it is busy", async () => {
@@ -257,4 +264,15 @@ test("an unreadable line is refused and journaled without a verb or a text", asy
   assert.equal(reply.ok, false);
   const [e] = d.journal.entries();
   assert.deepEqual([e.caller, e.op, e.outcome, e.text], [DEV1, null, "refused", null]);
+});
+
+test("status sees an answer another process wrote to the journal: waiting-on=human clears without a restart", async () => {
+  await call(LEAD, { op: "ask-human", summary: "Quel séparateur ?" });
+  const leadRow = async () => ((await call(PILOT, { op: "status" })) as unknown as { team: { name: string; waitingOn: string | null }[] }).team.find((r) => r.name === LEAD)!;
+  assert.equal((await leadRow()).waitingOn, "human");
+  // `forge team answer` est un autre processus : il ouvre son propre journal sur le même fichier.
+  Journal.open(join(home, "api", "journal.jsonl")).append({
+    caller: "human", op: "answer", to: LEAD, task: null, outcome: "ok", error: null, summary: "Oui", text: null, question: 1,
+  }, new Date(), 0);
+  assert.equal((await leadRow()).waitingOn, null);
 });

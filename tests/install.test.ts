@@ -896,7 +896,9 @@ function changedOutsideForge(before: Map<string, string>, after: Map<string, str
   const forge = (p: string) =>
     p === ".config/agent-forge" || p.startsWith(".config/agent-forge/") ||
     p === ".local/share/agent-forge" || p.startsWith(".local/share/agent-forge/") ||
-    p === ".ssh/config.d" || p === ".ssh/config.d/agent-forge.config" || p === ".ssh/forge-cm";
+    p === ".ssh/config.d" || p === ".ssh/config.d/agent-forge.config" || p === ".ssh/forge-cm" ||
+    // The forge mod: a directory of forge's own, and the two directories above it.
+    p === ".config/herdr-app" || p === ".config/herdr-app/mods" || p === ".config/herdr-app/mods/forge" || p.startsWith(".config/herdr-app/mods/forge/");
   return { changed, outside: changed.filter((p) => !forge(p)) };
 }
 
@@ -930,7 +932,7 @@ test("nothing is written outside forge's directories without a confirmation", as
   // A yes for Herdr App's telemetry: its settings file, and nothing else outside.
   before = snapshot(home);
   assert.equal(await cmdInstall(laptop(world, { answers: [2, 1] }), OPTS), 0);
-  assert.deepEqual(changedOutsideForge(before, snapshot(home)).outside, [".config/herdr-app", ".config/herdr-app/settings.json"]);
+  assert.deepEqual(changedOutsideForge(before, snapshot(home)).outside, [".config/herdr-app/settings.json"]);
 });
 
 // Herdr App sends anonymous usage data unless its settings say telemetry is
@@ -970,7 +972,7 @@ test("a no, or no answer, leaves Herdr App's settings alone and goes on", async 
     const ctx = laptop(world, { answers: [2, answer] });
     assert.equal(await cmdInstall(ctx, OPTS), 0);
     assert.deepEqual(asked(ctx), [LINK, TELEMETRY()]);
-    assert.equal(existsSync(join(home, ".config/herdr-app")), false);
+    assert.equal(existsSync(settingsFile()), false);
     assert.ok(ctx.out_lines.includes("  Herdr App telemetry: declined"), ctx.out_lines.join("\n"));
     assert.deepEqual(ctx.attachCalls.at(-1)?.argv, HERDR_LOCAL);
   }
@@ -1265,4 +1267,22 @@ test("--remote with a cloud host's address is refused: its SSH block would forwa
     e instanceof ForgeError && /forge-dev/.test(e.message));
   assert.deepEqual(asked(ctx), []);
   assert.deepEqual(loadHosts().map((h) => h.name), ["forge-dev"]);
+});
+
+// The forge mod is forge's own files: copied on every run, replaced if changed;
+// keys.json (the person's shortcuts) is never written.
+test("an install copies the forge mod on every run and leaves an existing keys.json byte for byte", async () => {
+  writeFileSync(join(home, ".ssh/config"), "Include config.d/*\n");
+  const app = join(home, ".config/herdr-app");
+  mkdirSync(join(app, "mods/forge"), { recursive: true });
+  writeFileSync(join(app, "keys.json"), '{ "my": "shortcuts" }\n');
+  writeFileSync(join(app, "mods/forge/logic.js"), "// an old copy\n");
+  const world: World = { vm: null };
+  const ctx = laptop(world, { answers: [2, 2] });
+  assert.equal(await cmdInstall(ctx, OPTS), 0);
+  assert.ok(ctx.out_lines.includes("  Herdr App forge bar: Herdr App is not running"), ctx.out_lines.join("\n"));
+  for (const f of ["main.js", "logic.js", "mod.json"]) {
+    assert.equal(readFileSync(join(app, "mods/forge", f), "utf8"), readFileSync(join("herdr/mods/forge", f), "utf8"), f);
+  }
+  assert.equal(readFileSync(join(app, "keys.json"), "utf8"), '{ "my": "shortcuts" }\n');
 });

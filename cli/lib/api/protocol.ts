@@ -69,6 +69,25 @@ export function checkSummary(summary: string, secrets: readonly string[]): void 
   }
 }
 
+// La réponse de l'humain écrite d'un seul tenant (la boîte de Herdr App, ou
+// `forge answer` avec un long texte). Un texte qui est déjà un résumé le reste.
+// Sinon, le texte entier devient le corps, et sa première ligne non vide, réduite
+// aux caractères du résumé, le résume ; s'il n'en reste rien, le résumé renvoie
+// au corps.
+export function splitAnswer(text: string): { summary: string; body: string | null } {
+  const t = text.trim();
+  if (t === "") throw new ForgeError("the answer is empty");
+  const chars = [...t];
+  if (!t.includes("\n") && chars.length <= SUMMARY_MAX && SUMMARY_ALLOWED.test(t)) return { summary: t, body: null };
+  const first = t.split("\n").find((l) => l.trim() !== "") ?? "";
+  const kept = [...first].filter((ch) => SUMMARY_CHAR.test(ch)).join("").replace(/ {2,}/g, " ").trim();
+  const keptChars = [...kept];
+  const summary = keptChars.length === 0 ? "(see the body)"
+    : keptChars.length <= SUMMARY_MAX ? kept
+    : keptChars.slice(0, SUMMARY_MAX - 3).join("").trimEnd() + "...";
+  return { summary, body: t };
+}
+
 // Un corps ou une consigne : tout contenu, caractères de contrôle compris,
 // sauf le vide et un secret.
 export function checkText(text: string, maxBytes: number, what: string, secrets: readonly string[]): void {

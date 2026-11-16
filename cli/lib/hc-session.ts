@@ -175,16 +175,40 @@ export async function deliverMessage(
   retained: { task: string | null } | null = null,
 ): Promise<{ turn: number }> {
   const path = `${MESSAGES_DIR}/${id}.md`;
+  const onTask = retained === null ? "" :
+    `, on the task you assigned it (${retained.task ?? "without a branch"}; forge-team release ${from} once it is finished)`;
+  return { turn: await typeWithBody(ctx, container, `[forge] message ${id} from ${from}${onTask}: ${summary}`, path, body) };
+}
+
+// La réponse de l'humain à une question de l'agent (`forge team answer`), livrée
+// comme un message : le résumé derrière le préfixe de forge, le corps dans un
+// fichier `a<question>.md`. Seulement à une session forge-agent vivante : sans
+// elle, rien n'est tapé (« no-session »). Un autre échec de livraison se lève,
+// et la question reste ouverte pour qu'on la réessaie.
+export async function deliverAnswer(
+  ctx: Context, container: string, question: number, summary: string, body: string | null,
+): Promise<"delivered" | "no-session"> {
+  if (!(await awaitLiveSession(ctx, container))) return "no-session";
+  try {
+    await typeWithBody(ctx, container, `[forge] answer ${question} from human: ${summary}`, `${MESSAGES_DIR}/a${question}.md`, body);
+  } catch (e) {
+    // La session s'est arrêtée entre le regard et l'envoi.
+    if (e instanceof ForgeError && e.message.includes(NO_SESSION)) return "no-session";
+    throw e;
+  }
+  return "delivered";
+}
+
+// Le corps, s'il y en a un, devient un fichier du container (uid d'aiuser, mode
+// 600) ; la ligne tapée le nomme, derrière ce que forge a écrit.
+async function typeWithBody(ctx: Context, container: string, line: string, path: string, body: string | null): Promise<number> {
   if (body !== null) {
     const pushed = await pushText(ctx, container, path, body, { uid: 1001, gid: 1001, mode: "600" });
     if (pushed.code !== 0) {
       throw new ForgeError(`delivery to ${container} failed: ${firstLine(pushed.stderr) || `exit code ${pushed.code}`}`);
     }
   }
-  const onTask = retained === null ? "" :
-    `, on the task you assigned it (${retained.task ?? "without a branch"}; forge-team release ${from} once it is finished)`;
-  const notice = `[forge] message ${id} from ${from}${onTask}: ${summary}${body === null ? "" : ` (detail: ${path})`}`;
-  return { turn: await typeNotice(ctx, container, notice) };
+  return typeNotice(ctx, container, `${line}${body === null ? "" : ` (detail: ${path})`}`);
 }
 
 // Tape une ligne que forge a écrite dans la session `agent` du container : un
