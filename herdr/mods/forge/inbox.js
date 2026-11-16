@@ -12,6 +12,16 @@ import {
 } from "./logic.js";
 
 const BODY_LINES_MAX = 2000;
+const ANSWER_TIMEOUT_MS = 45000;
+
+// exec rejects on a timeout instead of answering: an error result, like a failed command.
+async function run_(args, timeout) {
+  try {
+    return await exec("forge", args, { timeout });
+  } catch (e) {
+    return { code: 124, stdout: "", stderr: `no reply from forge in ${timeout / 1000} s (${String(e?.message ?? e)})` };
+  }
+}
 
 export class Inbox {
   constructor(p, cx) {
@@ -44,7 +54,11 @@ export class Inbox {
   }
 
   select(key, cx) {
-    if (key === this.selected) return;
+    if (this.bodies.get(key)?.error !== undefined) this.bodies.delete(key);
+    if (key === this.selected) {
+      this.loadBody(cx);
+      return;
+    }
     this.selected = key;
     this.note = null;
     this.loadBody(cx);
@@ -57,8 +71,8 @@ export class Inbox {
     if (item === null || !item.hasBody || this.bodies.has(item.key)) return;
     this.bodies.set(item.key, { loading: true });
     cx.spawn(async (cx) => {
-      const r = await exec("forge", questionArgs(item.host, item.id), { timeout: 25000 });
-      const o = questionOutcome(r);
+      const o = questionOutcome(await run_(questionArgs(item.host, item.id), 25000));
+      // An error is shown, and tried again when the question is selected again.
       this.bodies.set(item.key, o.ok ? { question: o.question } : { error: o.error });
       cx.notify();
     });
@@ -77,13 +91,15 @@ export class Inbox {
     this.sending = true;
     this.note = null;
     cx.spawn(async (cx) => {
-      const o = answerOutcome(await exec("forge", answerArgs(item.host, item.id, text), { timeout: 30000 }));
+      // A timed-out answer may still have reached the host: sent again, forge says
+      // it is already answered rather than answering twice.
+      const o = answerOutcome(await run_(answerArgs(item.host, item.id, text), ANSWER_TIMEOUT_MS));
       this.sending = false;
       if (o.ok) {
         this.answered.add(item.key);
         this.reply.set_value("");
-        this.note = { ok: true, text: o.delivered
-          ? `Answer to #${item.id} delivered to ${o.to}.`
+        this.note = { ok: true, text: o.already ? `#${item.id} is already answered.`
+          : o.delivered ? `Answer to #${item.id} delivered to ${o.to}.`
           : `Answer to #${item.id} recorded: ${o.to} has no live session, it will not see it.` };
         setShared(POLL_KEY, Date.now());
       } else {

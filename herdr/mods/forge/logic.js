@@ -159,7 +159,10 @@ export function questionOutcome(r) {
   } });
 }
 
+// An answer sent again after a timeout finds the question closed: that is the
+// first one having gone through, not a failure.
 export function answerOutcome(r) {
+  if (r.code !== 0 && /is already answered/.test(r.stderr)) return { ok: true, already: true };
   return outcome(r, (a) => typeof a?.delivered !== "boolean" ? null : { delivered: a.delivered, to: clean(a.to) });
 }
 

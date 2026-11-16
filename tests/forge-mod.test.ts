@@ -97,9 +97,13 @@ test("questionOutcome and answerOutcome: the JSON line, or the first line of the
   assert.deepEqual(questionOutcome(ok('{"id":7,"from":"x","time":"t","state":"open","summary":"S\\u0007","body":"L1\\nL2"}\n')),
     { ok: true, question: { id: 7, from: "x", time: "t", state: "open", summary: "S", body: "L1\nL2" } });
   assert.deepEqual(answerOutcome(ok('{"id":7,"to":"agent-web-lead","delivered":false}\n')), { ok: true, delivered: false, to: "agent-web-lead" });
-  assert.deepEqual(answerOutcome({ code: 1, stdout: "", stderr: "Error: question 7 is already answered\nmore\n" }),
-    { ok: false, error: "Error: question 7 is already answered" });
+  assert.deepEqual(answerOutcome({ code: 1, stdout: "", stderr: "Error: no question 7 in the Inbox\nmore\n" }),
+    { ok: false, error: "Error: no question 7 in the Inbox" });
   assert.deepEqual(answerOutcome(ok("Answered #7.\n")), { ok: false, error: "unreadable answer from forge" });
+  assert.deepEqual(answerOutcome({ code: 1, stdout: "", stderr: "Error: question 7 is already answered\n" }), { ok: true, already: true },
+    "sent again after a timeout: the first one went through");
+  assert.deepEqual(answerOutcome({ code: 124, stdout: "", stderr: "no reply from forge in 45 s (timeout)" }),
+    { ok: false, error: "no reply from forge in 45 s (timeout)" });
 });
 
 test("inboxWindow: one kept-in-place window of the forge mod, opened on a question", () => {
