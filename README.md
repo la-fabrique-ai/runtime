@@ -365,25 +365,32 @@ they never pile up SSH sessions on a small host.
 `forge install` also copies a **forge mod** into Herdr App's mods directory
 (`~/.config/herdr-app/mods/forge/`, replaced at each run). It is a one-line bar
 at the bottom of Herdr App (a mod runs only where it is shown): how many agents
-work and how many questions wait, a notification for each new question, whose
-click opens `forge team watch`, and the spaces of the agents named after them.
+work and how many questions wait, a notification for each new question, and the
+spaces of the agents named after them. A click on the bar or on a notification
+opens the **inbox**, a window of the mod: the questions of every host on the
+left, newest first; the one you select on the right, with its detail; and a box
+to answer it in place (⌘↩ sends). A one-line answer is the summary typed to the
+agent; a longer one goes in the body, summarised by its first line. The inbox
+says whether the answer was delivered or only recorded, and its Team button
+opens `forge team watch` for that host.
 The bar needs a layout of its own: Herdr App ships its layouts (`main`, …) and
 takes no new block in them. When the layout shown is one of those, `forge install`
 offers to copy it (`herdr-app do layout.clone '{"name":"main","as":"forge"}'`,
 asked while Herdr App runs): the copy is yours, and the app never updates it
 again. Restart Herdr App if the bar does not appear by itself.
-It exposes two commands, `forge.watch` and `forge.sync` (`forge team sync` for
-each team, in a terminal). forge never edits your `keys.json` (any edit makes
+It exposes three commands, `forge.inbox`, `forge.watch` and `forge.sync`
+(`forge team sync` for each team, in a terminal). forge never edits your `keys.json` (any edit makes
 that file yours, and Herdr App stops updating its defaults): to bind them, add
 the lines below to it by hand, with the keys you like:
 
 ```json
-{ "global": { "ctrl-alt-shift-w": "forge.watch", "ctrl-alt-shift-s": "forge.sync" } }
+{ "global": { "ctrl-alt-shift-i": "forge.inbox", "ctrl-alt-shift-w": "forge.watch", "ctrl-alt-shift-s": "forge.sync" } }
 ```
 
-A notification passes no argument to the mod: with several hosts installed, its
-click (like the bar's, and the key) opens the watch of the first host that
-answers. For another host, run `forge team watch --host <name>` in a terminal.
+A notification passes no argument to the mod: its click opens the inbox on the
+question notified last. `forge.watch` opens the watch of the first host that
+answers; for another host, use the inbox's Team button or run
+`forge team watch --host <name>` in a terminal.
 Check the mod with `herdr-app check ~/.config/herdr-app/mods/forge`.
 
 A developer takes one task at a time, on a new branch `agent/<task>` from

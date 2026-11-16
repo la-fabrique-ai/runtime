@@ -47,7 +47,7 @@ On the forge host:
   team status [--json] [--quick]    Each member's task, session and wait, the human's questions, the origin mirror's age
                                     (refreshes the team mirror first, unless --quick)
   team inbox --json                 Every installed host's questions and counts, as one line of JSON (read by the Herdr App mod)
-  team question <id> [--host <name>]
+  team question <id> [--json] [--host <name>]
                                     A question's summary and detail (the Inbox lists them)
   team watch [--host <name>]        The team, its questions and the origin mirror in this terminal (from the Mac)
   team sync <team>                  Refresh the team's origin mirror (needs the forwarded SSH agent), then the team mirror
@@ -85,9 +85,10 @@ On your laptop:
   fetch [--host <name>]             Fetch the agents' branches into this clone and list the tasks
   team up [<team>] [--host <name>]  Converge the teams on the host, then add each agent as a Herdr App machine
                                     (team assign, release, status and sync also work from here, over SSH)
-  answer <id> "<summary>" [--host <name>]
+  answer <id> "<summary>" [--host <name>] [--json]
                                     Answer an agent's question (see forge team status): the summary is typed to the
-                                    agent, a body piped on stdin goes in a file it reads
+                                    agent, a body piped on stdin goes in a file it reads (with --json, for the Herdr
+                                    App inbox: stdin is not read, a longer text is split, one line of JSON back)
   ship <task> [--host <name>]       Re-sign a task's new commits, push agent/<task> and open its PR
                                     (a stacked task ships with the tasks under it, bottom first)
 
@@ -115,7 +116,7 @@ function dispatch(
     case "team": return currentSide() === "laptop"
       ? cmdTeamLaptop(ctx, positionals.slice(1), { host: laptop.host, json: relay.json, quick: relay.quick })
       : cmdTeam(ctx, positionals.slice(1), { json: relay.json, quick: relay.quick });
-    case "answer": return cmdAnswer(ctx, a, b, { host: laptop.host });
+    case "answer": return cmdAnswer(ctx, a, b, { host: laptop.host, json: relay.json });
     case "api": return cmdApi(ctx, a);
     case "notify": return cmdNotify(ctx, a, b, notice);
     case "hc-via": return cmdHcVia(ctx, a, b, positionals[3]);
@@ -165,7 +166,7 @@ async function main(): Promise<number> {
       throw new ForgeError("--title and --body-file only go with relay: forge relay pr <task> --title <text> --body-file <file>");
     }
     if (values.quick && cmd !== "team") throw new ForgeError("--quick only goes with team status: forge team status --quick");
-    if (values.json && cmd !== "team") throw new ForgeError("--json only goes with team status: forge team status --json");
+    if (values.json && cmd !== "team" && cmd !== "answer") throw new ForgeError("--json only goes with team and answer: forge team status --json");
     if ((values.pid !== undefined || values["rss-kib"] !== undefined) && cmd !== "notify") {
       throw new ForgeError("--pid and --rss-kib only go with notify");
     }

@@ -3,7 +3,7 @@
 // container of the teams as a machine in Herdr App.
 import type { Context, ExecResult } from "../context.ts";
 import { ForgeError } from "../context.ts";
-import { BODY_MAX } from "../api/protocol.ts";
+import { BODY_MAX, splitAnswer } from "../api/protocol.ts";
 import { checkLocalHc } from "../hc.ts";
 import { syncMachines } from "../laptop/machines.ts";
 import { remoteAttachForwarding, remoteExec } from "../laptop/remote.ts";
@@ -18,7 +18,7 @@ const USAGE = `Usage: forge team up [<team>] [--host <name>]
        forge team release <container> [--host <name>]
        forge team status [--json] [--quick] [--host <name>]
        forge team sync <team> [--host <name>]
-       forge team question <question id> [--host <name>]   (a question's summary and detail)
+       forge team question <question id> [--json] [--host <name>]   (a question's summary and detail)
        forge team inbox --json   (every installed host's questions and counts, one line of JSON: read by the Herdr App mod)
        forge team watch [--host <name>]   (the team, its questions and the origin mirror, redrawn every few seconds; Ctrl-C ends it)`;
 
@@ -27,18 +27,21 @@ const MAX_INSTRUCTION = 64 * 1024;
 // forge answer <question id> "<summary>" [--host <name>] : the human's answer to
 // an agent's question. The text never goes into the host's argv: the host's
 // `forge team answer` reads {"summary", "body"?} on stdin, like assign does.
-// The body is read from stdin when it is not a terminal.
+// The body is read from stdin when it is not a terminal. With --json (the Herdr
+// App inbox), stdin is never read: the whole answer is the argument, split into
+// a summary and a body when it is not a summary itself, and the host answers one
+// line of JSON.
 export async function cmdAnswer(
   ctx: Context, id: string | undefined, summary: string | undefined,
-  opts: { host?: string; body?: () => Promise<string | null> } = {},
+  opts: { host?: string; json?: boolean; body?: () => Promise<string | null> } = {},
 ): Promise<number> {
   if (id === undefined || !/^[0-9]{1,15}$/.test(id) || summary === undefined) {
-    throw new ForgeError('Usage: forge answer <question id> "<summary>" [--host <name>]   (the body is read from stdin when it is piped)');
+    throw new ForgeError('Usage: forge answer <question id> "<summary>" [--host <name>] [--json]   (the body is read from stdin when it is piped)');
   }
-  const body = await (opts.body ?? readBody)();
+  const answer = opts.json ? splitAnswer(summary) : { summary, body: await (opts.body ?? readBody)() };
   const host = await selectHost(ctx, opts.host);
-  const payload = JSON.stringify(body === null ? { summary } : { summary, body });
-  return relayed(ctx, await remoteExec(ctx, host, ["forge", "team", "answer", id], payload));
+  const payload = JSON.stringify(answer.body === null ? { summary: answer.summary } : answer);
+  return relayed(ctx, await remoteExec(ctx, host, ["forge", "team", "answer", id, ...(opts.json ? ["--json"] : [])], payload));
 }
 
 async function readBody(): Promise<string | null> {
@@ -78,7 +81,9 @@ function relayed(ctx: Context, r: ExecResult): number {
 
 export async function cmdTeamLaptop(ctx: Context, args: string[], opts: TeamLaptopOptions = {}): Promise<number> {
   const [sub, a, b] = args;
-  if (opts.json && sub !== "status" && sub !== "inbox") throw new ForgeError(`--json only goes with status and inbox: forge team status --json\n${USAGE}`);
+  if (opts.json && !["status", "inbox", "question"].includes(sub ?? "")) {
+    throw new ForgeError(`--json only goes with status, inbox and question: forge team status --json\n${USAGE}`);
+  }
   if (opts.quick && sub !== "status") throw new ForgeError(`--quick only goes with status: forge team status --quick\n${USAGE}`);
   switch (sub) {
     case "up": return up(ctx, await selectHost(ctx, opts.host), a);
@@ -95,9 +100,11 @@ export async function cmdTeamLaptop(ctx: Context, args: string[], opts: TeamLapt
       return relayed(ctx, await remoteExec(ctx, await selectHost(ctx, opts.host), ["forge", "team", "status", ...(opts.json ? ["--json"] : []), ...(opts.quick ? ["--quick"] : [])]));
     case "question": {
       if (a === undefined) throw new ForgeError(`a question number is required.\n${USAGE}`);
-      const r = await remoteExec(ctx, await selectHost(ctx, opts.host), ["forge", "team", "question", a]);
+      const r = await remoteExec(ctx, await selectHost(ctx, opts.host), ["forge", "team", "question", a, ...(opts.json ? ["--json"] : [])]);
       // Le texte est celui d'un agent : jamais tel quel dans le terminal.
-      return relayed(ctx, { ...r, stdout: printableText(r.stdout), stderr: printableText(r.stderr) });
+      if (!opts.json || r.code !== 0) return relayed(ctx, { ...r, stdout: printableText(r.stdout), stderr: printableText(r.stderr) });
+      ctx.out(JSON.stringify(cleanQuestion(r.stdout)));
+      return 0;
     }
     case "inbox": return inbox(ctx, opts);
     case "watch": return watchLoop(ctx, await selectHost(ctx, opts.host), {});
@@ -106,6 +113,21 @@ export async function cmdTeamLaptop(ctx: Context, args: string[], opts: TeamLapt
       return remoteAttachForwarding(ctx, await selectHost(ctx, opts.host), ["forge", "team", "sync", a]);
     default: throw new ForgeError(USAGE);
   }
+}
+
+// The host's `forge team question --json`, every agent text cleaned again on
+// this side: the Herdr App inbox shows it.
+function cleanQuestion(stdout: string): Record<string, unknown> {
+  let q: unknown;
+  try {
+    q = JSON.parse(stdout.trim().split("\n").at(-1) ?? "");
+  } catch {
+    q = null;
+  }
+  if (typeof q !== "object" || q === null || Array.isArray(q) || typeof (q as { id?: unknown }).id !== "number") {
+    throw new ForgeError("an older forge answered: update the host (forge install)");
+  }
+  return Object.fromEntries(Object.entries(q).map(([k, v]) => [k, typeof v === "string" ? printableText(v) : v]));
 }
 
 // What the forge mod reads (DX 5, §5.6): per installed host, counts of its

@@ -30,8 +30,8 @@ import { containerConfig, safeRef } from "./task-base.ts";
 const USAGE = `Usage: forge team converge [<team>]
        forge team assign <container> [<task>]   (the instruction is read from stdin)
        forge team release <container>
-       forge team question <question id>   (the summary and the detail of a question of the Inbox)
-       forge team answer <question id>   (the answer is read from stdin, as JSON: {"summary": "…", "body": "…"})
+       forge team question <question id> [--json]   (the summary and the detail of a question of the Inbox)
+       forge team answer <question id> [--json]   (the answer is read from stdin, as JSON: {"summary": "…", "body": "…"})
        forge team status [--json] [--quick]
        forge team sync <team>
        forge team for-repo <owner/repo> | task-base <team> | upload-pack <team>   (read by forge fetch and forge ship)`;
@@ -59,7 +59,9 @@ const readAnswer = () => readStdinUpTo(REQUEST_MAX, "answer", "forge answer <que
 
 export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = {}): Promise<number> {
   const [sub, a, b] = args;
-  if (opts.json && sub !== "status") throw new ForgeError(`--json only goes with status: forge team status --json\n${USAGE}`);
+  if (opts.json && !["status", "question", "answer"].includes(sub ?? "")) {
+    throw new ForgeError(`--json only goes with status, question and answer: forge team status --json\n${USAGE}`);
+  }
   if (opts.quick && sub !== "status") throw new ForgeError(`--quick only goes with status: forge team status --quick\n${USAGE}`);
   if (!["converge", "assign", "release", "answer", "question", "status", "sync", "for-repo", "task-base", "upload-pack"].includes(sub ?? "")) {
     throw new ForgeError(USAGE);
@@ -74,8 +76,8 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
     case "converge": return converge(ctx, cfg, a, opts);
     case "assign": return assignCommand(ctx, cfg, a, b, opts.stdin ?? readStdin);
     case "release": return releaseCommand(ctx, cfg, a);
-    case "question": return questionCommand(ctx, a);
-    case "answer": return answerCommand(ctx, cfg, a, opts.stdin ?? readAnswer);
+    case "question": return questionCommand(ctx, a, opts.json === true);
+    case "answer": return answerCommand(ctx, cfg, a, opts.stdin ?? readAnswer, opts.json === true);
     case "status": return status(ctx, cfg, opts);
     case "task-base": return taskBase(ctx, cfg, a);
     case "upload-pack": return uploadPack(ctx, cfg, a);
@@ -188,13 +190,21 @@ async function releaseCommand(ctx: Context, cfg: ForgeConfig, to: string | undef
 
 // Le résumé et le corps d'une question, pour que l'humain puisse y répondre. Le
 // texte vient d'un agent : il passe par printableText (le saut de ligne reste).
-async function questionCommand(ctx: Context, idArg: string | undefined): Promise<number> {
+// Avec --json, un seul objet sur une ligne : ce que lit la boîte du mod de Herdr App.
+async function questionCommand(ctx: Context, idArg: string | undefined, json: boolean): Promise<number> {
   if (idArg === undefined || !/^[0-9]{1,15}$/.test(idArg)) throw new ForgeError(`a question number is required.\n${USAGE}`);
   const id = Number(idArg);
   const entries = readEntries(journalPath());
   const ask = entries.find((e) => e.id === id && e.op === "ask-human" && e.outcome === "ok");
   if (ask === undefined) throw new ForgeError(`no question ${id}: forge team status lists the open ones`);
   const state = findQuestion(entries, id) === "answered" ? "answered" : "open";
+  if (json) {
+    ctx.out(JSON.stringify({
+      id, from: printableText(ask.caller), time: ask.time, state,
+      summary: printableText(ask.summary ?? ""), body: ask.text === null ? null : printableText(ask.text),
+    }));
+    return 0;
+  }
   ctx.out(`#${id} from ${printableText(ask.caller)}, ${ageLabel(Date.now() - Date.parse(ask.time))} ago (${state})`);
   ctx.out(printableText(ask.summary ?? ""));
   if (ask.text !== null) {
@@ -209,7 +219,9 @@ async function questionCommand(ctx: Context, idArg: string | undefined): Promise
 // peut l'appeler. Une réponse qui ne peut pas être livrée (la session de l'agent
 // n'est plus là) est quand même consignée, et la question se ferme : l'humain
 // l'apprend ici, il ne la pose pas deux fois.
-async function answerCommand(ctx: Context, cfg: ForgeConfig, idArg: string | undefined, stdin: () => Promise<string>): Promise<number> {
+async function answerCommand(
+  ctx: Context, cfg: ForgeConfig, idArg: string | undefined, stdin: () => Promise<string>, json: boolean,
+): Promise<number> {
   if (idArg === undefined || !/^[0-9]{1,15}$/.test(idArg)) throw new ForgeError(`a question number is required.\n${USAGE}`);
   const id = Number(idArg);
   const journal = Journal.open(journalPath());
@@ -223,7 +235,9 @@ async function answerCommand(ctx: Context, cfg: ForgeConfig, idArg: string | und
     error: delivery === "delivered" ? null : `not delivered: ${question.from} has no live session`,
     summary, text: body, question: id,
   }, new Date(), 0);
-  ctx.out(delivery === "delivered"
+  // Avec --json, ce que la boîte du mod de Herdr App montre après l'envoi.
+  if (json) ctx.out(JSON.stringify({ id, to: question.from, delivered: delivery === "delivered" }));
+  else ctx.out(delivery === "delivered"
     ? `Answered #${id} (delivered to ${question.from}).`
     : `Answered #${id}: ${question.from} has no live session, the answer is recorded but not delivered.`);
   return 0;

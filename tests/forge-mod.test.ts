@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // logic.js is a plain ES module with no import of the app's view library.
+import {
+  ageLabel, answerArgs, answerOutcome, barText, inboxItems, inboxWindow, keepSelection, newQuestions, notificationFor,
+  questionArgs, questionOutcome, shouldPoll, spaceRenames, syncSpace, watchSpace,
 // @ts-expect-error: a JavaScript module, not typed
-import { barText, newQuestions, notificationFor, shouldPoll, spaceRenames, syncSpace, watchSpace } from "../herdr/mods/forge/logic.js";
+} from "../herdr/mods/forge/logic.js";
 
 const q = (id: number, from = "agent-web-lead", summary = "Quel séparateur ?") => ({ id, from, time: "2026-11-15T10:00:00Z", summary, hasBody: false });
 const host = (name: string, over: object = {}) => ({ host: name, members: { working: 0, idle: 0, free: 0 }, questions: [], teams: [], error: null, ...over });
@@ -34,11 +37,14 @@ test("spaceRenames: an unnamed space of an agent's machine takes the agent's nam
   assert.deepEqual(spaceRenames([space("forge-recette-pilot", false)], ["forge", "forge-recette"]), [{ id: "s1", name: "pilot" }]);
 });
 
-test("shouldPoll: never while one runs, at most every 30 s", () => {
+test("shouldPoll: never while one runs, at most every 30 s, unless the inbox asked after the last poll began", () => {
   assert.equal(shouldPoll(true, null, 1_000_000), false);
   assert.equal(shouldPoll(false, 1_000_000 - 10_000, 1_000_000), false);
   assert.equal(shouldPoll(false, 1_000_000 - 31_000, 1_000_000), true);
   assert.equal(shouldPoll(false, null, 1_000_000), true);
+  assert.equal(shouldPoll(false, 1_000_000 - 10_000, 1_000_000, 1_000_000 - 5_000), true, "asked after the last poll");
+  assert.equal(shouldPoll(false, 1_000_000 - 10_000, 1_000_000, 1_000_000 - 15_000), false, "asked before it");
+  assert.equal(shouldPoll(true, 1_000_000 - 10_000, 1_000_000, 1_000_000 - 5_000), false, "still one at a time");
 });
 
 test("notificationFor: the title names the asker, the body is the summary cut to 120 characters without control characters", () => {
@@ -51,4 +57,53 @@ test("notificationFor: the title names the asker, the body is the summary cut to
 test("watchSpace and syncSpace: opened on the dev machine (machine \"\"), the tab named like the space", () => {
   assert.deepEqual(watchSpace("h"), { name: "forge team h", tab: "forge team h", machine: "", argv: ["forge", "team", "watch", "--host", "h"] });
   assert.deepEqual(syncSpace("h", "web"), { name: "forge sync web", tab: "forge sync web", machine: "", argv: ["forge", "team", "sync", "web", "--host", "h"] });
+});
+
+// The inbox (#170): the questions of every host, read and answered in a window.
+test("inboxItems: the questions of every answering host, newest first, keyed by host, without control characters", () => {
+  const report = { hosts: [
+    host("a", { questions: [{ ...q(6), time: "2026-11-14T10:00:00Z" }, { ...q(77, "agent-web-lead", "Garde\u0007 ?"), time: "2026-11-16T09:00:00Z" }] }),
+    host("b", { questions: [{ ...q(3, "agent-api-lead"), time: "2026-11-15T10:00:00Z" }] }),
+    host("down", { questions: [q(9)], error: "no answer" }),
+  ] };
+  const items = inboxItems(report, new Set(["a#6"]));
+  assert.deepEqual(items.map((i: { key: string }) => i.key), ["a#77", "b#3"], "newest first; one answered here is left out");
+  assert.deepEqual([items[0].host, items[0].id, items[0].from, items[0].summary], ["a", 77, "agent-web-lead", "Garde ?"]);
+  assert.deepEqual(inboxItems(null, new Set()), []);
+});
+
+test("keepSelection: the selected question while it is there, else the newest, else none", () => {
+  const items = [{ key: "a#77" }, { key: "b#3" }];
+  assert.equal(keepSelection(items, "b#3"), "b#3");
+  assert.equal(keepSelection(items, "a#6"), "a#77");
+  assert.equal(keepSelection([], "a#6"), null);
+});
+
+test("ageLabel: now, minutes, hours, days", () => {
+  const now = Date.parse("2026-11-16T10:00:00Z");
+  assert.equal(ageLabel("2026-11-16T09:59:40Z", now), "now");
+  assert.equal(ageLabel("2026-11-16T09:55:00Z", now), "5 min");
+  assert.equal(ageLabel("2026-11-16T07:00:00Z", now), "3 h");
+  assert.equal(ageLabel("2026-11-14T10:00:00Z", now), "2 d");
+});
+
+test("questionArgs and answerArgs: JSON forms; the answer's text comes after -- so a leading dash stays text", () => {
+  assert.deepEqual(questionArgs("h", 77), ["team", "question", "77", "--json", "--host", "h"]);
+  assert.deepEqual(answerArgs("h", 77, "-1 suffit"), ["answer", "--json", "--host", "h", "--", "77", "-1 suffit"]);
+});
+
+test("questionOutcome and answerOutcome: the JSON line, or the first line of the error", () => {
+  const ok = (stdout: string) => ({ code: 0, stdout, stderr: "" });
+  assert.deepEqual(questionOutcome(ok('{"id":7,"from":"x","time":"t","state":"open","summary":"S\\u0007","body":"L1\\nL2"}\n')),
+    { ok: true, question: { id: 7, from: "x", time: "t", state: "open", summary: "S", body: "L1\nL2" } });
+  assert.deepEqual(answerOutcome(ok('{"id":7,"to":"agent-web-lead","delivered":false}\n')), { ok: true, delivered: false, to: "agent-web-lead" });
+  assert.deepEqual(answerOutcome({ code: 1, stdout: "", stderr: "Error: question 7 is already answered\nmore\n" }),
+    { ok: false, error: "Error: question 7 is already answered" });
+  assert.deepEqual(answerOutcome(ok("Answered #7.\n")), { ok: false, error: "unreadable answer from forge" });
+});
+
+test("inboxWindow: one kept-in-place window of the forge mod, opened on a question", () => {
+  const w = inboxWindow("a#77");
+  assert.deepEqual([w.mod, w.kind, w.key], ["forge", "window", "forge-inbox"]);
+  assert.deepEqual(w.props, { view: "inbox", focus: "a#77" });
 });

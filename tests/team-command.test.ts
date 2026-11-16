@@ -320,6 +320,15 @@ test("answer types the summary to a live session, records it and closes the ques
   assert.equal(typed().length, 1);
 });
 
+test("answer --json prints one line: the question, its asker and whether the answer was delivered", async () => {
+  const { ctx } = answerSetup();
+  assert.equal(await cmdTeam(ctx, ["answer", "7"], { json: true, stdin: answer({ summary: "Oui" }) }), 0);
+  assert.deepEqual(ctx.out_lines.map((l) => JSON.parse(l)), [{ id: 7, to: lead, delivered: true }]);
+  const away = answerSetup({ match: "-- hc get agent", stdout: '{"state":"finished","exit_code":0,"status":null}' });
+  await cmdTeam(away.ctx, ["answer", "7"], { json: true, stdin: answer({ summary: "Oui" }) });
+  assert.deepEqual(away.ctx.out_lines.map((l) => JSON.parse(l)), [{ id: 7, to: lead, delivered: false }]);
+});
+
 test("an answer's body goes to a file the typed line names, byte for byte", async () => {
   const { fake, ctx, typed } = answerSetup();
   await cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Voir le détail", body: "x\u001b[201~" }) });
@@ -383,6 +392,16 @@ test("converge stops before any container when a .env is open to others", async 
   const { ctx } = setup();
   await assert.rejects(() => cmdTeam(ctx, ["converge"]), (e: Error) => e.message.includes(envFile) && /group or others/.test(e.message));
   assert.ok(!ctx.calls.some((c) => c.includes("launch")));
+});
+
+test("question --json prints one object: the asker, the state, the summary and the body, without control characters", async () => {
+  writeJournal({ ...ASK, text: "Ligne un\nLigne deux\u001b[2J" });
+  const { ctx } = setup();
+  assert.equal(await cmdTeam(ctx, ["question", "7"], { json: true }), 0);
+  assert.equal(ctx.out_lines.length, 1);
+  assert.deepEqual(JSON.parse(ctx.out_lines[0]), {
+    id: 7, from: lead, time: ASK.time, state: "open", summary: "Quel séparateur ?", body: "Ligne un\nLigne deux[2J",
+  });
 });
 
 test("question shows a question's summary and detail without control characters; an unknown id is refused", async () => {

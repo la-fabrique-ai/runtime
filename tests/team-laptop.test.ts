@@ -124,6 +124,16 @@ test("answer sends the summary as JSON on the host's stdin, never in its argv; a
   await assert.rejects(() => cmdAnswer(ctx, "x", "Oui"), /Usage/);
 });
 
+test("answer --json (the Herdr App inbox): stdin is not read, a text that is no summary is split, the host answers JSON", async () => {
+  const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'answer'", stdout: '{"id":7,"to":"agent-web-lead","delivered":true}\n' }] });
+  const text = "Oui, mais :\n- garde le lien";
+  const body = async () => { throw new Error("stdin must not be read"); };
+  assert.equal(await cmdAnswer(ctx, "7", text, { json: true, body }), 0);
+  assert.ok(String(ctx.calls[0].at(-1)).endsWith("'forge' 'team' 'answer' '7' '--json'"), ctx.calls[0].join(" "));
+  assert.deepEqual(JSON.parse(ctx.execOptions[0]!.input!), { summary: "Oui, mais :", body: text });
+  assert.deepEqual(ctx.out_lines, ['{"id":7,"to":"agent-web-lead","delivered":true}']);
+});
+
 // `forge team inbox --json` : une ligne de JSON, un hôte injoignable est une entrée en erreur.
 test("inbox answers one line of JSON for every installed host; an unreachable one has its error and empty counts", async () => {
   saveHost({ ...host("forge-local"), done: ["setup"] });
@@ -153,4 +163,13 @@ test("question asks the host and prints an agent's text without control characte
   const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'question' '7'", stdout: "#7 from x\nDétail\u001b[2J\n" }] });
   assert.equal(await cmdTeamLaptop(ctx, ["question", "7"]), 0);
   assert.deepEqual(ctx.out_lines, ["#7 from x\nDétail[2J"]);
+});
+
+test("question --json relays the host's object with every agent text cleaned", async () => {
+  const q = { id: 7, from: "agent\u001b[2J", time: "2026-11-15T10:00:00Z", state: "open", summary: "Quel\u0007 nom ?", body: "Ligne\nDeux\u001b[2J" };
+  const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'question' '7' '--json'", stdout: JSON.stringify(q) + "\n" }] });
+  assert.equal(await cmdTeamLaptop(ctx, ["question", "7"], { json: true }), 0);
+  assert.deepEqual(JSON.parse(ctx.out_lines[0]), { ...q, from: "agent[2J", summary: "Quel nom ?", body: "Ligne\nDeux[2J" });
+  const old = fakeContext({ rules: [{ match: "'forge' 'team' 'question'", stdout: "#7 from x\n" }] });
+  await assert.rejects(() => cmdTeamLaptop(old, ["question", "7"], { json: true }), /older forge/);
 });
