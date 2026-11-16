@@ -126,7 +126,7 @@ async function run(d: ApiDeps, caller: Member, req: ApiRequest, reserve: (id: nu
           name, role: m.role, publishes: m.capabilities.includes("publish"), busy: busy !== null,
           assignedByYou: busy !== null && busy.assignedBy === caller.name,
           task: busy === null || busy.task === NO_BRANCH ? null : busy.task,
-          session, waitingOn: memberWaitingOn(d.journal.entries(), name, { hasTask: busy !== null, session }),
+          session, waitingOn: memberWaitingOn(d.journal.entries(), name, session),
         });
       }
       return { reply: () => ({ ok: true, you, team }) };

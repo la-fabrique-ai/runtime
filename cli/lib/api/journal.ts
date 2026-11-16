@@ -151,9 +151,10 @@ export function waitingOn(entries: readonly Entry[], container: string): string 
   return replied ? null : last.to;
 }
 
-// La règle des deux affichages (`forge team status`, le `status` de l'API) : un
-// membre libre n'attend personne, la libération clôt l'attente, et celui dont la
-// session travaille n'attend pas non plus tant qu'il n'a pas fini.
-export function memberWaitingOn(entries: readonly Entry[], container: string, state: { hasTask: boolean; session: string }): string | null {
-  return !state.hasTask || state.session === "working" ? null : waitingOn(entries, container);
+// La règle des deux affichages (`forge team status`, le `status` de l'API) : seule
+// une session vivante qui ne travaille pas (`idle`, `done`) attend. La fin de la
+// session clôt l'attente (`release` l'arrête), pas l'absence de tâche : le Pilote,
+// que personne n'assigne, attend aussi.
+export function memberWaitingOn(entries: readonly Entry[], container: string, session: string): string | null {
+  return session === "idle" || session === "done" ? waitingOn(entries, container) : null;
 }

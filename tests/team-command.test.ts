@@ -116,6 +116,7 @@ test("converge starts the session of a pilot it has just created", async () => {
 });
 
 const lead = "agent-web-lead";
+const LIVE_IDLE: ExecRule = { match: "-- hc get agent", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}' };
 
 // Une question ouverte du Lead au journal, comme `forge-team ask` la laisse.
 function writeJournal(...lines: object[]): void {
@@ -131,29 +132,33 @@ test("status --json prints one TeamStatus object and nothing else on stdout", as
   writeJournal(ASK);
   const fake = FakeIncus.withRuntime();
   fake.addInstance("agent-forge", lead, { status: "Running", config: { "user.forge.task": "fix", "user.forge.assigned_by": "human" } });
-  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "-- hc get agent", code: 1 }] });
+  const ctx = fakeContext({ incus: fake, rules: [...RULES, LIVE_IDLE] });
   await cmdTeam(ctx, ["status"], { json: true });
   assert.equal(ctx.out_lines.length, 1);
   const s = JSON.parse(ctx.out_lines[0]) as TeamStatus;
   assert.deepEqual(s.members.map((m) => [m.name, m.present, m.task, m.assignedBy, m.session, m.waitingOn]), [
-    [lead, true, "fix", "human", "none", "human"],
+    [lead, true, "fix", "human", "idle", "human"],
     ["agent-web-dev-1", false, null, null, "none", null],
   ]);
   assert.deepEqual(s.inbox.map((q) => [q.id, q.from, q.summary]), [[7, lead, "Quel séparateur ?"]]);
   assert.deepEqual(s.mirrors, [{ team: "web", originAgeSeconds: null }]);
 });
 
-test("status: a member released after a question left open waits on no one", async () => {
+test("status: a member whose session is over waits on no one; a free one whose session lives still waits", async () => {
   writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
     teams: { web: { repo: "o/web", roles: { lead: { capabilities: ["repo", "ask-human"] } } } },
   }));
   writeJournal(ASK);
   const fake = FakeIncus.withRuntime();
   fake.addInstance("agent-forge", lead, { status: "Running" });
-  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "-- hc get agent", code: 1 }] });
-  await cmdTeam(ctx, ["status"], { json: true, quick: true });
-  const [m] = (JSON.parse(ctx.out_lines[0]) as TeamStatus).members;
-  assert.deepEqual([m.task, m.waitingOn], [null, null]);
+  const wait = async (session: ExecRule) => {
+    const ctx = fakeContext({ incus: fake, rules: [...RULES, session] });
+    await cmdTeam(ctx, ["status"], { json: true, quick: true });
+    const [m] = (JSON.parse(ctx.out_lines[0]) as TeamStatus).members;
+    return [m.task, m.session, m.waitingOn];
+  };
+  assert.deepEqual(await wait(LIVE_IDLE), [null, "idle", "human"]);
+  assert.deepEqual(await wait({ match: "-- hc get agent", stdout: '{"state":"finished","exit_code":0,"status":null}' }), [null, "exited", null]);
 });
 
 test("status --quick refreshes no mirror; without it the team mirror is refreshed", async () => {
