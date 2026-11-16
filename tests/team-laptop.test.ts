@@ -27,7 +27,7 @@ const host = (name: string, kind: LaptopHost["kind"] = "remote"): LaptopHost => 
   name, kind, address: "203.0.113.10", port: 22, user: "alice", admin: "ubuntu",
   adminKey: "/keys/admin", exposure: "public", done: [],
 });
-const HC: ExecRule = { match: "hc --version", stdout: "hc 0.1.20\n" };
+const HC: ExecRule = { match: "hc --version", stdout: "hc 0.1.21\n" };
 
 test("assign forwards the instruction as stdin, with the host's own command and no agent forwarding", async () => {
   const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'assign'", stdout: "Assigned fix-login to agent-web-dev-1.\n" }] });
@@ -56,8 +56,8 @@ test("up checks hc, converges with the agent forwarded, then registers the machi
 });
 
 test("a Mac whose hc is not the pinned version converges nothing", async () => {
-  const ctx = fakeContext({ rules: [{ match: "hc --version", stdout: "hc 0.1.21\n" }] });
-  await assert.rejects(() => cmdTeamLaptop(ctx, ["up"]), /hc 0\.1\.20/);
+  const ctx = fakeContext({ rules: [{ match: "hc --version", stdout: "hc 0.1.20\n" }] });
+  await assert.rejects(() => cmdTeamLaptop(ctx, ["up"]), /hc 0\.1\.21/);
   assert.deepEqual(ctx.attachCalls, []);
 });
 

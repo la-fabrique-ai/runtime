@@ -14,7 +14,7 @@ test("the CLI and the image pin the same hc", () => {
 
 test("checkLocalHc accepts the pinned version, refuses another or none, naming the pin", async () => {
   await checkLocalHc(fakeContext({ rules: [{ match: "hc --version", stdout: `hc ${HC_VERSION}\n` }] }));
-  for (const rule of [{ match: "hc --version", stdout: "hc 0.1.21\n" }, { match: "hc --version", code: 127, stderr: "not found" }]) {
+  for (const rule of [{ match: "hc --version", stdout: "hc 0.1.20\n" }, { match: "hc --version", code: 127, stderr: "not found" }]) {
     await assert.rejects(checkLocalHc(fakeContext({ rules: [rule] })), (e: Error) => e.message.includes(`hc ${HC_VERSION}`));
   }
 });

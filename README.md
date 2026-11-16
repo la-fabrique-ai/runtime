@@ -71,7 +71,7 @@ pipx install ansible-core             # 2.20 or newer
 ```
 
 Install Herdr App and its `hc` from https://herdr.dev. `forge team up` needs
-`hc` at the version forge pins, 0.1.20 (`hc --version`), and refuses to add
+`hc` at the version forge pins, 0.1.21 (`hc --version`), and refuses to add
 machines to Herdr App with another. `forge open` also needs the herdr TUI.
 
 **Both:** you need git, and an SSH key that GitHub accepts, loaded in the
@@ -759,7 +759,7 @@ Known limits:
   `Error connecting to agent`): the agent is not forwarded. Check
   `ForwardAgent yes` and `IdentityAgent` in your SSH config, and that you are
   attached: with no client attached, the host has no agent.
-- **`forge team up` says it needs hc 0.1.20:** your `hc` is another version,
+- **`forge team up` says it needs hc 0.1.21:** your `hc` is another version,
   or missing. Install the pinned one (https://herdr.dev), then run it again:
   the machines are added at that second run.
 - **`herdr --remote` fails the first time:** run it in a real terminal; it

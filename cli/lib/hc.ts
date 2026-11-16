@@ -5,7 +5,7 @@ import { ForgeError } from "./context.ts";
 // same version, `forge_image_hc_version` in
 // ansible/roles/forge_image/defaults/main.yml: tests/hc.test.ts keeps the two
 // equal. The Mac's check of its own hc is checkLocalHc.
-export const HC_VERSION = "0.1.20";
+export const HC_VERSION = "0.1.21";
 
 // Herdr App's machines go through the Mac's own hc, and hc talks to a core of
 // its own version: a different one is refused before a machine is added.

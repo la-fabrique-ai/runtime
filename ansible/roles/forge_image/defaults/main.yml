@@ -13,11 +13,11 @@ forge_image_subid_count: 65536
 # (the sums were also recomputed from the downloaded archives); they are keyed
 # by dpkg's architecture name, and the role fails on any other rather than
 # download unchecked.
-forge_image_hc_version: "0.1.20"
+forge_image_hc_version: "0.1.21"
 forge_image_hc_target:
   amd64: linux-x86_64
   arm64: linux-aarch64
 forge_image_hc_url: "https://releases.herdr.dev/core/{{ forge_image_hc_version }}/herdr-core-{{ forge_image_hc_target[forge_image_arch.stdout] }}.tar.gz"
 forge_image_hc_sha256:
-  amd64: ac6b86890c451a37584620aaa438b71bc0d0bd430a2e7c1d7e095f052c414e74
-  arm64: 5f3037379d15cc76cfc72d2fd1a4262ea1c5b24df278bf7cfd8adcff7b914862
+  amd64: 78424755c10a40dde38a0bdb55c20ac19706e9ae05ed68fc2acf1fcff0d941c1
+  arm64: e844a2bfab48a226097679d076bc83042fe57fccef5387ef802e5b24e78b529a
