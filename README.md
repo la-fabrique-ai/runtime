@@ -83,8 +83,8 @@ at it in your `~/.ssh/config`, in a `Host github.com` block.
 ### 2. Install
 
 ```bash
-git clone https://github.com/moroine/agent-forge.git
-cd agent-forge
+git clone https://github.com/la-fabrique-ai/runtime.git
+cd runtime
 ./cli/forge install
 ```
 
