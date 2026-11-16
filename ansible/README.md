@@ -82,8 +82,8 @@ to see what `forge install` runs.
 ### A local Lima VM
 
 ```bash
-git clone https://github.com/moroine/agent-forge.git
-cd agent-forge
+git clone https://github.com/la-fabrique-ai/runtime.git
+cd runtime
 limactl create --tty=false --name forge-local ansible/lima/forge.yaml
 limactl start forge-local
 ```

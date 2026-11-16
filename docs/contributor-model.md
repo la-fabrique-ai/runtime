@@ -29,7 +29,7 @@ dev VM; the relay checks every request, signs the commits, pushes them to the
 bot's fork over SSH and opens the pull request. The `contributor` mode of the
 hook blocks `git push` and `gh`, and the dev VM holds no GitHub credential.
 Both VMs keep egress open (the proxy that would filter it is
-moroine/agent-forge#117).
+la-fabrique-ai/runtime#117).
 
 ### How the agent publishes
 
