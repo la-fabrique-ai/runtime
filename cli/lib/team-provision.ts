@@ -19,7 +19,7 @@ import {
 } from "./mirror.ts";
 import {
   hostGitIdentity, LFS_FILTERS_INSTALL, LFS_HOOKS_INSTALL, pushClaudeToken, pushFile, refreshClaude,
-  requireClaudeToken, requireHookBlocks, requireRuntime, workspaceIsReusable,
+  requireClaudeToken, requireHookBlocks, requireHostLfs, requireRuntime, workspaceIsReusable,
 } from "./commands/provision.ts";
 import { egressNames, PROFILE } from "./objects.ts";
 import { repoRoot, workspacesDir } from "./paths.ts";
@@ -51,6 +51,7 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   if (m.prompt !== null) readPrompt(m); // lisible avant de rien créer
   const identity = team?.gitIdentity ?? await hostGitIdentity(ctx);
   await requireRuntime(ctx);
+  if (m.lfs) await requireHostLfs(ctx);
   const plan = m.strict ? await requireStrictRuntime(ctx) : null;
   const readTeam = m.capabilities.includes("read-team");
   const workspaceDir = join(workspacesDir(), m.name);

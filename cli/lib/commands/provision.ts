@@ -95,6 +95,16 @@ export async function requireRuntime(ctx: Context): Promise<void> {
   }
 }
 
+// Un rôle `lfs` fait récupérer par l'hôte les objets LFS du miroir : sans le
+// paquet, le container ne lirait que des pointeurs. Refusé avant de rien créer.
+export async function requireHostLfs(ctx: Context): Promise<void> {
+  const r = await ctx.exec(["git", "lfs", "version"], { cwd: HOST_GIT_CWD });
+  if (r.code !== 0) {
+    throw new ForgeError("git-lfs is not installed on this host, and a role asks for LFS (\"lfs\": true). " +
+      "Install the package (the base role of ansible/site.yml does: run the playbook again, see ansible/README.md).");
+  }
+}
+
 // Preuve que le hook garde vraiment CE container, dans les deux sens. Un hook
 // qui ne peut pas lire sa commande (image sans jq, constaté le 2026-10-17)
 // laissait tout passer ; devenu fail-closed, il refuse tout — sûr, mais
