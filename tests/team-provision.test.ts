@@ -153,3 +153,23 @@ test("a failed LFS fetch stops the provisioning before the launch, with the agen
   await assert.rejects(run, /fetching the LFS objects failed: denied[\s\S]*SSH agent/);
   assert.ok(!flat(ctx).some((c) => c.includes(" launch ")));
 });
+
+test("a role with lfs installs the filters without the skip before the clone, and keeps them that way", async () => {
+  const cfg = parseConfig("/c.json", { teams: { web: { repo: "o/web", roles: { dev: { capabilities: ["repo"], lfs: true } } } } });
+  const { ctx, run } = provision("agent-web-dev", cfg);
+  await run();
+  const calls = flat(ctx);
+  const clone = calls.findIndex((c) => c.includes(" -c lfs.url=file:///forge/origin.git ") && c.includes(" clone "));
+  const filters = calls.findIndex((c) => c.endsWith("git lfs install --skip-repo"));
+  assert.ok(filters >= 0 && filters < clone, calls.join("\n"));
+  assert.ok(!calls.some((c) => c.includes("--skip-smudge")), "a skip-smudge install would win over the mirror");
+  assert.ok(calls.some((c) => c.includes("cd /workspace && git lfs install")));
+});
+
+test("a role without lfs keeps the skip-smudge filters and the skipped clone", async () => {
+  const { ctx, run } = provision("agent-web-dev-1");
+  await run();
+  const calls = flat(ctx);
+  assert.ok(calls.some((c) => c.includes("git lfs install --skip-repo --skip-smudge")));
+  assert.ok(calls.some((c) => c.includes("GIT_LFS_SKIP_SMUDGE=1")));
+});

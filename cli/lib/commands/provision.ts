@@ -28,6 +28,11 @@ export const CONTAINER_TOKEN_PATH = `${CONTAINER_TOKEN_DIR}/claude-token`;
 // pour le test de contrat qui les rejoue avec un vrai git-lfs.
 export const LFS_FILTERS_INSTALL = "git lfs install --skip-repo --skip-smudge";
 export const LFS_HOOKS_INSTALL = "git lfs install --skip-smudge";
+// Un rôle `lfs` lit le contenu dans le miroir : les filtres gardent leur
+// smudge (un `smudge --skip` dans ~/.gitconfig l'emporterait sur celui de
+// /etc/gitconfig et laisserait des pointeurs).
+export const LFS_FILTERS_READ = "git lfs install --skip-repo";
+export const LFS_HOOKS_READ = "git lfs install";
 
 // Défait un provisioning interrompu. Règle : rien de ce qui existait avant la
 // tentative échouée n'est supprimé. Le workspace marqué "kept" peut porter la

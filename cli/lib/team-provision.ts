@@ -18,7 +18,7 @@ import {
   originMirrorPath, requireMirrorOf, TEAM_DEVICE, TEAM_MOUNT, teamMirrorPath,
 } from "./mirror.ts";
 import {
-  hostGitIdentity, LFS_FILTERS_INSTALL, LFS_HOOKS_INSTALL, pushClaudeToken, pushFile, refreshClaude,
+  hostGitIdentity, LFS_FILTERS_INSTALL, LFS_FILTERS_READ, LFS_HOOKS_INSTALL, LFS_HOOKS_READ, pushClaudeToken, pushFile, refreshClaude,
   requireClaudeToken, requireHookBlocks, requireHostLfs, requireRuntime, workspaceIsReusable,
 } from "./commands/provision.ts";
 import { egressNames, PROFILE } from "./objects.ts";
@@ -113,10 +113,13 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   if (origin !== null) {
     if (reuseWorkspace) {
       ctx.out(`Reusing the existing clone in ${workspaceDir}...`);
-      await mustSucceed("realign origin remote", pointOriginAtMirror(ctx, m.name));
+      await mustSucceed("realign origin remote", pointOriginAtMirror(ctx, m.name, m.lfs));
+      if (m.lfs) ctx.out("LFS files of this workspace stay pointers until 'git lfs pull' runs in it (inside the container, as aiuser).");
     } else {
       ctx.out(`Cloning ${m.repo} in the container...`);
-      await mustSucceed("clone repository", cloneWorkspace(ctx, m.name));
+      // The filters come first, without the skip: the clone smudges from the mirror.
+      if (m.lfs) await mustSucceed(`git-lfs filters in ${m.name}`, execAsAgent(ctx, m.name, LFS_FILTERS_READ));
+      await mustSucceed("clone repository", cloneWorkspace(ctx, m.name, m.lfs));
     }
   }
 
@@ -156,9 +159,9 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   await mustSucceed("record forge mode", configSet(ctx, m.name, "user.forge.mode", MODE));
 
   ctx.out("Installing git-lfs filters...");
-  await mustSucceed(`git-lfs filters in ${m.name}`, execAsAgent(ctx, m.name, LFS_FILTERS_INSTALL));
+  await mustSucceed(`git-lfs filters in ${m.name}`, execAsAgent(ctx, m.name, m.lfs ? LFS_FILTERS_READ : LFS_FILTERS_INSTALL));
   if (origin !== null) {
-    const hooks = await execAsAgent(ctx, m.name, `cd /workspace && ${LFS_HOOKS_INSTALL}`);
+    const hooks = await execAsAgent(ctx, m.name, `cd /workspace && ${m.lfs ? LFS_HOOKS_READ : LFS_HOOKS_INSTALL}`);
     if (hooks.code !== 0) {
       ctx.err(`WARNING: installing git-lfs hooks in /workspace failed: ${hooks.stderr.trim() || `exit code ${hooks.code}`}`);
     }
