@@ -16,6 +16,7 @@ export type Member = {
   capabilities: Capability[]; talkTo: string[]; strict: boolean; memory: string | null; cpu: number | null;
   plugins: string[]; prompt: string | null;
   env: string | null; // the role's .env, as an expanded host path
+  lfs: boolean; // the role's `lfs`; always false for the Pilot
 };
 
 // The reference team shipped in the repository (teams/reference): opt-in, with
@@ -43,6 +44,7 @@ export function members(cfg: ForgeConfig): Member[] {
       name: PILOT, team: null, role: "pilot", index: null, repo: null, capabilities: cfg.pilot.capabilities,
       talkTo: [], strict: cfg.pilot.strict, memory: cfg.pilot.memory, cpu: null, plugins: cfg.pilot.plugins,
       prompt: cfg.pilot.prompt === "reference" ? join(REFERENCE_PROMPTS, "pilot.md") : cfg.pilot.prompt, env: hostPath(cfg.pilot.env),
+      lfs: false,
     });
   }
   for (const [team, t] of Object.entries(cfg.teams)) {
@@ -55,7 +57,7 @@ export function members(cfg: ForgeConfig): Member[] {
         out.push({
           name, team, role, index, repo: r.capabilities.includes("repo") ? t.repo : null,
           capabilities: r.capabilities, talkTo: [], strict: r.strict, memory: r.memory, cpu: r.cpu,
-          plugins: r.plugins, prompt: rolePrompt(t.prompts, role), env: hostPath(r.env),
+          plugins: r.plugins, prompt: rolePrompt(t.prompts, role), env: hostPath(r.env), lfs: r.lfs,
         });
       }
     }
