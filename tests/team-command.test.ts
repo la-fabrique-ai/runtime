@@ -412,3 +412,27 @@ test("question shows a question's summary and detail without control characters;
   assert.match(ctx.out_lines[0], /^#7 from agent-web-lead, 2 min ago \(open\)$/);
   await assert.rejects(() => cmdTeam(ctx, ["question", "99"]), /no question 99/);
 });
+
+const lfsConfig = (lfs: boolean) => writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+  teams: { web: { repo: "o/web", roles: { dev: { capabilities: ["repo"], lfs } } } },
+}));
+
+test("sync fetches the LFS objects after the mirror when a role reads them, and not otherwise", async () => {
+  for (const lfs of [true, false]) {
+    lfsConfig(lfs);
+    const { ctx } = setup();
+    assert.equal(await cmdTeam(ctx, ["sync", "web"]), 0);
+    const calls = ctx.calls.map((c) => c.join(" "));
+    const fetch = calls.findIndex((c) => c.includes(" fetch --prune "));
+    const lfsFetch = calls.findIndex((c) => c.includes(" lfs fetch "));
+    assert.equal(lfsFetch >= 0, lfs, calls.join("\n"));
+    if (lfs) assert.ok(lfsFetch > fetch && fetch >= 0);
+  }
+});
+
+test("sync fails when the LFS fetch does, naming the repository", async () => {
+  lfsConfig(true);
+  const fake = FakeIncus.withRuntime();
+  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: " lfs fetch ", code: 2, stderr: "denied\n" }] });
+  await assert.rejects(() => cmdTeam(ctx, ["sync", "web"]), /fetching the LFS objects of o\/web failed: denied/);
+});

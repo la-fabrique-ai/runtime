@@ -131,3 +131,25 @@ test("the team's git identity wins over the host's", async () => {
   assert.ok(calls.some((c) => c.includes("git config --global user.name Team Bot")));
   assert.ok(!calls.some((c) => c.includes("--includes user.name")));
 });
+
+test("a role with lfs fetches the LFS objects into the mirror before the container exists", async () => {
+  const cfg = parseConfig("/c.json", { teams: { web: { repo: "o/web", roles: { dev: { capabilities: ["repo"], lfs: true } } } } });
+  const { ctx, run } = provision("agent-web-dev", cfg);
+  await run();
+  const calls = flat(ctx);
+  const fetch = calls.findIndex((c) => c.includes(" lfs fetch "));
+  assert.ok(fetch >= 0 && fetch < calls.findIndex((c) => c.includes(" launch ")), calls.join("\n"));
+});
+
+test("without lfs on the role, nothing LFS runs on the host", async () => {
+  const { ctx, run } = provision("agent-web-dev-1");
+  await run();
+  assert.ok(!flat(ctx).some((c) => c.includes("lfs fetch")));
+});
+
+test("a failed LFS fetch stops the provisioning before the launch, with the agent hint", async () => {
+  const cfg = parseConfig("/c.json", { teams: { web: { repo: "o/web", roles: { dev: { capabilities: ["repo"], lfs: true } } } } });
+  const { ctx, run } = provision("agent-web-dev", cfg, [{ match: " lfs fetch ", code: 2, stderr: "denied\n" }]);
+  await assert.rejects(run, /fetching the LFS objects failed: denied[\s\S]*SSH agent/);
+  assert.ok(!flat(ctx).some((c) => c.includes(" launch ")));
+});

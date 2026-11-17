@@ -12,7 +12,7 @@ import type { ForgeConfig } from "../config.ts";
 import { loadConfig } from "../config.ts";
 import { baseKey, provisioningMarker } from "../containers.ts";
 import { forgeProject, listInstances, type Instance } from "../incus.ts";
-import { originMirrorAge, refreshMirror } from "../mirror.ts";
+import { fetchMirrorLfs, originMirrorAge, refreshMirror } from "../mirror.ts";
 import { configPath } from "../paths.ts";
 import { ensureRunning } from "../session.ts";
 import { deliverAnswer, sessionState, startSession, type SessionState } from "../hc-session.ts";
@@ -20,7 +20,7 @@ import { assign, busyState, release } from "../tasks.ts";
 import { ageLabel, mirrorLine } from "../age.ts";
 import { printableText } from "../printable.ts";
 import { columnWidths, formatRow } from "../table.ts";
-import { members, type Member } from "../team.ts";
+import { members, teamWantsLfs, type Member } from "../team.ts";
 import { installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { teamMirrorPath } from "../mirror.ts";
@@ -339,6 +339,13 @@ async function sync(ctx: Context, cfg: ForgeConfig, team: string | undefined): P
   if (origin.code !== 0) {
     throw new ForgeError(`refreshing the mirror of ${cfg.teams[name].repo} failed: ${origin.stderr.trim() || `exit code ${origin.code}`}\n` +
       `Did your SSH agent reach the host? Run forge team sync ${name} from your machine: it forwards the agent.`);
+  }
+  if (teamWantsLfs(cfg, name)) {
+    const lfs = await fetchMirrorLfs(ctx, originMirrorPath(name), cfg.teams[name].repo);
+    if (lfs.code !== 0) {
+      throw new ForgeError(`fetching the LFS objects of ${cfg.teams[name].repo} failed: ${lfs.stderr.trim() || `exit code ${lfs.code}`}\n` +
+        `Did your SSH agent reach the host? Run forge team sync ${name} from your machine: it forwards the agent.`);
+    }
   }
   const r = await refreshTeamMirror(ctx, cfg, name);
   for (const failed of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${failed}.`);

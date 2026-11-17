@@ -79,6 +79,12 @@ export function members(cfg: ForgeConfig): Member[] {
   return out;
 }
 
+// Whether the team's origin mirror must hold the LFS objects: a container of
+// the team reads them from it. The mirror is shared, the reading is per role.
+export function teamWantsLfs(cfg: ForgeConfig, team: string): boolean {
+  return Object.values(cfg.teams[team]?.roles ?? {}).some((r) => r.lfs);
+}
+
 export function memberNamed(cfg: ForgeConfig, name: string): Member {
   const all = members(cfg);
   const found = all.find((m) => m.name === name);

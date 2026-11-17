@@ -14,7 +14,7 @@ import {
 } from "./containers.ts";
 import { configSet, configUnset, execAsAgent, execAsAgentArgv, forgeProject, incus, pullText, pushText, waitReady } from "./incus.ts";
 import {
-  cloneWorkspace, ensureMirror, ensureTeamMirror, MIRROR_MOUNT, mirrorRepo, ORIGIN_DEVICE, pointOriginAtMirror,
+  cloneWorkspace, ensureMirror, ensureTeamMirror, fetchMirrorLfs, MIRROR_MOUNT, mirrorRepo, ORIGIN_DEVICE, pointOriginAtMirror,
   originMirrorPath, requireMirrorOf, TEAM_DEVICE, TEAM_MOUNT, teamMirrorPath,
 } from "./mirror.ts";
 import {
@@ -66,6 +66,17 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
     reuseWorkspace = workspaceIsReusable(workspaceDir, origin, m.repo, existing);
     ctx.out(existsSync(origin) ? `Reusing the team mirror ${origin}...` : `Fetching ${m.repo} into the team mirror...`);
     await ensureMirror(ctx, origin, m.repo);
+    // A container that reads LFS content needs the objects in the mirror before
+    // it clones: without them it would hold pointers, so a failure stops here.
+    // The other members of the team leave the refresh to `forge team sync`.
+    if (m.lfs) {
+      ctx.out(`Fetching the LFS objects of ${m.repo} into the team mirror...`);
+      const lfs = await fetchMirrorLfs(ctx, origin, m.repo);
+      if (lfs.code !== 0) {
+        throw new ForgeError(`fetching the LFS objects failed: ${lfs.stderr.trim() || `exit code ${lfs.code}`}\n` +
+          "Did your SSH agent reach the host? Run forge team up from your machine: it forwards the agent.");
+      }
+    }
   } else {
     reuseWorkspace = existsSync(workspaceDir) && readdirSync(workspaceDir).length > 0;
   }
