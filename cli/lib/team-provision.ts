@@ -90,6 +90,8 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   ];
   if (m.team !== null) keys.push("-c", `user.forge.team=${m.team}`);
   if (m.repo !== null) keys.push("-c", `user.forge.repo=${m.repo}`);
+  // What converge compares with the role later: the clone is made once.
+  keys.push("-c", `user.forge.lfs=${m.lfs}`);
   if (m.memory !== null) keys.push("-c", `limits.memory=${m.memory}`);
   if (m.cpu !== null) keys.push("-c", `limits.cpu=${m.cpu}`);
   const strictArgs = plan ? strictLaunchArgs(plan, egressNames(forgeProject())) : [];

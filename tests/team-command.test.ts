@@ -436,3 +436,15 @@ test("sync fails when the LFS fetch does, naming the repository", async () => {
   const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: " lfs fetch ", code: 2, stderr: "denied\n" }] });
   await assert.rejects(() => cmdTeam(ctx, ["sync", "web"]), /fetching the LFS objects of o\/web failed: denied/);
 });
+
+test("converge notes a container whose LFS mode differs from its role's, once, and silently accepts a match", async () => {
+  lfsConfig(true);
+  for (const [mark, noted] of [[undefined, true], ["false", true], ["true", false]] as const) {
+    const fake = FakeIncus.withRuntime();
+    fake.addInstance("agent-forge", "agent-web-dev", { status: "Running", config: mark ? { "user.forge.lfs": mark } : {} });
+    const ctx = fakeContext({ incus: fake, rules: RULES });
+    await cmdTeam(ctx, ["converge"]);
+    const notes = ctx.err_lines.filter((l) => l.includes("agent-web-dev was created with lfs"));
+    assert.equal(notes.length, noted ? 1 : 0, ctx.err_lines.join("\n"));
+  }
+});

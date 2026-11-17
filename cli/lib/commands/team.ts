@@ -115,6 +115,12 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
       // Un container déjà là reçoit les fichiers de la version courante de forge
       // et du prompt de son rôle, comme un neuf : sans cela, une mise à jour
       // n'atteindrait que les containers créés après elle.
+      // Le clone se fait une fois : un rôle qui change de mode LFS ne change pas
+      // le container déjà là. forge le dit, il ne reconvertit rien.
+      if ((instance.config?.["user.forge.lfs"] ?? "false") !== String(m.lfs)) {
+        notes.push(`NOTE: ${m.name} was created with lfs ${m.lfs ? "off" : "on"}, its role now says lfs ${m.lfs}. ` +
+          `Delete it (incus --project ${forgeProject()} delete ${m.name} --force; its workspace survives) and run converge again.`);
+      }
       ctx.out(`Updating ${m.name}...`);
       changed = (await installMemberFiles(ctx, m)).instructionsChanged;
     }
