@@ -17,7 +17,10 @@ export const MIRROR_MOUNT = "/forge/origin.git";
 export const ORIGIN_DEVICE = "origin";
 
 // Where the repository comes from, and which transports git may use for it.
-export type GitRemote = { url(ownerRepo: string): string; protocol: string[] };
+// `lfsUrl` is the Git LFS endpoint of the same repository, when it is not the
+// URL itself (an https endpoint ends in /info/lfs); a remote that has none
+// uses `url`, which git-lfs reads as an SSH endpoint.
+export type GitRemote = { url(ownerRepo: string): string; protocol: string[]; lfsUrl?(ownerRepo: string): string };
 
 // SSH only: every other transport (file, ext, https...) is refused, so a
 // hostile URL or redirect cannot reach a local path or run a helper.
@@ -92,6 +95,24 @@ export async function refreshMirror(
     "git", `--git-dir=${mirror}`, ...remote.protocol,
     "fetch", "--prune", "--no-recurse-submodules", remote.url(ownerRepo),
     "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*",
+  ], GIT_OPTS);
+}
+
+// The LFS objects of the mirror's default branch, for the containers that read
+// them (`lfs: true`). Both URLs are on the command line: in a bare repository
+// git-lfs reads `HEAD:.lfsconfig`, so a repository could otherwise name the
+// endpoint the host sends its credentials to (checked on 2026-11-17: the fetch
+// went to the .lfsconfig's host until `lfs.url` was given). `HEAD`, never
+// `--all`: a LFS file has one version per commit that changes it.
+export async function fetchMirrorLfs(
+  ctx: Context, mirror: string, ownerRepo: string, remote: GitRemote = GITHUB,
+): Promise<ExecResult> {
+  validateRepo(ownerRepo);
+  const url = remote.url(ownerRepo);
+  return ctx.exec([
+    "git", `--git-dir=${mirror}`, ...remote.protocol,
+    "-c", `lfs.url=${remote.lfsUrl ? remote.lfsUrl(ownerRepo) : url}`,
+    "lfs", "fetch", url, "HEAD",
   ], GIT_OPTS);
 }
 

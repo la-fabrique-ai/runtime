@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fakeContext } from "./lib/fake-context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
 import {
-  cloneWorkspace, ensureMirror, hasOriginDevice, mirrorRepo, pointOriginAtMirror, refreshMirror,
+  cloneWorkspace, ensureMirror, fetchMirrorLfs, hasOriginDevice, mirrorRepo, pointOriginAtMirror, refreshMirror,
 } from "../cli/lib/mirror.ts";
 
 let dir: string;
@@ -145,4 +145,27 @@ test("hasOriginDevice", async () => {
   assert.equal(await hasOriginDevice(fakeContext({ incus: fake }), "agent-x"), true);
   assert.equal(await hasOriginDevice(fakeContext({ incus: fake }), "agent-y"), false);
   assert.equal(await hasOriginDevice(fakeContext({ rules: [{ match: "device list", code: 1 }] }), "agent-x"), false);
+});
+
+test("fetchMirrorLfs gives git-lfs the URL and the endpoint, and fetches HEAD only", async () => {
+  const ctx = fakeContext();
+  await fetchMirrorLfs(ctx, mirror, "o/r");
+  assert.deepEqual(ctx.calls, [[
+    "git", `--git-dir=${mirror}`, "-c", "protocol.allow=never", "-c", "protocol.ssh.allow=always",
+    "-c", "lfs.url=git@github.com:o/r.git", "lfs", "fetch", "git@github.com:o/r.git", "HEAD",
+  ]]);
+  assert.ok(!ctx.calls[0].includes("--all"));
+});
+
+test("fetchMirrorLfs uses the remote's own LFS endpoint when it has one", async () => {
+  const ctx = fakeContext();
+  const remote = { url: (r: string) => `https://h/${r}.git`, lfsUrl: (r: string) => `https://h/${r}.git/info/lfs`, protocol: [] };
+  await fetchMirrorLfs(ctx, mirror, "o/r", remote);
+  assert.deepEqual(ctx.calls[0].slice(-6), ["-c", "lfs.url=https://h/o/r.git/info/lfs", "lfs", "fetch", "https://h/o/r.git", "HEAD"]);
+});
+
+test("fetchMirrorLfs rejects an invalid repo without running anything", async () => {
+  const ctx = fakeContext();
+  await assert.rejects(fetchMirrorLfs(ctx, mirror, "not a repo"));
+  assert.deepEqual(ctx.calls, []);
 });
