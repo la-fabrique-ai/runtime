@@ -305,7 +305,9 @@ A role's **capabilities** decide what its containers get:
   [`.env`](#a-role-has-its-own-env).
 
 Other role settings: `count`, `talkTo`, `strict` (the container's egress is
-[strict](#strict-egress-mode)), `memory`, `cpu`, `plugins`, `env`. A team also takes
+[strict](#strict-egress-mode)), `memory`, `cpu`, `plugins`, `env`, and `lfs` (on a
+role with `repo`: the container reads the repository's Git LFS files, see
+[Large files](#rules-for-getting-work-back)). A team also takes
 `prompts` (a directory of `<role>.md` files appended to each role's
 instructions) and `gitIdentity` (the commits' identity, the host's otherwise).
 
@@ -594,8 +596,17 @@ only). A text that holds the Claude token is refused.
 - **Review agent code before running it on your machine.** Checking out an
   agent branch and running its scripts (`npm install`, test runners) runs the
   agent's code there.
-- **Large files:** Git LFS content is not available inside containers; files
-  are checked out as pointers.
+- **Large files:** a role with `"lfs": true` gets the repository's Git LFS
+  files as real content: the host fetches the objects of the default branch
+  into the team mirror with your forwarded SSH agent (`forge team converge`
+  and `forge team sync`; it needs the `git-lfs` package, which the playbook
+  installs), and the container reads them from that mirror, with no network
+  and no credential. The first fetch can be large, and the container keeps its
+  own copy. A role without `lfs` gets pointers. Adding or changing an LFS file
+  is not supported yet (the objects would not reach GitHub through
+  `forge ship`). `lfs` is read when the container is created: changing it on an
+  existing one makes `converge` say so, and the container is recreated (its
+  workspace is kept).
 - **Submodules:** not set up inside containers. The host mirrors the
   repository alone, so `git submodule update --init` fails for a relative URL
   (`../other.git` resolves to `/forge/other.git`, which does not exist), for
@@ -765,8 +776,9 @@ Known limits:
 - **`herdr --remote` fails the first time:** run it in a real terminal; it
   asks before installing herdr on the host.
 - **A clone stops on `smudge filter lfs failed`** (a repository with Git LFS
-  files): the container was provisioned by an older forge, whose git-lfs
-  configuration downloads LFS objects the mirror does not hold. Fix it once on
+  files, on a role without `lfs`): the container was provisioned by an older
+  forge, whose git-lfs configuration downloads LFS objects the mirror does not
+  hold. Fix it once on
   the host with
   `incus --project agent-forge exec <container> -- su - aiuser -c 'git lfs install --skip-repo --skip-smudge'`,
   or recreate the container (the workspace is kept).
