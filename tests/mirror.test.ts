@@ -187,25 +187,14 @@ test("fetchMirrorLfs rejects an invalid repo without running anything", async ()
   assert.deepEqual(ctx.calls, []);
 });
 
-test("cloneWorkspace with lfs reads the objects from the mirror and pins the workspace to it", async () => {
+test("cloneWorkspace with lfs reads the objects from the mirror, the settings given to the clone itself", async () => {
   const ctx = fakeContext();
   await cloneWorkspace(ctx, "agent-x", true);
-  const tail = (c: string[]) => c.slice(c.indexOf("--") + 1);
-  assert.deepEqual(ctx.calls.map(tail), [
-    ["git", "-c", "lfs.url=file:///forge/origin.git", "-c", "lfs.standalonetransferagent=lfs-standalone-file",
-      "-c", "lfs.skipdownloaderrors=true", "clone", "--no-local", "/forge/origin.git", "/workspace"],
-    ["git", "-C", "/workspace", "config", "lfs.url", "file:///forge/origin.git"],
-    ["git", "-C", "/workspace", "config", "lfs.standalonetransferagent", "lfs-standalone-file"],
-    ["git", "-C", "/workspace", "config", "lfs.skipdownloaderrors", "true"],
-  ]);
+  assert.deepEqual(ctx.calls.map((c) => c.slice(c.indexOf("--") + 1)), [[
+    "git", "clone", "-c", "lfs.url=file:///forge/origin.git", "-c", "lfs.standalonetransferagent=lfs-standalone-file",
+    "-c", "lfs.skipdownloaderrors=true", "--no-local", "/forge/origin.git", "/workspace",
+  ]]);
   assert.ok(!ctx.calls.some((c) => c.includes("GIT_LFS_SKIP_SMUDGE=1")));
-});
-
-test("a failed clone with lfs pins nothing", async () => {
-  const ctx = fakeContext({ rules: [{ match: " clone ", code: 128, stderr: "fatal\n" }] });
-  const r = await cloneWorkspace(ctx, "agent-x", true);
-  assert.equal(r.code, 128);
-  assert.equal(ctx.calls.length, 1);
 });
 
 test("pointOriginAtMirror with lfs pins the workspace too, without it only re-aims origin", async () => {

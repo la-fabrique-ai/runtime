@@ -131,8 +131,9 @@ export async function fetchMirrorLfs(
 
 // What makes git-lfs read its objects from the mirror, a file of the
 // container, and not from the network: its own standalone transfer, aimed at
-// the mirror. Given on the clone's command line AND written to the workspace's
-// `.git/config`: a `.lfsconfig` of the repository can name any `lfs.url`, but
+// the mirror. They end up in the workspace's `.git/config` (`git clone -c`
+// writes them before the checkout; a reused workspace gets them from
+// pinLfsMirror): a `.lfsconfig` of the repository can name any `lfs.url`, but
 // a repository's config file wins over it, so a later checkout, rebase or
 // `git lfs pull` keeps reading the mirror (spike, 2026-11-17). An object the
 // mirror lacks (an old commit, a tag) gives a pointer, not a failed checkout.
@@ -155,15 +156,14 @@ async function pinLfsMirror(ctx: Context, container: string): Promise<ExecResult
 // In the container, as aiuser. Without `lfs`, the LFS smudge is skipped: the
 // mirror holds no LFS object and the container has no network path to fetch
 // them. With it, the objects are read from the mirror (fetchMirrorLfs put them
-// there) and the workspace is pinned to it.
-export async function cloneWorkspace(ctx: Context, container: string, lfs = false): Promise<ExecResult> {
+// there) and the new clone's config is pinned to it, in the same call.
+export function cloneWorkspace(ctx: Context, container: string, lfs = false): Promise<ExecResult> {
   if (!lfs) {
     return execAsAgentArgv(ctx, container,
       ["env", "GIT_LFS_SKIP_SMUDGE=1", "git", "clone", "--no-local", MIRROR_MOUNT, "/workspace"]);
   }
   const config = lfsMirrorConfig().flatMap(([k, v]) => ["-c", `${k}=${v}`]);
-  const clone = await execAsAgentArgv(ctx, container, ["git", ...config, "clone", "--no-local", MIRROR_MOUNT, "/workspace"]);
-  return clone.code !== 0 ? clone : pinLfsMirror(ctx, container);
+  return execAsAgentArgv(ctx, container, ["git", "clone", ...config, "--no-local", MIRROR_MOUNT, "/workspace"]);
 }
 
 // A reused workspace may still point at GitHub (or anywhere): re-aim origin.

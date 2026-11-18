@@ -126,17 +126,16 @@ test("without --skip-smudge, the same worktree add fails (control)", { skip }, (
 });
 
 // The read mode, in forge's order for `lfs: true` (team-provision.ts): the
-// filters without the skip, the clone with the mirror's LFS settings, the same
-// settings pinned in the workspace, then the hooks. The mirror's path stands in
-// for /forge/origin.git.
+// filters without the skip, the clone with the mirror's LFS settings (`git clone
+// -c` writes them in the new repository before the checkout), then the hooks.
+// The mirror's path stands in for /forge/origin.git.
 function readWorkspace(name: string, filters: string): string {
   rmSync(join(root, "home"), { recursive: true, force: true });
   mkdirSync(join(root, "home"));
   sh(filters, root);
   const config = lfsMirrorConfig(lfsMirror);
   const ws = join(root, name);
-  git([...config.flatMap(([k, v]) => ["-c", `${k}=${v}`]), "clone", "-q", "--no-local", lfsMirror, ws], root);
-  for (const [k, v] of config) git(["config", k, v], ws);
+  git(["clone", "-q", ...config.flatMap(([k, v]) => ["-c", `${k}=${v}`]), "--no-local", lfsMirror, ws], root);
   sh(LFS_HOOKS_READ, ws);
   return ws;
 }
