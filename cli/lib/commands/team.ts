@@ -22,6 +22,7 @@ import { printableText } from "../printable.ts";
 import { columnWidths, formatRow } from "../table.ts";
 import { members, teamWantsLfs, type Member } from "../team.ts";
 import { installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
+import { requireHostLfs } from "./provision.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { teamMirrorPath } from "../mirror.ts";
 import { hostReserveBytes, memoryWarning } from "../team-memory.ts";
@@ -341,6 +342,8 @@ async function status(ctx: Context, cfg: ForgeConfig, opts: TeamOptions): Promis
 // miroir d'équipe.
 async function sync(ctx: Context, cfg: ForgeConfig, team: string | undefined): Promise<number> {
   const name = requireTeam(cfg, team);
+  // Before any fetch: without the package the LFS step would fail with a message about git, not about the host.
+  if (teamWantsLfs(cfg, name)) await requireHostLfs(ctx);
   const origin = await refreshMirror(ctx, originMirrorPath(name), cfg.teams[name].repo);
   if (origin.code !== 0) {
     throw new ForgeError(`refreshing the mirror of ${cfg.teams[name].repo} failed: ${origin.stderr.trim() || `exit code ${origin.code}`}\n` +

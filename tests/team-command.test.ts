@@ -448,3 +448,11 @@ test("converge notes a container whose LFS mode differs from its role's, once, a
     assert.equal(notes.length, noted ? 1 : 0, ctx.err_lines.join("\n"));
   }
 });
+
+test("sync on a host without git-lfs says so, before any fetch", async () => {
+  lfsConfig(true);
+  const fake = FakeIncus.withRuntime();
+  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "git lfs version", code: 1 }] });
+  await assert.rejects(() => cmdTeam(ctx, ["sync", "web"]), /git-lfs is not installed/);
+  assert.ok(!ctx.calls.some((c) => c.includes("fetch")));
+});
