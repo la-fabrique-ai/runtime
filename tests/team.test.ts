@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseConfig } from "../cli/lib/config.ts";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { members, memberNamed, PILOT, REFERENCE_PROMPTS } from "../cli/lib/team.ts";
+import { members, memberNamed, PILOT, REFERENCE_PROMPTS, referenceDir } from "../cli/lib/team.ts";
 
 const cfg = (teams: Record<string, unknown>, pilot: unknown = { talkTo: ["web"] }) =>
   parseConfig("/c.json", {
@@ -79,6 +79,14 @@ test("a reference member carries its role's kit; a custom team's member none", (
   assert.deepEqual(memberNamed(c, "agent-web-dev-1").reference, { skills: ["tdd", "diagnose", "verify-before-report"], agents: ["scout"], memory: false });
   assert.equal(memberNamed(c, PILOT).reference!.memory, true);
   assert.equal(memberNamed(cfg(WEB), "agent-web-dev-1").reference, null);
+});
+
+test("every skill and sub-agent a reference role names exists", () => {
+  const roles = JSON.parse(readFileSync(join(referenceDir(), "roles.json"), "utf8")) as Record<string, { skills: string[]; agents: string[] }>;
+  for (const kit of Object.values(roles)) {
+    for (const s of kit.skills) assert.ok(existsSync(join(referenceDir(), "skills", s, "SKILL.md")), s);
+    for (const a of kit.agents) assert.ok(existsSync(join(referenceDir(), "agents", `${a}.md`)), a);
+  }
 });
 
 test("a role with no reference prompt is refused, with the reference roles listed", () => {
