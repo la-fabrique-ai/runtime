@@ -601,8 +601,9 @@ only). A text that holds the Claude token is refused.
   branch into the team mirror with your forwarded SSH agent (`forge team converge`
   and `forge team sync`; it needs the `git-lfs` package, which the playbook
   installs), and the container reads them from that mirror, with no network
-  and no credential. The first fetch can be large, and the container keeps its
-  own copy. The content is there for the tip of each branch; an older commit or
+  and no credential. The first fetch can be large, and every copy counts: the
+  mirror's `lfs/objects`, then the container's `.git/lfs/objects` and its
+  working tree. The content is there for the tip of each branch; an older commit or
   a tag can give pointers. A role without `lfs` gets pointers. Adding or changing an LFS file
   is not supported yet (the objects would not reach GitHub through
   `forge ship`). `lfs` is read when the container is created: changing it on an
