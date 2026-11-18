@@ -28,6 +28,7 @@ import type { Member } from "./team.ts";
 import { CONTAINER_ENV_PATH, readEnvFile } from "./dotenv.ts";
 import { ensureApiAccess } from "./api/access.ts";
 import { ensurePilotRepos } from "./pilot-repos.ts";
+import { installReferenceKit } from "./reference-kit.ts";
 
 const MODE = "supervised";
 const CLAUDE_MD = "/home/aiuser/.claude/CLAUDE.md";
@@ -198,7 +199,8 @@ export async function installMemberFiles(ctx: Context, m: Member): Promise<{ ins
   await mustSucceed("push Claude settings",
     pushText(ctx, m.name, "/home/aiuser/.claude/settings.json", settingsFor(m), { uid: 0, gid: 0, mode: "644" }));
   await requireHookBlocks(ctx, m.name);
-  return { instructionsChanged: before !== text || envChanged };
+  const kitChanged = await installReferenceKit(ctx, m);
+  return { instructionsChanged: before !== text || envChanged || kitChanged };
 }
 
 // Le .env du rôle : poussé (uid 1001, mode 600) quand le membre en a un, retiré
