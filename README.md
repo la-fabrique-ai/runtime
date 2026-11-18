@@ -597,12 +597,13 @@ only). A text that holds the Claude token is refused.
   agent branch and running its scripts (`npm install`, test runners) runs the
   agent's code there.
 - **Large files:** a role with `"lfs": true` gets the repository's Git LFS
-  files as real content: the host fetches the objects of the default branch
-  into the team mirror with your forwarded SSH agent (`forge team converge`
+  files as real content: the host fetches the objects of the tip of every
+  branch into the team mirror with your forwarded SSH agent (`forge team converge`
   and `forge team sync`; it needs the `git-lfs` package, which the playbook
   installs), and the container reads them from that mirror, with no network
   and no credential. The first fetch can be large, and the container keeps its
-  own copy. A role without `lfs` gets pointers. Adding or changing an LFS file
+  own copy. The content is there for the tip of each branch; an older commit or
+  a tag can give pointers. A role without `lfs` gets pointers. Adding or changing an LFS file
   is not supported yet (the objects would not reach GitHub through
   `forge ship`). `lfs` is read when the container is created: changing it on an
   existing one makes `converge` say so, and the container is recreated (its

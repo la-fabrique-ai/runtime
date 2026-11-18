@@ -76,6 +76,7 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
         throw new ForgeError(`fetching the LFS objects failed: ${lfs.stderr.trim() || `exit code ${lfs.code}`}\n` +
           "Did your SSH agent reach the host? Run forge team up from your machine: it forwards the agent.");
       }
+      if (lfs.warning) ctx.err(`WARNING: ${lfs.warning}`);
     }
   } else {
     reuseWorkspace = existsSync(workspaceDir) && readdirSync(workspaceDir).length > 0;

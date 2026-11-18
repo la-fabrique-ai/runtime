@@ -6,6 +6,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,6 +76,13 @@ before(() => {
   // The same repository as the forge host mirrors it with `lfs: true`: the LFS
   // objects sit in the mirror's lfs/objects (what fetchMirrorLfs puts there),
   // and a second branch carries a .lfsconfig that names another endpoint.
+  // A branch whose LFS object the mirror lacks (an old commit, a tag, a branch
+  // the host did not fetch): its file must come out as a pointer.
+  git(["checkout", "-q", "-b", "missing"], source);
+  writeFileSync(join(source, "seed.bin"), "content the mirror never got\n");
+  git(["commit", "-q", "-am", "missing object"], source);
+  const missing = createHash("sha256").update("content the mirror never got\n").digest("hex");
+  git(["checkout", "-q", "main"], source);
   git(["checkout", "-q", "-b", "hostile"], source);
   writeFileSync(join(source, ".lfsconfig"), "[lfs]\n\turl = https://evil.invalid/x\n");
   git(["add", ".lfsconfig"], source);
@@ -82,6 +90,7 @@ before(() => {
   lfsMirror = join(root, "lfs-mirror.git");
   git(["clone", "-q", "--bare", "--no-local", source, lfsMirror], root, { GIT_LFS_SKIP_SMUDGE: "1" });
   cpSync(join(source, ".git", "lfs", "objects"), join(lfsMirror, "lfs", "objects"), { recursive: true });
+  rmSync(join(lfsMirror, "lfs", "objects", missing.slice(0, 2), missing.slice(2, 4), missing));
   rmSync(source, { recursive: true, force: true });
 });
 
@@ -148,4 +157,11 @@ test("read mode: a later checkout of a branch whose .lfsconfig names another end
 test("with the skip-smudge filters, even the mirror's settings leave a pointer (control)", { skip }, () => {
   const ws = readWorkspace("ws-read-skip", LFS_FILTERS_INSTALL);
   assert.match(readFileSync(join(ws, "seed.bin"), "utf8"), POINTER);
+});
+
+test("read mode: a checkout whose object the mirror lacks gives a pointer and a clean tree, not a failed checkout", { skip }, () => {
+  const ws = readWorkspace("ws-read-missing", LFS_FILTERS_READ);
+  git(["checkout", "-q", "missing"], ws);
+  assert.match(readFileSync(join(ws, "seed.bin"), "utf8"), POINTER);
+  assert.equal(git(["status", "--porcelain"], ws), "");
 });

@@ -352,6 +352,7 @@ async function sync(ctx: Context, cfg: ForgeConfig, team: string | undefined): P
       throw new ForgeError(`fetching the LFS objects of ${cfg.teams[name].repo} failed: ${lfs.stderr.trim() || `exit code ${lfs.code}`}\n` +
         `Did your SSH agent reach the host? Run forge team sync ${name} from your machine: it forwards the agent.`);
     }
+    if (lfs.warning) ctx.err(`WARNING: ${lfs.warning}`);
   }
   const r = await refreshTeamMirror(ctx, cfg, name);
   for (const failed of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${failed}.`);
