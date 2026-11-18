@@ -146,7 +146,7 @@ test("a reference Lead's memory is a host directory, mounted where Claude Code k
     { type: "disk", source, path: "/home/aiuser/.claude/projects/-workspace/memory" });
   assert.ok(existsSync(source));
   const calls = flat(ctx);
-  const mkdir = calls.findIndex((c) => c.includes("mkdir -p /home/aiuser/.claude/projects/-workspace") && c.includes("aiuser"));
+  const mkdir = calls.findIndex((c) => c.includes("--user 1001") && c.endsWith("mkdir -p /home/aiuser/.claude/projects/-workspace"));
   const add = calls.findIndex((c) => c.includes("config device add") && c.includes(" memory disk"));
   assert.ok(mkdir >= 0 && add > mkdir, calls.join("\n"));
 });

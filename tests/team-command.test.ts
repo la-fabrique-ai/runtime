@@ -412,3 +412,17 @@ test("question shows a question's summary and detail without control characters;
   assert.match(ctx.out_lines[0], /^#7 from agent-web-lead, 2 min ago \(open\)$/);
   await assert.rejects(() => cmdTeam(ctx, ["question", "99"]), /no question 99/);
 });
+
+test("converging one team gives a running read-repos pilot that team's mirror, without touching its session", async () => {
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+    pilot: { capabilities: ["assign", "read-repos"], talkTo: ["web"] },
+    teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo", "publish"] } } } },
+  }));
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-pilot", { status: "Running" });
+  fake.addInstance("agent-forge", "agent-web-dev-1", { status: "Running" });
+  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "test -d /workspace/depots/", code: 1 }] });
+  await cmdTeam(ctx, ["converge", "web"]);
+  assert.equal(fake.expandedDevices("agent-forge", "agent-pilot")["origin-web"]?.path, "/forge/origins/web.git");
+  assert.ok(!ctx.calls.some((c) => c.join(" ").includes("hc run")), "the pilot's session is left as it is");
+});

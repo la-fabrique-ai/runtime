@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Context } from "./context.ts";
 import { ForgeError, mustSucceed } from "./context.ts";
 import { execAsAgentArgv, pullText, pushText } from "./incus.ts";
@@ -41,6 +41,11 @@ export async function installReferenceKit(ctx: Context, m: Member): Promise<bool
   // Un skill retiré du kit doit disparaître du container.
   await mustSucceed("remove the old skills and sub-agents",
     execAsAgentArgv(ctx, m.name, ["rm", "-rf", SKILLS_DIR, AGENTS_DIR]));
+  // Les dossiers d'abord, en aiuser : si Incus les créait en root en poussant, la
+  // suppression en aiuser du prochain changement du kit échouerait.
+  const dirs = [...new Set([SKILLS_DIR, AGENTS_DIR, ...files.map((f) => dirname(f.dest))])];
+  await mustSucceed("create the skills and sub-agents directories",
+    execAsAgentArgv(ctx, m.name, ["mkdir", "-p", ...dirs]));
   for (const f of files) {
     await mustSucceed(`push ${f.dest}`, pushText(ctx, m.name, f.dest, f.content, { uid: 1001, gid: 1001, mode: "644" }));
   }

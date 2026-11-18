@@ -139,6 +139,17 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
       }
     }
   }
+  // Converger une seule équipe écarte le Pilote (sans équipe) : il lirait pourtant
+  // le dépôt de cette équipe. S'il tourne et déclare read-repos (le clone passe par
+  // un exec), ses montages (idempotents) reçoivent le miroir et le clone de
+  // l'équipe. Jamais créé ni démarré ici.
+  if (team !== undefined) {
+    for (const m of members(cfg)) {
+      if (m.team === null && m.capabilities.includes("read-repos") && existing.get(m.name)?.status === "Running") {
+        await ensureMemberMounts(ctx, cfg, m);
+      }
+    }
+  }
   // Le service ne connaît que les membres de la config qu'il a lue au démarrage.
   await restartApiService(ctx);
   for (const t of Object.keys(cfg.teams).filter((x) => team === undefined || x === team)) {

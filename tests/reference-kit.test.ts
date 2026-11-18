@@ -52,6 +52,10 @@ test("a reference developer gets its skills and sub-agents, after the old ones a
     const l = lines(c);
     const rm = l.findIndex((x) => removal(x) && x.endsWith("rm -rf /home/aiuser/.claude/skills /home/aiuser/.claude/agents"));
     assert.ok(rm >= 0, l.join("\n"));
+    // Les dossiers sont créés en aiuser, après le retrait et avant le premier push.
+    const mk = l.findIndex((x) => x.includes("--user 1001") && x.includes("mkdir -p /home/aiuser/.claude/skills ") &&
+      x.includes("/home/aiuser/.claude/skills/tdd") && x.includes("/home/aiuser/.claude/agents"));
+    assert.ok(mk > rm && mk < l.findIndex((x) => x.includes("file push")), l.join("\n"));
     const dests = ["/home/aiuser/.claude/skills/tdd/SKILL.md", "/home/aiuser/.claude/skills/diagnose/SKILL.md",
       "/home/aiuser/.claude/agents/scout.md", KIT_MANIFEST];
     let last = rm;

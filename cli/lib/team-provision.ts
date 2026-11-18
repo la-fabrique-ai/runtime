@@ -5,7 +5,7 @@
 // ses marqueurs `user.forge.*` et ses plugins. Le container a son propre hc
 // (dans l'image) : forge n'y lance une session qu'à l'assignation d'une tâche.
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Context } from "./context.ts";
 import { ForgeError, mustSucceed } from "./context.ts";
 import type { ForgeConfig } from "./config.ts";
@@ -185,7 +185,7 @@ async function ensureMemory(ctx: Context, m: Member): Promise<void> {
   mkdirSync(source, { recursive: true });
   if ((await deviceNames(ctx, m.name)).includes(MEMORY_DEVICE)) return;
   await mustSucceed("create the memory parent",
-    execAsAgentArgv(ctx, m.name, ["mkdir", "-p", "/home/aiuser/.claude/projects/-workspace"]));
+    execAsAgentArgv(ctx, m.name, ["mkdir", "-p", dirname(MEMORY_PATH)]));
   await mustSucceed("mount the memory", ctx.exec(incus("config", "device", "add", m.name,
     MEMORY_DEVICE, "disk", `source=${source}`, `path=${MEMORY_PATH}`)));
 }
