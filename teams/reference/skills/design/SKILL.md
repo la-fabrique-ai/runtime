@@ -1,6 +1,6 @@
 ---
 name: design
-description: Use when the human brings a request that needs design decisions before a Lead can split it: a new feature, a behaviour change, anything with more than one sensible way to build. A clear, small request goes to the Lead directly.
+description: "Use when the human brings a request that needs design decisions before a Lead can split it: a new feature, a behaviour change, anything with more than one sensible way to build. A clear, small request goes to the Lead directly."
 ---
 
 # Design a request with the human

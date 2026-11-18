@@ -1,6 +1,6 @@
 ---
 name: branch-reviewer
-description: Read-only reviewer of one branch along one axis (conformance to an instruction, or a repository's conventions). Returns ranked findings with path:line evidence.
+description: "Read-only reviewer of one branch along one axis (conformance to an instruction, or a repository's conventions). Returns ranked findings with path:line evidence."
 tools: Read, Grep, Glob, Bash
 ---
 

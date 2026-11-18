@@ -1,6 +1,6 @@
 ---
 name: verify-before-report
-description: Use before you report a task as done or a review as finished: no claim without the command that proves it.
+description: "Use before you report a task as done or a review as finished: no claim without the command that proves it."
 ---
 
 # Verify before you report

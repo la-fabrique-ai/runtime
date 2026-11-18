@@ -1,6 +1,6 @@
 ---
 name: review-branch
-description: Use when your Lead assigns you the review of a developer's branch.
+description: "Use when your Lead assigns you the review of a developer's branch."
 ---
 
 # Review a developer's branch

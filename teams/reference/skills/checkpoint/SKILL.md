@@ -1,6 +1,6 @@
 ---
 name: checkpoint
-description: Use after a request is reported, before a restart, or when your context has grown long: bring your notes and your memory up to date so a fresh session can resume.
+description: "Use after a request is reported, before a restart, or when your context has grown long: bring your notes and your memory up to date so a fresh session can resume."
 ---
 
 # Checkpoint

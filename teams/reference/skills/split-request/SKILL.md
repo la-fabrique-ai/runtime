@@ -1,6 +1,6 @@
 ---
 name: split-request
-description: Use when you receive a request or a design to deliver, before assigning any developer.
+description: "Use when you receive a request or a design to deliver, before assigning any developer."
 ---
 
 # Split a request into sub-tasks

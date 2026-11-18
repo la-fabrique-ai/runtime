@@ -1,6 +1,6 @@
 ---
 name: diagnose
-description: Use when a test fails, a command errors or the behaviour is unexpected, before changing code to fix it.
+description: "Use when a test fails, a command errors or the behaviour is unexpected, before changing code to fix it."
 ---
 
 # Diagnose before fixing

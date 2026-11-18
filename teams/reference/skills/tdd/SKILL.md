@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: Use when your task adds or changes a behaviour, before writing the implementation.
+description: "Use when your task adds or changes a behaviour, before writing the implementation."
 ---
 
 # Test first

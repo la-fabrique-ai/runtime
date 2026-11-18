@@ -1,6 +1,6 @@
 ---
 name: scout
-description: Read-only explorer. Answers one precise question about the code or files (where something is, how parts connect) in at most 30 lines, with path:line references. Use it instead of reading many files yourself.
+description: "Read-only explorer. Answers one precise question about the code or files (where something is, how parts connect) in at most 30 lines, with path:line references. Use it instead of reading many files yourself."
 tools: Read, Grep, Glob
 model: haiku
 ---
