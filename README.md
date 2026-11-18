@@ -607,7 +607,7 @@ only). A text that holds the Claude token is refused.
   is not supported yet (the objects would not reach GitHub through
   `forge ship`). `lfs` is read when the container is created: changing it on an
   existing one makes `converge` say so, and the container is recreated (its
-  workspace is kept).
+  workspace is kept, and forge pulls its LFS content).
 - **Submodules:** not set up inside containers. The host mirrors the
   repository alone, so `git submodule update --init` fails for a relative URL
   (`../other.git` resolves to `/forge/other.git`, which does not exist), for

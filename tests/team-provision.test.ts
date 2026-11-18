@@ -173,3 +173,33 @@ test("a role without lfs keeps the skip-smudge filters and the skipped clone", a
   assert.ok(calls.some((c) => c.includes("git lfs install --skip-repo --skip-smudge")));
   assert.ok(calls.some((c) => c.includes("GIT_LFS_SKIP_SMUDGE=1")));
 });
+
+const lfsConfig = () => parseConfig("/c.json", { teams: { web: { repo: "o/web", roles: { dev: { capabilities: ["repo"], lfs: true } } } } });
+const reuse = (extra: ExecRule[] = []) => {
+  mkdirSync(originMirrorPath("web"), { recursive: true });
+  mkdirSync(join(home, "workspaces", "agent-web-dev"), { recursive: true });
+  writeFileSync(join(home, "workspaces", "agent-web-dev", "README.md"), "x");
+  return provision("agent-web-dev", lfsConfig(), [{ match: "--get remote.origin.url", stdout: "git@github.com:o/web.git\n" }, ...extra]);
+};
+
+test("a reused workspace of an lfs role gets its LFS files pulled by forge, after the filters", async () => {
+  const { ctx, run } = reuse();
+  await run();
+  const calls = flat(ctx);
+  const pull = calls.findIndex((c) => c.endsWith("cd /workspace && git lfs pull"));
+  const filters = calls.findIndex((c) => c.endsWith("git lfs install --skip-repo"));
+  assert.ok(pull > filters && filters >= 0, calls.join("\n"));
+  assert.ok(!calls.some((c) => c.includes(" clone ")));
+});
+
+test("a failed pull of a reused workspace is a warning, not a stop", async () => {
+  const { ctx, run } = reuse([{ match: "git lfs pull", code: 1, stderr: "object missing\n" }]);
+  await run();
+  assert.ok(ctx.err_lines.some((l) => l.startsWith("WARNING: git lfs pull in /workspace failed") && l.includes("object missing")));
+});
+
+test("a fresh clone of an lfs role pulls nothing: the clone already smudged", async () => {
+  const { ctx, run } = provision("agent-web-dev", lfsConfig());
+  await run();
+  assert.ok(!flat(ctx).some((c) => c.includes("git lfs pull")));
+});

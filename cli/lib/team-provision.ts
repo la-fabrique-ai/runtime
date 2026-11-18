@@ -117,7 +117,6 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
     if (reuseWorkspace) {
       ctx.out(`Reusing the existing clone in ${workspaceDir}...`);
       await mustSucceed("realign origin remote", pointOriginAtMirror(ctx, m.name, m.lfs));
-      if (m.lfs) ctx.out("LFS files of this workspace stay pointers until 'git lfs pull' runs in it (inside the container, as aiuser).");
     } else {
       ctx.out(`Cloning ${m.repo} in the container...`);
       // The filters come first, without the skip: the clone smudges from the mirror.
@@ -167,6 +166,15 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
     const hooks = await execAsAgent(ctx, m.name, `cd /workspace && ${m.lfs ? LFS_HOOKS_READ : LFS_HOOKS_INSTALL}`);
     if (hooks.code !== 0) {
       ctx.err(`WARNING: installing git-lfs hooks in /workspace failed: ${hooks.stderr.trim() || `exit code ${hooks.code}`}`);
+    }
+    // A workspace made before `lfs` was on holds pointers: forge fetches the
+    // content now (`git lfs pull` never overwrites a modified file).
+    if (m.lfs && reuseWorkspace) {
+      ctx.out("Pulling the LFS files into the reused workspace...");
+      const pull = await execAsAgent(ctx, m.name, "cd /workspace && git lfs pull");
+      if (pull.code !== 0) {
+        ctx.err(`WARNING: git lfs pull in /workspace failed, its LFS files may stay pointers: ${pull.stderr.trim() || `exit code ${pull.code}`}`);
+      }
     }
   }
 
