@@ -21,7 +21,7 @@ import { ageLabel, mirrorLine } from "../age.ts";
 import { printableText } from "../printable.ts";
 import { columnWidths, formatRow } from "../table.ts";
 import { members, type Member } from "../team.ts";
-import { installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
+import { ensureMemberMounts, installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { teamMirrorPath } from "../mirror.ts";
 import { hostReserveBytes, memoryWarning } from "../team-memory.ts";
@@ -116,7 +116,12 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
       // et du prompt de son rôle, comme un neuf : sans cela, une mise à jour
       // n'atteindrait que les containers créés après elle.
       ctx.out(`Updating ${m.name}...`);
+      await ensureMemberMounts(ctx, cfg, m);
       changed = (await installMemberFiles(ctx, m)).instructionsChanged;
+    }
+    if (m.role === "pilot" && m.reference !== null && !m.capabilities.includes("read-repos")) {
+      notes.push(`NOTE: ${m.name} uses the reference prompt, which designs from the code: ` +
+        'add "read-repos" to pilot.capabilities, then run converge again.');
     }
     // Le Pilote a une session permanente : elle repart si elle manque ou si elle
     // est morte (startSession retire d'abord l'ancien terminal).

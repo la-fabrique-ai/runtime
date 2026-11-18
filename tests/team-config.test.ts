@@ -73,3 +73,8 @@ test("a role and the pilot may name a .env file, absolute or under ~", () => {
 test("the tickets capability is refused, with a pointer to env", () => {
   rejects(web({ lead: { capabilities: ["repo", "tickets"] } }), /capabilities.*tickets.*`env`/);
 });
+
+test("read-repos is the Pilot's: accepted on the pilot, refused on a team role", () => {
+  assert.ok(parse({ pilot: { capabilities: ["assign", "read-repos"] } }).pilot!.capabilities.includes("read-repos"));
+  rejects(web({ lead: { capabilities: ["repo", "read-repos"] } }), /teams\.web\.roles\.lead\.capabilities.*read-repos/);
+});

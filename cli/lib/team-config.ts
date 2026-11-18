@@ -6,7 +6,7 @@ import { configHelpers, SIZE } from "./config-fields.ts";
 import { validateRepo } from "./validate.ts";
 import { ForgeError } from "./context.ts";
 
-export const CAPABILITIES = ["repo", "publish", "read-team", "assign", "ask-human", "services"] as const;
+export const CAPABILITIES = ["repo", "publish", "read-team", "assign", "ask-human", "services", "read-repos"] as const;
 export type Capability = (typeof CAPABILITIES)[number];
 
 export type RoleConfig = {
@@ -58,9 +58,14 @@ export function parseTeams(path: string, raw: unknown): Record<string, TeamConfi
           (typeof r.cpu !== "number" || !Number.isInteger(r.cpu) || r.cpu < 1)) {
         throw invalid(`${rat}.cpu`, "null or a positive integer", r.cpu);
       }
+      const roleCapabilities = capabilities(invalid, `${rat}.capabilities`, r.capabilities);
+      if (roleCapabilities.includes("read-repos")) {
+        throw invalid(`${rat}.capabilities`,
+          'no "read-repos" on a team role: it is the Pilot\'s; a team role reads its repository with "repo"', r.capabilities);
+      }
       roles[role] = {
         count: (r.count as number | null | undefined) ?? null,
-        capabilities: capabilities(invalid, `${rat}.capabilities`, r.capabilities),
+        capabilities: roleCapabilities,
         talkTo: names(invalid, `${rat}.talkTo`, r.talkTo, [...roleNames, ...TALK_WORDS], "a role of this team, team or pilot"),
         strict: bool(invalid, `${rat}.strict`, r.strict),
         memory: memory(invalid, `${rat}.memory`, r.memory),

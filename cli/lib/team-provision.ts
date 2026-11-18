@@ -27,6 +27,7 @@ import { applyStrictSettings, requireStrictRuntime, strictLaunchArgs } from "./s
 import type { Member } from "./team.ts";
 import { CONTAINER_ENV_PATH, readEnvFile } from "./dotenv.ts";
 import { ensureApiAccess } from "./api/access.ts";
+import { ensurePilotRepos } from "./pilot-repos.ts";
 
 const MODE = "supervised";
 const CLAUDE_MD = "/home/aiuser/.claude/CLAUDE.md";
@@ -97,6 +98,7 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   }
   await mustSucceed("mount workspace", ctx.exec(incus("config", "device", "add", m.name, "workspace", "disk",
     `source=${workspaceDir}`, "path=/workspace")));
+  await ensureMemberMounts(ctx, cfg, m);
 
   if (origin !== null) {
     if (reuseWorkspace) {
@@ -158,6 +160,13 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   await mustSucceed("clear provisioning marker", configUnset(ctx, m.name, PROVISIONING_KEY));
   await mustSucceed("clear provisioning marker", configUnset(ctx, m.name, PROVISIONING_WORKSPACE_KEY));
   ctx.out(`Container ${m.name} provisioned.`);
+}
+
+// Les montages et clones qui dépendent de la config d'un membre et qui s'ajoutent
+// après sa création : `provisionMember` l'appelle pour un container neuf,
+// `converge` pour un container déjà là.
+export async function ensureMemberMounts(ctx: Context, cfg: ForgeConfig, m: Member): Promise<void> {
+  await ensurePilotRepos(ctx, cfg, m);
 }
 
 // Ce que forge pose dans un membre et qu'une mise à jour de forge ou du prompt
