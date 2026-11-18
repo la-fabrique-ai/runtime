@@ -1,6 +1,7 @@
 // The members of the configured teams: one container per agent, named after
 // its team, role and index, with the `talkTo` lists resolved to container
 // names. Pure functions: nothing here touches Incus.
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ForgeConfig } from "./config.ts";
 import { ForgeError } from "./context.ts";
@@ -16,18 +17,40 @@ export type Member = {
   capabilities: Capability[]; talkTo: string[]; strict: boolean; memory: string | null; cpu: number | null;
   plugins: string[]; prompt: string | null;
   env: string | null; // the role's .env, as an expanded host path
+  reference: ReferenceKit | null; // le kit d'un rôle de référence, null pour un prompt personnalisé
 };
+
+// Ce qu'un rôle de référence reçoit en plus de son prompt (teams/reference/roles.json).
+export type ReferenceKit = { skills: string[]; agents: string[]; memory: boolean };
 
 // The reference team shipped in the repository (teams/reference): opt-in, with
 // `"prompts": "reference"` on a team and `"prompt": "reference"` on the Pilot.
 export const REFERENCE_PROMPTS = join(repoRoot(), "teams", "reference", "prompts");
-const REFERENCE_ROLES = ["dev", "lead"];
+
+// Lu à l'appel, pas au chargement : les tests pointent FORGE_REPO_DIR ailleurs.
+export function referenceDir(): string {
+  return join(repoRoot(), "teams", "reference");
+}
+
+function referenceRoles(): Record<string, ReferenceKit> {
+  return JSON.parse(readFileSync(join(referenceDir(), "roles.json"), "utf8")) as Record<string, ReferenceKit>;
+}
+
+export function referenceKit(role: string): ReferenceKit {
+  const roles = referenceRoles();
+  if (!roles[role]) throw new ForgeError(`no reference kit for role ${role} (known: ${Object.keys(roles).join(", ")})`);
+  return roles[role];
+}
+
+// Les rôles d'une équipe de référence : ceux de roles.json, hors le Pilote.
+const referenceRoleNames = (): string[] => Object.keys(referenceRoles()).filter((r) => r !== "pilot").sort();
 
 function rolePrompt(prompts: string | null, role: string): string | null {
   if (prompts === null) return null;
   if (prompts !== "reference") return `${prompts}/${role}.md`;
-  if (!REFERENCE_ROLES.includes(role)) {
-    throw new ForgeError(`no reference prompt for role ${role} (reference roles: ${REFERENCE_ROLES.join(", ")})`);
+  const known = referenceRoleNames();
+  if (!known.includes(role)) {
+    throw new ForgeError(`no reference prompt for role ${role} (reference roles: ${known.join(", ")})`);
   }
   return join(REFERENCE_PROMPTS, `${role}.md`);
 }
@@ -43,6 +66,7 @@ export function members(cfg: ForgeConfig): Member[] {
       name: PILOT, team: null, role: "pilot", index: null, repo: null, capabilities: cfg.pilot.capabilities,
       talkTo: [], strict: cfg.pilot.strict, memory: cfg.pilot.memory, cpu: null, plugins: cfg.pilot.plugins,
       prompt: cfg.pilot.prompt === "reference" ? join(REFERENCE_PROMPTS, "pilot.md") : cfg.pilot.prompt, env: hostPath(cfg.pilot.env),
+      reference: cfg.pilot.prompt === "reference" ? referenceKit("pilot") : null,
     });
   }
   for (const [team, t] of Object.entries(cfg.teams)) {
@@ -56,6 +80,7 @@ export function members(cfg: ForgeConfig): Member[] {
           name, team, role, index, repo: r.capabilities.includes("repo") ? t.repo : null,
           capabilities: r.capabilities, talkTo: [], strict: r.strict, memory: r.memory, cpu: r.cpu,
           plugins: r.plugins, prompt: rolePrompt(t.prompts, role), env: hostPath(r.env),
+          reference: t.prompts === "reference" ? referenceKit(role) : null,
         });
       }
     }
