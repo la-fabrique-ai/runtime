@@ -276,11 +276,13 @@ reviewer read each developer's branch, and releases the developer when the
 reviewer finds nothing blocking. A team without a `reviewer` role still works:
 its lead reviews with a sub-agent itself. Each reference member also gets
 skills and sub-agents in its container, in `~/.claude/skills` and
-`~/.claude/agents`; forge replaces their content at each `forge team up`, so
-skills you add there by hand do not survive. The pilot's and the leads'
+`~/.claude/agents`; forge owns these directories and replaces their content whenever the
+reference kit changes, so skills you add there by hand are lost at that point. The pilot's and the leads'
 memories live on the host, under `~/memories/<container>` (in the forge user's
 home), so they survive a container's recreation; developers and the reviewer
-keep none.
+keep none. On an existing reference pilot or lead, the container-local memory
+is hidden under that mount (not deleted), and an existing pilot's `~/notes.md`
+is no longer read: its prompt tells it to move the content to `/workspace/notes.md`.
 
 That is five containers: `agent-pilot`, `agent-web-lead`, `agent-web-dev-1`,
 `agent-web-dev-2` and `agent-web-reviewer`. Every role has a `memory` because a role without one gets the
