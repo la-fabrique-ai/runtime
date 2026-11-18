@@ -12,7 +12,7 @@ import type { ForgeConfig } from "./config.ts";
 import {
   BASE_IMAGE, latestImageCommit, PROVISIONING_KEY, PROVISIONING_WORKSPACE_KEY,
 } from "./containers.ts";
-import { configSet, configUnset, execAsAgent, execAsAgentArgv, forgeProject, incus, pullText, pushText, waitReady } from "./incus.ts";
+import { configSet, configUnset, deviceNames, execAsAgent, execAsAgentArgv, forgeProject, incus, pullText, pushText, waitReady } from "./incus.ts";
 import {
   cloneWorkspace, ensureMirror, ensureTeamMirror, MIRROR_MOUNT, mirrorRepo, ORIGIN_DEVICE, pointOriginAtMirror,
   originMirrorPath, requireMirrorOf, TEAM_DEVICE, TEAM_MOUNT, teamMirrorPath,
@@ -22,7 +22,7 @@ import {
   requireClaudeToken, requireHookBlocks, requireRuntime, workspaceIsReusable,
 } from "./commands/provision.ts";
 import { egressNames, PROFILE } from "./objects.ts";
-import { repoRoot, workspacesDir } from "./paths.ts";
+import { memoriesDir, repoRoot, workspacesDir } from "./paths.ts";
 import { applyStrictSettings, requireStrictRuntime, strictLaunchArgs } from "./strict.ts";
 import type { Member } from "./team.ts";
 import { CONTAINER_ENV_PATH, readEnvFile } from "./dotenv.ts";
@@ -168,6 +168,26 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
 // `converge` pour un container déjà là.
 export async function ensureMemberMounts(ctx: Context, cfg: ForgeConfig, m: Member): Promise<void> {
   await ensurePilotRepos(ctx, cfg, m);
+  await ensureMemory(ctx, m);
+}
+
+// Où Claude Code garde sa mémoire automatique dans le container.
+export const MEMORY_PATH = "/home/aiuser/.claude/projects/-workspace/memory";
+export const MEMORY_DEVICE = "memory";
+
+// Le Pilote et le Lead de référence ont une mémoire sur l'hôte, qui survit au
+// container. Incus crée en root le parent manquant du chemin d'un device : on crée
+// d'abord le dossier du projet en aiuser, sinon Claude Code ne pourrait plus y
+// écrire ses transcripts.
+async function ensureMemory(ctx: Context, m: Member): Promise<void> {
+  if (m.reference?.memory !== true) return;
+  const source = join(memoriesDir(), m.name);
+  mkdirSync(source, { recursive: true });
+  if ((await deviceNames(ctx, m.name)).includes(MEMORY_DEVICE)) return;
+  await mustSucceed("create the memory parent",
+    execAsAgentArgv(ctx, m.name, ["mkdir", "-p", "/home/aiuser/.claude/projects/-workspace"]));
+  await mustSucceed("mount the memory", ctx.exec(incus("config", "device", "add", m.name,
+    MEMORY_DEVICE, "disk", `source=${source}`, `path=${MEMORY_PATH}`)));
 }
 
 // Ce que forge pose dans un membre et qu'une mise à jour de forge ou du prompt
@@ -221,6 +241,8 @@ async function installEnv(ctx: Context, m: Member, env: string | null): Promise<
 function settingsFor(m: Member): string {
   const base = JSON.parse(readFileSync(join(repoRoot(), "container", "settings.json"), "utf8")) as Record<string, unknown>;
   if (m.plugins.length > 0) base.enabledPlugins = Object.fromEntries(m.plugins.map((p) => [p, true]));
+  // Les développeurs et le Reviewer de référence n'ont pas de mémoire.
+  if (m.reference?.memory === false) base.autoMemoryEnabled = false;
   return `${JSON.stringify(base, null, 2)}\n`;
 }
 
