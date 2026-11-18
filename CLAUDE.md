@@ -105,6 +105,9 @@ Les suites restent légères.
 - Pas de tests sur le contenu de la documentation : `README.md`, `CLAUDE.md`, `container/CLAUDE.md`, `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`…
 - Pour un script (hook git, `pre-bash.sh`, scripts shell), seulement les quelques cas qui protègent un choix important : les garde-fous de sécurité, un cas nominal, un cas d'échec. Pas de balayage de cas limites : ceux-là se vérifient à la main en relecture.
 
+### Dans une équipe forge
+Dans un container d'équipe (Pilote, Lead, développeur, Reviewer), il n'y a pas d'Incus : seuls `npm test`, `npm run check` et le lint tournent. Pas de `FORGE_INTEGRATION=1`, pas de `ansible/tests/vm-test.sh` : ils se lancent sur la VM de dev ou chez le mainteneur, et les comptes rendus disent qu'ils n'ont pas tourné. La première sous-tâche d'une demande commite le design du Pilote sous `docs/superpowers/specs/`.
+
 ### Sécurité
 - Ne jamais hardcoder de credentials, clés, tokens
 - Aucune valeur personnelle (nom, login, chemin, UID, identité, hôte, adresse) dans le repo — code, tests, docs — ni dans l'image : tout ce qui est personnel est injecté à la création du container ou vit dans la config de l'utilisateur. Seule exception : l'adresse GitHub du projet et ses références de PR (`la-fabrique-ai/runtime#N`), qui désignent le projet lui-même

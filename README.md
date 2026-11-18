@@ -243,19 +243,20 @@ Lima and Ansible, which may use them for other things.
 
 A team lives in the host's `~/.config/agent-forge/config.json`, next to the
 settings of [Configuration](#configuration): a repository and its roles. forge
-ships a small reference team, a pilot, a lead and two developers on one
+ships a small reference team, a pilot, a lead, two developers and a reviewer on one
 repository, whose role prompts are in `teams/reference/prompts`:
 
 ```json
 {
-  "pilot": { "memory": "1GiB", "prompt": "reference", "capabilities": ["assign"], "talkTo": ["web"] },
+  "pilot": { "memory": "1GiB", "prompt": "reference", "capabilities": ["assign", "read-repos"], "talkTo": ["web"] },
   "teams": {
     "web": {
       "repo": "acme/widgets",
       "prompts": "reference",
       "roles": {
         "lead": { "memory": "1GiB", "capabilities": ["repo", "read-team", "assign", "ask-human"], "talkTo": ["pilot", "team"] },
-        "dev": { "count": 2, "memory": "2GiB", "capabilities": ["repo", "publish"], "talkTo": ["lead"] }
+        "dev": { "count": 2, "memory": "2GiB", "capabilities": ["repo", "publish"], "talkTo": ["lead"] },
+        "reviewer": { "memory": "1GiB", "capabilities": ["repo", "read-team"], "talkTo": ["lead"] }
       }
     }
   }
@@ -263,15 +264,28 @@ repository, whose role prompts are in `teams/reference/prompts`:
 ```
 
 `"prompts": "reference"` and the pilot's `"prompt": "reference"` are opt-in:
-without them nothing changes. The reference roles are `lead` and `dev` (and the
+without them nothing changes. The reference roles are `lead`, `dev` and `reviewer` (and the
 pilot); any other role name is refused at `converge` with that list. To compose
 your own team, point `prompts` at a directory of `<role>.md` files, with the
 roles you want.
 
-That is four containers: `agent-pilot`, `agent-web-lead`, `agent-web-dev-1` and
-`agent-web-dev-2`. Every role has a `memory` because a role without one gets the
+In the reference team the pilot reads every team's repository, read-only
+(`read-repos`: clones under `/workspace/depots/<team>`), and designs a request
+with the human before handing it to a lead. The lead splits it, has the
+reviewer read each developer's branch, and releases the developer when the
+reviewer finds nothing blocking. A team without a `reviewer` role still works:
+its lead reviews with a sub-agent itself. Each reference member also gets
+skills and sub-agents in its container, in `~/.claude/skills` and
+`~/.claude/agents`; forge replaces their content at each `forge team up`, so
+skills you add there by hand do not survive. The pilot's and the leads'
+memories live on the host, under `~/memories/<container>` (in the forge user's
+home), so they survive a container's recreation; developers and the reviewer
+keep none.
+
+That is five containers: `agent-pilot`, `agent-web-lead`, `agent-web-dev-1`,
+`agent-web-dev-2` and `agent-web-reviewer`. Every role has a `memory` because a role without one gets the
 profile's 75% of the host's memory, and a few of those add up to more than the
-host has: these 6 GiB fit a VM of 8 GiB minus what the host keeps for itself
+host has: these 7 GiB fit a VM of 8 GiB minus what the host keeps for itself
 (640 MiB by default), and `forge team converge` warns when a team does not.
 Create them from your machine:
 
@@ -295,6 +309,8 @@ A role's **capabilities** decide what its containers get:
   mirror of it as `origin`;
 - `publish`: the agent works on branches `agent/<task>`, which `forge fetch`
   brings to your machine;
+- `read-repos` (the pilot only): every team's repository, read-only, cloned
+  under `/workspace/depots/<team>`; nothing leaves;
 - `read-team`: a read-only remote `team` with the branches of the developers,
   to read and compare;
 - `assign`, `ask-human`: what the agent may ask of the team through
