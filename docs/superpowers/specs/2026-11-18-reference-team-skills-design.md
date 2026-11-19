@@ -249,7 +249,11 @@ in the flow, whom it reports to, which skill to use when. Changes:
   a `scout` when it needs a fact. A team without a Reviewer: the Lead runs a
   `branch-reviewer` itself (more context, but it works). When the repository
   commits its designs, the first sub-task of a request commits the Pilot's
-  design.
+  design. A sub-task that needs another's code goes to the same developer
+  once the first is reviewed with nothing blocking, and starts from its branch
+  (`forge-team assign <dev> <task> --from <first>`, added on 2026-11-19 at the
+  maintainer's request): its pull request stacks on the first, which `forge
+  ship` already handles. The Lead does not wait for the first to be merged.
 - **Common instructions**: the release rule of `container/CLAUDE.md` ("relire,
   c'est `git fetch team` puis lire la branche") gains: for a Lead with a
   Reviewer, the Reviewer's report is the review.

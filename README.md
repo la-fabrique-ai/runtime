@@ -364,6 +364,13 @@ forge team status          # each agent's task, session and wait, the Inbox, the
 forge team release agent-web-dev-1
 ```
 
+A task that needs another one's code starts from its branch rather than from
+`origin/main`: `forge team assign agent-web-dev-1 use-login --from fix-login`
+(an agent with `assign` does the same with `forge-team`). The target must be
+the developer who has `fix-login`, since the branch comes from its clone;
+`use-login` is then a stacked task, which `forge ship` delivers as a pull
+request on `agent/fix-login`.
+
 #### See the team, answer its questions
 
 An agent with `ask-human` can leave a question for you (`forge-team ask`). It
@@ -546,7 +553,7 @@ link):
 | `forge install [--remote <address>] [--host <name>]` | Install or update a host: the local VM by default, a new remote VM with `--remote`, an installed host with `--host` |
 | `forge open [--host <name>]` | Open the herdr TUI on a host |
 | `forge team up [<team>] [--host <name>]` | Converge the teams on the host (with your SSH agent forwarded), then add each container as a Herdr App machine |
-| `forge team assign <container> [<task>]`, `release <container>`, `status [--json] [--quick]`, `sync <team>` | The same commands as on the host, over SSH; `assign` reads the instruction on stdin |
+| `forge team assign <container> [<task>] [--from <task>]`, `release <container>`, `status [--json] [--quick]`, `sync <team>` | The same commands as on the host, over SSH; `assign` reads the instruction on stdin |
 | `forge team watch [--host <name>]` | The team, its Inbox and the mirror's age, redrawn every 5 s |
 | `forge answer <id> "<summary>" [--host <name>]` | Answer an agent's question; a body piped on stdin goes to a file the agent reads |
 | `forge fetch [--host <name>]` | In your clone: fetch the developers' branches from the team mirror and list the tasks (needs no `gh`) |
@@ -586,7 +593,7 @@ Ansible installs and `forge team converge` restarts.
 | Command | What it does |
 |---|---|
 | `forge-team message <container> "<summary>"` | Send a message to a container of the agent's `talkTo`; the body, if any, on stdin |
-| `forge-team assign <container> [<task>]` | Give a task, the instruction on stdin; the agent needs `assign`, and the same rules as `forge team assign` apply (free target, owned task) |
+| `forge-team assign <container> [<task>] [--from <task>]` | Give a task, the instruction on stdin (`--from`: its branch starts from another task of the same developer); the agent needs `assign`, and the same rules as `forge team assign` apply (free target, owned task) |
 | `forge-team release <container>` | Free an agent: only the one that gave the task (or you) can |
 | `forge-team ask "<summary>"` | A question for you, the detail on stdin; the agent needs `ask-human` |
 | `forge-team status` | The agents it may talk to: task, session state, and what each waits on |
