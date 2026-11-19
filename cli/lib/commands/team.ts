@@ -12,7 +12,7 @@ import type { ForgeConfig } from "../config.ts";
 import { loadConfig } from "../config.ts";
 import { baseKey, provisioningMarker } from "../containers.ts";
 import { forgeProject, listInstances, type Instance } from "../incus.ts";
-import { originMirrorAge, refreshMirror } from "../mirror.ts";
+import { fetchMirrorLfs, originMirrorAge, refreshMirror } from "../mirror.ts";
 import { configPath } from "../paths.ts";
 import { ensureRunning } from "../session.ts";
 import { deliverAnswer, sessionState, startSession, type SessionState } from "../hc-session.ts";
@@ -20,8 +20,9 @@ import { assign, busyState, release } from "../tasks.ts";
 import { ageLabel, mirrorLine } from "../age.ts";
 import { printableText } from "../printable.ts";
 import { columnWidths, formatRow } from "../table.ts";
-import { members, type Member } from "../team.ts";
+import { members, teamWantsLfs, type Member } from "../team.ts";
 import { ensureMemberMounts, installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
+import { requireHostLfs } from "./provision.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { teamMirrorPath } from "../mirror.ts";
 import { hostReserveBytes, memoryWarning } from "../team-memory.ts";
@@ -118,6 +119,12 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
       // Un container déjà là reçoit les fichiers de la version courante de forge
       // et du prompt de son rôle, comme un neuf : sans cela, une mise à jour
       // n'atteindrait que les containers créés après elle.
+      // Le clone se fait une fois : un rôle qui change de mode LFS ne change pas
+      // le container déjà là. forge le dit, il ne reconvertit rien.
+      if ((instance.config?.["user.forge.lfs"] ?? "false") !== String(m.lfs)) {
+        notes.push(`NOTE: ${m.name} was created with lfs ${!m.lfs}, its role now says lfs ${m.lfs}. ` +
+          `Delete it (incus --project ${forgeProject()} delete ${m.name} --force; its workspace survives) and run converge again.`);
+      }
       ctx.out(`Updating ${m.name}...`);
       await ensureMemberMounts(ctx, cfg, m);
       changed = (await installMemberFiles(ctx, m)).instructionsChanged;
@@ -354,10 +361,20 @@ async function status(ctx: Context, cfg: ForgeConfig, opts: TeamOptions): Promis
 // miroir d'équipe.
 async function sync(ctx: Context, cfg: ForgeConfig, team: string | undefined): Promise<number> {
   const name = requireTeam(cfg, team);
+  // Before any fetch: without the package the LFS step would fail with a message about git, not about the host.
+  if (teamWantsLfs(cfg, name)) await requireHostLfs(ctx);
   const origin = await refreshMirror(ctx, originMirrorPath(name), cfg.teams[name].repo);
   if (origin.code !== 0) {
     throw new ForgeError(`refreshing the mirror of ${cfg.teams[name].repo} failed: ${origin.stderr.trim() || `exit code ${origin.code}`}\n` +
       `Did your SSH agent reach the host? Run forge team sync ${name} from your machine: it forwards the agent.`);
+  }
+  if (teamWantsLfs(cfg, name)) {
+    const lfs = await fetchMirrorLfs(ctx, originMirrorPath(name), cfg.teams[name].repo);
+    if (lfs.code !== 0) {
+      throw new ForgeError(`fetching the LFS objects of ${cfg.teams[name].repo} failed: ${lfs.stderr.trim() || `exit code ${lfs.code}`}\n` +
+        `Did your SSH agent reach the host? Run forge team sync ${name} from your machine: it forwards the agent.`);
+    }
+    if (lfs.warning) ctx.err(`WARNING: ${lfs.warning}`);
   }
   const r = await refreshTeamMirror(ctx, cfg, name);
   for (const failed of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${failed}.`);

@@ -40,7 +40,7 @@ function egressFake(opts: {
 
 const MEMBER: Member = {
   name: "agent-x", team: "t", role: "dev", index: null, repo: "o/x", capabilities: ["repo", "publish"], talkTo: [],
-  strict: false, memory: null, cpu: null, plugins: [], prompt: null, env: null, reference: null,
+  strict: false, memory: null, cpu: null, plugins: [], prompt: null, env: null, lfs: false, reference: null,
 };
 const AGENT_RULES: ExecRule[] = [];
 const lines = (c: ReturnType<typeof fakeContext>) => c.calls.map((x) => x.join(" "));

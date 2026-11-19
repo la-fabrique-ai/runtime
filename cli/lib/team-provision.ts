@@ -14,12 +14,12 @@ import {
 } from "./containers.ts";
 import { configSet, configUnset, deviceNames, execAsAgent, execAsAgentArgv, forgeProject, incus, pullText, pushText, waitReady } from "./incus.ts";
 import {
-  cloneWorkspace, ensureMirror, ensureTeamMirror, MIRROR_MOUNT, mirrorRepo, ORIGIN_DEVICE, pointOriginAtMirror,
+  cloneWorkspace, ensureMirror, ensureTeamMirror, fetchMirrorLfs, MIRROR_MOUNT, mirrorRepo, ORIGIN_DEVICE, pointOriginAtMirror,
   originMirrorPath, requireMirrorOf, TEAM_DEVICE, TEAM_MOUNT, teamMirrorPath,
 } from "./mirror.ts";
 import {
-  hostGitIdentity, LFS_FILTERS_INSTALL, LFS_HOOKS_INSTALL, pushClaudeToken, pushFile, refreshClaude,
-  requireClaudeToken, requireHookBlocks, requireRuntime, workspaceIsReusable,
+  hostGitIdentity, LFS_FILTERS_INSTALL, LFS_FILTERS_READ, LFS_HOOKS_INSTALL, LFS_HOOKS_READ, pushClaudeToken, pushFile, refreshClaude,
+  requireClaudeToken, requireHookBlocks, requireHostLfs, requireRuntime, workspaceIsReusable,
 } from "./commands/provision.ts";
 import { egressNames, PROFILE } from "./objects.ts";
 import { memoriesDir, repoRoot, workspacesDir } from "./paths.ts";
@@ -53,6 +53,7 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   if (m.prompt !== null) readPrompt(m); // lisible avant de rien créer
   const identity = team?.gitIdentity ?? await hostGitIdentity(ctx);
   await requireRuntime(ctx);
+  if (m.lfs) await requireHostLfs(ctx);
   const plan = m.strict ? await requireStrictRuntime(ctx) : null;
   const readTeam = m.capabilities.includes("read-team");
   const workspaceDir = join(workspacesDir(), m.name);
@@ -67,6 +68,18 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
     reuseWorkspace = workspaceIsReusable(workspaceDir, origin, m.repo, existing);
     ctx.out(existsSync(origin) ? `Reusing the team mirror ${origin}...` : `Fetching ${m.repo} into the team mirror...`);
     await ensureMirror(ctx, origin, m.repo);
+    // A container that reads LFS content needs the objects in the mirror before
+    // it clones: without them it would hold pointers, so a failure stops here.
+    // The other members of the team leave the refresh to `forge team sync`.
+    if (m.lfs) {
+      ctx.out(`Fetching the LFS objects of ${m.repo} into the team mirror...`);
+      const lfs = await fetchMirrorLfs(ctx, origin, m.repo);
+      if (lfs.code !== 0) {
+        throw new ForgeError(`fetching the LFS objects failed: ${lfs.stderr.trim() || `exit code ${lfs.code}`}\n` +
+          "Did your SSH agent reach the host? Run forge team up from your machine: it forwards the agent.");
+      }
+      if (lfs.warning) ctx.err(`WARNING: ${lfs.warning}`);
+    }
   } else {
     reuseWorkspace = existsSync(workspaceDir) && readdirSync(workspaceDir).length > 0;
   }
@@ -80,6 +93,8 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   ];
   if (m.team !== null) keys.push("-c", `user.forge.team=${m.team}`);
   if (m.repo !== null) keys.push("-c", `user.forge.repo=${m.repo}`);
+  // What converge compares with the role later: the clone is made once.
+  keys.push("-c", `user.forge.lfs=${m.lfs}`);
   if (m.memory !== null) keys.push("-c", `limits.memory=${m.memory}`);
   if (m.cpu !== null) keys.push("-c", `limits.cpu=${m.cpu}`);
   const strictArgs = plan ? strictLaunchArgs(plan, egressNames(forgeProject())) : [];
@@ -104,10 +119,12 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   if (origin !== null) {
     if (reuseWorkspace) {
       ctx.out(`Reusing the existing clone in ${workspaceDir}...`);
-      await mustSucceed("realign origin remote", pointOriginAtMirror(ctx, m.name));
+      await mustSucceed("realign origin remote", pointOriginAtMirror(ctx, m.name, m.lfs));
     } else {
       ctx.out(`Cloning ${m.repo} in the container...`);
-      await mustSucceed("clone repository", cloneWorkspace(ctx, m.name));
+      // The filters come first, without the skip: the clone smudges from the mirror.
+      if (m.lfs) await mustSucceed(`git-lfs filters in ${m.name}`, execAsAgent(ctx, m.name, LFS_FILTERS_READ));
+      await mustSucceed("clone repository", cloneWorkspace(ctx, m.name, m.lfs));
     }
   }
 
@@ -147,11 +164,20 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   await mustSucceed("record forge mode", configSet(ctx, m.name, "user.forge.mode", MODE));
 
   ctx.out("Installing git-lfs filters...");
-  await mustSucceed(`git-lfs filters in ${m.name}`, execAsAgent(ctx, m.name, LFS_FILTERS_INSTALL));
+  await mustSucceed(`git-lfs filters in ${m.name}`, execAsAgent(ctx, m.name, m.lfs ? LFS_FILTERS_READ : LFS_FILTERS_INSTALL));
   if (origin !== null) {
-    const hooks = await execAsAgent(ctx, m.name, `cd /workspace && ${LFS_HOOKS_INSTALL}`);
+    const hooks = await execAsAgent(ctx, m.name, `cd /workspace && ${m.lfs ? LFS_HOOKS_READ : LFS_HOOKS_INSTALL}`);
     if (hooks.code !== 0) {
       ctx.err(`WARNING: installing git-lfs hooks in /workspace failed: ${hooks.stderr.trim() || `exit code ${hooks.code}`}`);
+    }
+    // A workspace made before `lfs` was on holds pointers: forge fetches the
+    // content now (`git lfs pull` never overwrites a modified file).
+    if (m.lfs && reuseWorkspace) {
+      ctx.out("Pulling the LFS files into the reused workspace...");
+      const pull = await execAsAgent(ctx, m.name, "cd /workspace && git lfs pull");
+      if (pull.code !== 0) {
+        ctx.err(`WARNING: git lfs pull in /workspace failed, its LFS files may stay pointers: ${pull.stderr.trim() || `exit code ${pull.code}`}`);
+      }
     }
   }
 

@@ -17,6 +17,7 @@ export type Member = {
   capabilities: Capability[]; talkTo: string[]; strict: boolean; memory: string | null; cpu: number | null;
   plugins: string[]; prompt: string | null;
   env: string | null; // the role's .env, as an expanded host path
+  lfs: boolean; // the role's `lfs`; always false for the Pilot
   reference: ReferenceKit | null; // le kit d'un rôle de référence, null pour un prompt personnalisé
 };
 
@@ -66,6 +67,7 @@ export function members(cfg: ForgeConfig): Member[] {
       name: PILOT, team: null, role: "pilot", index: null, repo: null, capabilities: cfg.pilot.capabilities,
       talkTo: [], strict: cfg.pilot.strict, memory: cfg.pilot.memory, cpu: null, plugins: cfg.pilot.plugins,
       prompt: cfg.pilot.prompt === "reference" ? join(REFERENCE_PROMPTS, "pilot.md") : cfg.pilot.prompt, env: hostPath(cfg.pilot.env),
+      lfs: false,
       reference: cfg.pilot.prompt === "reference" ? referenceKit("pilot") : null,
     });
   }
@@ -79,7 +81,7 @@ export function members(cfg: ForgeConfig): Member[] {
         out.push({
           name, team, role, index, repo: r.capabilities.includes("repo") ? t.repo : null,
           capabilities: r.capabilities, talkTo: [], strict: r.strict, memory: r.memory, cpu: r.cpu,
-          plugins: r.plugins, prompt: rolePrompt(t.prompts, role), env: hostPath(r.env),
+          plugins: r.plugins, prompt: rolePrompt(t.prompts, role), env: hostPath(r.env), lfs: r.lfs,
           reference: t.prompts === "reference" ? referenceKit(role) : null,
         });
       }
@@ -100,6 +102,12 @@ export function members(cfg: ForgeConfig): Member[] {
     m.talkTo = [...new Set(names)].filter((n) => n !== m.name);
   }
   return out;
+}
+
+// Whether the team's origin mirror must hold the LFS objects: a container of
+// the team reads them from it. The mirror is shared, the reading is per role.
+export function teamWantsLfs(cfg: ForgeConfig, team: string): boolean {
+  return Object.values(cfg.teams[team]?.roles ?? {}).some((r) => r.lfs);
 }
 
 export function memberNamed(cfg: ForgeConfig, name: string): Member {

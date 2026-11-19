@@ -1,8 +1,11 @@
 ---
 # python3-debian is required by ansible.builtin.deb822_repository; gpg checks
-# the fingerprints of third-party apt keys (tasks/apt_repo.yml).
+# the fingerprints of third-party apt keys (tasks/apt_repo.yml). git-lfs: forge
+# fetches the LFS objects of a team's repository into its mirror (`lfs: true`
+# on a role), which the containers then read.
 base_packages:
   - git
+  - git-lfs
   - curl
   - ca-certificates
   - gpg
