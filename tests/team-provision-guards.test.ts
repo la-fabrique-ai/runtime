@@ -41,8 +41,8 @@ const IDENTITY: ExecRule[] = [
 ];
 const HOOK_BLOCKS: ExecRule[] = [{ match: "forge-hook-probe-deny", code: 2, stderr: "BLOCKED.\n" }];
 
-const config = (strict = false) => parseConfig("/c.json", {
-  teams: { web: { repo: "o/web", roles: { dev: { capabilities: ["repo", "publish"], strict } } } },
+const config = (strict = false, lfs = false) => parseConfig("/c.json", {
+  teams: { web: { repo: "o/web", roles: { dev: { capabilities: ["repo", "publish"], strict, lfs } } } },
 });
 const DEV = "agent-web-dev";
 
@@ -53,8 +53,8 @@ function strictFake(): FakeIncus {
   return fake;
 }
 
-function provision(opts: { rules?: ExecRule[]; strict?: boolean; fake?: FakeIncus } = {}) {
-  const cfg = config(opts.strict);
+function provision(opts: { rules?: ExecRule[]; strict?: boolean; lfs?: boolean; fake?: FakeIncus } = {}) {
+  const cfg = config(opts.strict, opts.lfs);
   const fake = opts.fake ?? FakeIncus.withRuntime({ commit: "IMGSHA" });
   const ctx = fakeContext({ incus: fake, rules: [...(opts.rules ?? []), ...IDENTITY, ...HOOK_BLOCKS] });
   return { fake, ctx, run: () => provisionMember(ctx, cfg, memberNamed(cfg, DEV)) };
@@ -84,6 +84,12 @@ test("without the profile or the image, it names forge setup or forge image buil
   noImage.addProject("agent-forge");
   noImage.addProfile("agent-forge", "agent-forge");
   await assert.rejects(provision({ fake: noImage }).run, /forge image build/);
+});
+
+test("a role with lfs on a host without git-lfs stops before the launch, naming the package", async () => {
+  const { ctx, run } = provision({ lfs: true, rules: [{ match: "git lfs version", code: 1 }] });
+  await assert.rejects(run, /git-lfs is not installed/);
+  assert.equal(launched(ctx), false);
 });
 
 test("the installed hook is proven to guard the agent both ways, as aiuser, after it is pushed", async () => {

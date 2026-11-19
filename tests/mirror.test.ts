@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fakeContext } from "./lib/fake-context.ts";
+import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
 import {
-  cloneWorkspace, ensureMirror, hasOriginDevice, mirrorRepo, pointOriginAtMirror, refreshMirror,
+  cloneWorkspace, ensureMirror, fetchMirrorLfs, hasOriginDevice, mirrorRepo, pointOriginAtMirror, refreshMirror,
 } from "../cli/lib/mirror.ts";
 
 let dir: string;
@@ -145,4 +145,63 @@ test("hasOriginDevice", async () => {
   assert.equal(await hasOriginDevice(fakeContext({ incus: fake }), "agent-x"), true);
   assert.equal(await hasOriginDevice(fakeContext({ incus: fake }), "agent-y"), false);
   assert.equal(await hasOriginDevice(fakeContext({ rules: [{ match: "device list", code: 1 }] }), "agent-x"), false);
+});
+
+const BRANCHES: ExecRule = { match: "for-each-ref", stdout: "refs/heads/main\nrefs/heads/other\n" };
+
+test("fetchMirrorLfs fetches HEAD, then the tip of every branch, with the URL and the endpoint given", async () => {
+  const ctx = fakeContext({ rules: [BRANCHES] });
+  const r = await fetchMirrorLfs(ctx, mirror, "o/r");
+  const lfs = ["-c", "protocol.allow=never", "-c", "protocol.ssh.allow=always", "-c", "lfs.url=git@github.com:o/r.git"];
+  assert.deepEqual(ctx.calls, [
+    ["git", `--git-dir=${mirror}`, ...lfs, "lfs", "fetch", "git@github.com:o/r.git", "HEAD"],
+    ["git", `--git-dir=${mirror}`, "for-each-ref", "--format=%(refname)", "refs/heads"],
+    ["git", `--git-dir=${mirror}`, ...lfs, "lfs", "fetch", "git@github.com:o/r.git", "refs/heads/main", "refs/heads/other"],
+  ]);
+  assert.ok(!ctx.calls.flat().some((a) => a === "--all" || a.includes("refs/tags")));
+  assert.equal(r.code, 0);
+  assert.equal(r.warning, undefined);
+});
+
+test("fetchMirrorLfs: a failure on HEAD is the result and nothing else runs; one on the branches is a warning", async () => {
+  const head = fakeContext({ rules: [{ match: "fetch git@github.com:o/r.git HEAD", code: 2, stderr: "denied\n" }, BRANCHES] });
+  const failed = await fetchMirrorLfs(head, mirror, "o/r");
+  assert.equal(failed.code, 2);
+  assert.equal(head.calls.length, 1);
+  const others = fakeContext({ rules: [{ match: "refs/heads/main refs/heads/other", code: 2, stderr: "missing object\n" }, BRANCHES] });
+  const warned = await fetchMirrorLfs(others, mirror, "o/r");
+  assert.equal(warned.code, 0);
+  assert.match(warned.warning ?? "", /every branch of o\/r: missing object/);
+});
+
+test("fetchMirrorLfs uses the remote's own LFS endpoint when it has one", async () => {
+  const ctx = fakeContext();
+  const remote = { url: (r: string) => `https://h/${r}.git`, lfsUrl: (r: string) => `https://h/${r}.git/info/lfs`, protocol: [] };
+  await fetchMirrorLfs(ctx, mirror, "o/r", remote);
+  assert.deepEqual(ctx.calls[0].slice(-6), ["-c", "lfs.url=https://h/o/r.git/info/lfs", "lfs", "fetch", "https://h/o/r.git", "HEAD"]);
+});
+
+test("fetchMirrorLfs rejects an invalid repo without running anything", async () => {
+  const ctx = fakeContext();
+  await assert.rejects(fetchMirrorLfs(ctx, mirror, "not a repo"));
+  assert.deepEqual(ctx.calls, []);
+});
+
+test("cloneWorkspace with lfs reads the objects from the mirror, the settings given to the clone itself", async () => {
+  const ctx = fakeContext();
+  await cloneWorkspace(ctx, "agent-x", true);
+  assert.deepEqual(ctx.calls.map((c) => c.slice(c.indexOf("--") + 1)), [[
+    "git", "clone", "-c", "lfs.url=file:///forge/origin.git", "-c", "lfs.standalonetransferagent=lfs-standalone-file",
+    "-c", "lfs.skipdownloaderrors=true", "--no-local", "/forge/origin.git", "/workspace",
+  ]]);
+  assert.ok(!ctx.calls.some((c) => c.includes("GIT_LFS_SKIP_SMUDGE=1")));
+});
+
+test("pointOriginAtMirror with lfs pins the workspace too, without it only re-aims origin", async () => {
+  const ctx = fakeContext();
+  await pointOriginAtMirror(ctx, "agent-x", true);
+  assert.equal(ctx.calls.length, 4);
+  const plain = fakeContext();
+  await pointOriginAtMirror(plain, "agent-x");
+  assert.equal(plain.calls.length, 1);
 });

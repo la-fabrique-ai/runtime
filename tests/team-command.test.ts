@@ -412,3 +412,47 @@ test("question shows a question's summary and detail without control characters;
   assert.match(ctx.out_lines[0], /^#7 from agent-web-lead, 2 min ago \(open\)$/);
   await assert.rejects(() => cmdTeam(ctx, ["question", "99"]), /no question 99/);
 });
+
+const lfsConfig = (lfs: boolean) => writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+  teams: { web: { repo: "o/web", roles: { dev: { capabilities: ["repo"], lfs } } } },
+}));
+
+test("sync fetches the LFS objects after the mirror when a role reads them, and not otherwise", async () => {
+  for (const lfs of [true, false]) {
+    lfsConfig(lfs);
+    const { ctx } = setup();
+    assert.equal(await cmdTeam(ctx, ["sync", "web"]), 0);
+    const calls = ctx.calls.map((c) => c.join(" "));
+    const fetch = calls.findIndex((c) => c.includes(" fetch --prune "));
+    const lfsFetch = calls.findIndex((c) => c.includes(" lfs fetch "));
+    assert.equal(lfsFetch >= 0, lfs, calls.join("\n"));
+    if (lfs) assert.ok(lfsFetch > fetch && fetch >= 0);
+  }
+});
+
+test("sync fails when the LFS fetch does, naming the repository", async () => {
+  lfsConfig(true);
+  const fake = FakeIncus.withRuntime();
+  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: " lfs fetch ", code: 2, stderr: "denied\n" }] });
+  await assert.rejects(() => cmdTeam(ctx, ["sync", "web"]), /fetching the LFS objects of o\/web failed: denied/);
+});
+
+test("converge notes a container whose LFS mode differs from its role's, once, and silently accepts a match", async () => {
+  lfsConfig(true);
+  for (const [mark, noted] of [[undefined, true], ["false", true], ["true", false]] as const) {
+    const fake = FakeIncus.withRuntime();
+    fake.addInstance("agent-forge", "agent-web-dev", { status: "Running", config: mark ? { "user.forge.lfs": mark } : {} });
+    const ctx = fakeContext({ incus: fake, rules: RULES });
+    await cmdTeam(ctx, ["converge"]);
+    const notes = ctx.err_lines.filter((l) => l.includes("agent-web-dev was created with lfs"));
+    assert.equal(notes.length, noted ? 1 : 0, ctx.err_lines.join("\n"));
+  }
+});
+
+test("sync on a host without git-lfs says so, before any fetch", async () => {
+  lfsConfig(true);
+  const fake = FakeIncus.withRuntime();
+  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "git lfs version", code: 1 }] });
+  await assert.rejects(() => cmdTeam(ctx, ["sync", "web"]), /git-lfs is not installed/);
+  assert.ok(!ctx.calls.some((c) => c.includes("fetch")));
+});

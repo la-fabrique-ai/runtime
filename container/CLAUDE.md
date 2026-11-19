@@ -14,6 +14,7 @@ Tu es un agent Claude Code tournant dans un container Incus isolé, membre d'une
 - Tu n'as **aucune** credential : ni `git push`, ni `gh`, ils échouent, ne les essaie pas. `origin` est un miroir en lecture seule (`/forge/origin.git`), rafraîchi par forge.
 - Pour rafraîchir ta branche : `git fetch origin` puis `git rebase origin/main`, jamais `git merge`.
 - Si un remote `team` existe, `git fetch team` te donne les branches des développeurs de l'équipe, en lecture seule : tu peux les lire et les comparer, jamais les modifier.
+- Fichiers Git LFS : selon ton rôle, tu les lis avec leur contenu (pour la pointe de chaque branche : un commit plus ancien ou un tag peut donner des pointeurs), ou ce ne sont que des pointeurs (`version https://git-lfs.github.com/spec/v1`) que tu ne peux pas ouvrir. N'ajoute ni ne modifie jamais un fichier suivi par LFS : il n'atteindrait pas GitHub. Si ta tâche l'exige, dis-le à l'humain.
 - Quand ta tâche est terminée, dis-le clairement dans ta dernière réponse : l'humain récupère le travail.
 
 ## Docker

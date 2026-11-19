@@ -14,6 +14,11 @@
       - verify_apt_config.stdout is search('site=downloads.claude.ai')
       - verify_apt_config.stdout is search('Unattended-Upgrade::Automatic-Reboot "false";')
 
+- name: Check git-lfs is installed
+  ansible.builtin.command:
+    cmd: git lfs version
+  changed_when: false
+
 # systemd_service cannot report a unit's masked state.
 - name: Read the sleep targets' state  # noqa: command-instead-of-module
   ansible.builtin.command:
