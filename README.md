@@ -271,7 +271,10 @@ roles you want.
 
 In the reference team the pilot reads every team's repository, read-only
 (`read-repos`: clones under `/workspace/depots/<team>`), and designs a request
-with the human before handing it to a lead. The lead splits it, has the
+with the human before handing it to a lead. It links the repositories, which
+is how it designs a feature that spans several of them, and its memory spans
+them too: one host serves one client, never put two clients' repositories on
+the same host. The lead splits it, has the
 reviewer read each developer's branch, and releases the developer when the
 reviewer finds nothing blocking. A team without a `reviewer` role still works:
 its lead reviews with a sub-agent itself. Each reference member also gets
@@ -312,7 +315,7 @@ A role's **capabilities** decide what its containers get:
 - `publish`: the agent works on branches `agent/<task>`, which `forge fetch`
   brings to your machine;
 - `read-repos` (the pilot only): every team's repository, read-only, cloned
-  under `/workspace/depots/<team>`; nothing leaves;
+  under `/workspace/depots/<team>`; no branch leaves it;
 - `read-team`: a read-only remote `team` with the branches of the developers,
   to read and compare;
 - `assign`, `ask-human`: what the agent may ask of the team through
