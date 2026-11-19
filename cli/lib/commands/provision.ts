@@ -28,6 +28,11 @@ export const CONTAINER_TOKEN_PATH = `${CONTAINER_TOKEN_DIR}/claude-token`;
 // pour le test de contrat qui les rejoue avec un vrai git-lfs.
 export const LFS_FILTERS_INSTALL = "git lfs install --skip-repo --skip-smudge";
 export const LFS_HOOKS_INSTALL = "git lfs install --skip-smudge";
+// Un rôle `lfs` lit le contenu dans le miroir : les filtres gardent leur
+// smudge (un `smudge --skip` dans ~/.gitconfig l'emporterait sur celui de
+// /etc/gitconfig et laisserait des pointeurs).
+export const LFS_FILTERS_READ = "git lfs install --skip-repo";
+export const LFS_HOOKS_READ = "git lfs install";
 
 // Défait un provisioning interrompu. Règle : rien de ce qui existait avant la
 // tentative échouée n'est supprimé. Le workspace marqué "kept" peut porter la
@@ -92,6 +97,16 @@ export async function requireRuntime(ctx: Context): Promise<void> {
   }
   if (!(await imageExists(ctx, BASE_IMAGE))) {
     throw new ForgeError(`image ${BASE_IMAGE} not found. Run 'forge image build' first.`);
+  }
+}
+
+// Un rôle `lfs` fait récupérer par l'hôte les objets LFS du miroir : sans le
+// paquet, le container ne lirait que des pointeurs. Refusé avant de rien créer.
+export async function requireHostLfs(ctx: Context): Promise<void> {
+  const r = await ctx.exec(["git", "lfs", "version"], { cwd: HOST_GIT_CWD });
+  if (r.code !== 0) {
+    throw new ForgeError("git-lfs is not installed on this host, and a role asks for LFS (\"lfs\": true). " +
+      "Install the package (the base role of ansible/site.yml does: run the playbook again, see ansible/README.md).");
   }
 }
 

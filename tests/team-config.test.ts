@@ -37,7 +37,7 @@ test("a team parses, and its optional fields default", () => {
     },
   });
   assert.deepEqual(cfg.teams.web.roles.lead,
-    { count: null, capabilities: ["repo", "assign"], talkTo: ["dev", "team"], strict: false, memory: null, cpu: null, plugins: [], env: null });
+    { count: null, capabilities: ["repo", "assign"], talkTo: ["dev", "team"], strict: false, memory: null, cpu: null, plugins: [], env: null, lfs: false });
   assert.equal(cfg.teams.web.roles.dev.count, 3);
   assert.equal(cfg.teams.web.roles.dev.memory, "8GiB");
   assert.equal(cfg.teams.web.prompts, null);
@@ -55,6 +55,14 @@ test("a team is refused when a field is wrong", () => {
   rejects(web({ dev: { talkTo: ["qa"] } }), /teams\.web\.roles\.dev\.talkTo/);
   rejects(web({ dev: { memory: "lots" } }), /teams\.web\.roles\.dev\.memory/);
   rejects(web({ dev: { plugins: ["a b"] } }), /teams\.web\.roles\.dev\.plugins/);
+});
+
+test("lfs is a boolean of a role that has a clone", () => {
+  const cfg = parse(web({ dev: { capabilities: ["repo"], lfs: true }, lead: { capabilities: ["repo"] } }));
+  assert.equal(cfg.teams.web.roles.dev.lfs, true);
+  assert.equal(cfg.teams.web.roles.lead.lfs, false);
+  rejects(web({ dev: { capabilities: ["repo"], lfs: "yes" } }), /teams\.web\.roles\.dev\.lfs/);
+  rejects(web({ dev: { capabilities: ["publish"], lfs: true } }), /teams\.web\.roles\.dev\.lfs must be .*"repo"/);
 });
 
 test("the pilot talks to teams only", () => {

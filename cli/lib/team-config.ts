@@ -13,6 +13,7 @@ export type RoleConfig = {
   count: number | null; capabilities: Capability[]; talkTo: string[]; strict: boolean;
   memory: string | null; cpu: number | null; plugins: string[];
   env: string | null; // a dotenv file on the host, pushed to the role's containers
+  lfs: boolean; // the container reads the repository's Git LFS content from the team mirror
 };
 export type TeamConfig = {
   repo: string; roles: Record<string, RoleConfig>; prompts: string | null;
@@ -49,7 +50,7 @@ export function parseTeams(path: string, raw: unknown): Record<string, TeamConfi
     for (const [role, roleValue] of Object.entries(rolesRaw)) {
       const rat = `${at}.roles.${role}`;
       if (!ROLE_NAME.test(role)) throw invalid(rat, "a role name such as lead or dev ([a-z0-9], no dash)", role);
-      const r = fields(roleValue, rat, ["count", "capabilities", "talkTo", "strict", "memory", "cpu", "plugins", "env"]);
+      const r = fields(roleValue, rat, ["count", "capabilities", "talkTo", "strict", "memory", "cpu", "plugins", "env", "lfs"]);
       if (r.count !== undefined && r.count !== null &&
           (typeof r.count !== "number" || !Number.isInteger(r.count) || r.count < 1)) {
         throw invalid(`${rat}.count`, "a positive integer", r.count);
@@ -58,15 +59,20 @@ export function parseTeams(path: string, raw: unknown): Record<string, TeamConfi
           (typeof r.cpu !== "number" || !Number.isInteger(r.cpu) || r.cpu < 1)) {
         throw invalid(`${rat}.cpu`, "null or a positive integer", r.cpu);
       }
+      const caps = capabilities(invalid, `${rat}.capabilities`, r.capabilities);
+      const lfs = bool(invalid, `${rat}.lfs`, r.lfs);
+      // The LFS content is read from the clone of the team's repository: a role without one has nothing to read it into.
+      if (lfs && !caps.includes("repo")) throw invalid(`${rat}.lfs`, 'false, or true on a role with the "repo" capability', r.lfs);
       roles[role] = {
         count: (r.count as number | null | undefined) ?? null,
-        capabilities: capabilities(invalid, `${rat}.capabilities`, r.capabilities),
+        capabilities: caps,
         talkTo: names(invalid, `${rat}.talkTo`, r.talkTo, [...roleNames, ...TALK_WORDS], "a role of this team, team or pilot"),
         strict: bool(invalid, `${rat}.strict`, r.strict),
         memory: memory(invalid, `${rat}.memory`, r.memory),
         cpu: (r.cpu as number | null | undefined) ?? null,
         plugins: plugins(invalid, `${rat}.plugins`, r.plugins),
         env: envPath(invalid, `${rat}.env`, r.env),
+        lfs,
       };
     }
     if (team.prompts !== undefined && team.prompts !== null && (typeof team.prompts !== "string" || team.prompts === "")) {
