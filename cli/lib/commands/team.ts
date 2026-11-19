@@ -28,7 +28,7 @@ import { hostReserveBytes, memoryWarning } from "../team-memory.ts";
 import { containerConfig, safeRef } from "./task-base.ts";
 
 const USAGE = `Usage: forge team converge [<team>]
-       forge team assign <container> [<task>]   (the instruction is read from stdin)
+       forge team assign <container> [<task>] [--from <task>]   (the instruction is read from stdin)
        forge team release <container>
        forge team question <question id> [--json]   (the summary and the detail of a question of the Inbox)
        forge team answer <question id> [--json]   (the answer is read from stdin, as JSON: {"summary": "…", "body": "…"})
@@ -38,7 +38,7 @@ const USAGE = `Usage: forge team converge [<team>]
 
 
 // `hostMemory` : la RAM de l'hôte, en octets ; les tests la fixent.
-export type TeamOptions = { json?: boolean; quick?: boolean; stdin?: () => Promise<string>; hostMemory?: number };
+export type TeamOptions = { json?: boolean; quick?: boolean; from?: string; stdin?: () => Promise<string>; hostMemory?: number };
 
 async function readStdinUpTo(max: number, what: string, usage: string): Promise<string> {
   // Un terminal ne donne pas de consigne : le dire plutôt qu'attendre sans rien afficher.
@@ -63,6 +63,9 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
     throw new ForgeError(`--json only goes with status, question and answer: forge team status --json\n${USAGE}`);
   }
   if (opts.quick && sub !== "status") throw new ForgeError(`--quick only goes with status: forge team status --quick\n${USAGE}`);
+  if (opts.from !== undefined && sub !== "assign") {
+    throw new ForgeError(`--from only goes with assign: forge team assign <container> <task> --from <task>\n${USAGE}`);
+  }
   if (!["converge", "assign", "release", "answer", "question", "status", "sync", "for-repo", "task-base", "upload-pack"].includes(sub ?? "")) {
     throw new ForgeError(USAGE);
   }
@@ -74,7 +77,7 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
   }
   switch (sub) {
     case "converge": return converge(ctx, cfg, a, opts);
-    case "assign": return assignCommand(ctx, cfg, a, b, opts.stdin ?? readStdin);
+    case "assign": return assignCommand(ctx, cfg, a, b, opts.from ?? null, opts.stdin ?? readStdin);
     case "release": return releaseCommand(ctx, cfg, a);
     case "question": return questionCommand(ctx, a, opts.json === true);
     case "answer": return answerCommand(ctx, cfg, a, opts.stdin ?? readAnswer, opts.json === true);
@@ -187,12 +190,12 @@ async function printMembers(ctx: Context, cfg: ForgeConfig, wanted: Member[], te
 const taskLabel = (task: string | null) => task ?? "free";
 
 async function assignCommand(
-  ctx: Context, cfg: ForgeConfig, to: string | undefined, task: string | undefined, stdin: () => Promise<string>,
+  ctx: Context, cfg: ForgeConfig, to: string | undefined, task: string | undefined, from: string | null, stdin: () => Promise<string>,
 ): Promise<number> {
   if (to === undefined) throw new ForgeError(`a container name is required.\n${USAGE}`);
   const text = (await stdin()).trim();
   if (text === "") throw new ForgeError("the instruction is empty: give it on stdin (forge team assign <container> <task> < instruction.md).");
-  await assign(ctx, cfg, { to, task: task ?? null, text, by: "human" });
+  await assign(ctx, cfg, { to, task: task ?? null, from, text, by: "human" });
   ctx.out(`Assigned ${task ?? "a task"} to ${to}.`);
   return 0;
 }

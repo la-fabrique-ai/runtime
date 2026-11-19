@@ -45,7 +45,9 @@ export async function owner(ctx: Context, cfg: ForgeConfig, team: string, task: 
 export const taskNotice = (task: string | null, by: string) =>
   `[forge] task ${task ?? "without a branch"} from ${by}`;
 
-type AssignRequest = { to: string; task: string | null; text: string; by: string };
+// `from` : une tâche du même développeur dont part la nouvelle branche (une
+// sous-tâche qui dépend d'une autre) ; absente, la branche part d'origin/main.
+type AssignRequest = { to: string; task: string | null; from?: string | null; text: string; by: string };
 
 // Les règles d'abord (rien ne change tant qu'elles ne sont pas toutes passées),
 // puis le container (démarré s'il était arrêté), puis le dépôt, puis l'état,
@@ -53,9 +55,15 @@ type AssignRequest = { to: string; task: string | null; text: string; by: string
 export async function assign(ctx: Context, cfg: ForgeConfig, req: AssignRequest): Promise<void> {
   const m = memberNamed(cfg, req.to);
   const publishes = m.capabilities.includes("publish");
+  const from = req.from ?? null;
   if (req.task !== null) validateTaskName(req.task);
+  if (from !== null) validateTaskName(from);
   // La commande à citer est celle de l'appelant : un agent n'a que forge-team.
   const command = req.by === "human" ? "forge team" : "forge-team";
+  if (from !== null && req.task === null) {
+    throw new ForgeError(`--from goes with a task name: ${command} assign ${m.name} <task> --from ${from}.`);
+  }
+  if (from !== null && from === req.task) throw new ForgeError(`task ${from} cannot start from itself.`);
   if (publishes && req.task === null) {
     throw new ForgeError(`${m.name} publishes branches: give it a task name (${command} assign ${m.name} <task>, the instruction on stdin).`);
   }
@@ -75,10 +83,21 @@ export async function assign(ctx: Context, cfg: ForgeConfig, req: AssignRequest)
       throw new ForgeError(`task ${req.task} is already owned by ${holder}: one task name belongs to one developer.`);
     }
     existing = holder === m.name;
+    // La branche de base doit être dans le clone de la cible : seul le
+    // développeur qui possède la tâche de base l'a. Aucun code ne passe d'un
+    // container à l'autre.
+    if (from !== null) {
+      if (existing) throw new ForgeError(`task ${req.task} already exists: --from only starts a new task.`);
+      const baseHolder = await owner(ctx, cfg, m.team, from);
+      if (baseHolder === null) throw new ForgeError(`no developer owns task ${from}: start it first, or leave --from out.`);
+      if (baseHolder !== m.name) {
+        throw new ForgeError(`task ${from} belongs to ${baseHolder}: give ${req.task} to ${baseHolder}, which has its branch.`);
+      }
+    }
   }
 
   await ensureRunning(ctx, m.name);
-  if (req.task !== null) await switchBranch(ctx, m, req.task, existing);
+  if (req.task !== null) await switchBranch(ctx, m, req.task, existing, from);
 
   await mustSucceed("record the task", configSet(ctx, m.name, TASK_KEY, req.task ?? NO_BRANCH));
   await mustSucceed("record who assigned it", configSet(ctx, m.name, ASSIGNED_BY_KEY, req.by));
@@ -94,7 +113,7 @@ export async function assign(ctx: Context, cfg: ForgeConfig, req: AssignRequest)
 
 // Tout git passe par un argv, dans le container : l'hôte ne lance jamais git
 // dans un dépôt d'agent.
-async function switchBranch(ctx: Context, m: Member, task: string, existing: boolean): Promise<void> {
+async function switchBranch(ctx: Context, m: Member, task: string, existing: boolean, from: string | null): Promise<void> {
   const git = (...args: string[]) => execAsAgentArgv(ctx, m.name, ["git", "-C", "/workspace", ...args]);
   const status = await mustSucceed("git status", git("status", "--porcelain"));
   const dirty = status.stdout.split("\n").filter((l) => l.trim() !== "").length;
@@ -104,6 +123,14 @@ async function switchBranch(ctx: Context, m: Member, task: string, existing: boo
   }
   if (existing) {
     await mustSucceed(`switch to agent/${task}`, git("switch", `agent/${task}`));
+    return;
+  }
+  // `agent/<from>` est la forme que forge ship lit comme une tâche empilée :
+  // la PR de la tâche s'ouvre sur la branche de sa base, puis sur main une fois
+  // celle-ci mergée.
+  if (from !== null) {
+    await mustSucceed(`create agent/${task}`, git("switch", "-c", `agent/${task}`, `agent/${from}`));
+    await mustSucceed("record the task's base", configSet(ctx, m.name, baseKey(task), `agent/${from}`));
     return;
   }
   await mustSucceed("git fetch origin", git("fetch", "origin"));

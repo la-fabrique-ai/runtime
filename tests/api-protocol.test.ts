@@ -15,6 +15,8 @@ test("each op parses; an absent optional field is null", () => {
     { op: "assign", to: "agent-web-dev-1", task: "fix-login", text: "Corrige" });
   assert.deepEqual(parse({ op: "assign", to: "agent-web-reviewer", text: "Relis" }),
     { op: "assign", to: "agent-web-reviewer", task: null, text: "Relis" });
+  assert.deepEqual(parse({ op: "assign", to: "agent-web-dev-1", task: "use-login", from: "fix-login", text: "Continue" }),
+    { op: "assign", to: "agent-web-dev-1", task: "use-login", from: "fix-login", text: "Continue" });
   assert.deepEqual(parse({ op: "release", to: "agent-web-dev-1" }), { op: "release", to: "agent-web-dev-1" });
   assert.deepEqual(parse({ op: "ask-human", summary: "Quel séparateur ?" }), { op: "ask-human", summary: "Quel séparateur ?", body: null });
   assert.deepEqual(parse({ op: "ask-human", summary: "Q", body: "d" }), { op: "ask-human", summary: "Q", body: "d" });
@@ -54,6 +56,7 @@ test("malformed requests are refused", () => {
   refused(msg({ to: 3 }), /to must be a string/);
   refused(msg({ to: "web-lead" }), /container must be/);
   refused({ op: "assign", to: "agent-web-dev-1", task: "../x", text: "t" }, /task-name/);
+  refused({ op: "assign", to: "agent-web-dev-1", task: "t", from: "../x", text: "t" }, /task-name/);
   refused(msg({ body: "" }), /body is empty/);
 });
 

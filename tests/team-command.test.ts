@@ -51,6 +51,15 @@ test("assign reads the instruction from stdin and gives the task on behalf of th
     "[forge] task fix-login from human\n\nCorrige le login");
 });
 
+test("assign --from starts the task from another task of the same developer; --from goes with assign only", async () => {
+  const { fake, ctx } = setup();
+  const keys = fake.instances.get("agent-forge")!.get("agent-web-dev-1")!.config;
+  keys["user.forge.base.fix-login"] = "origin/main";
+  await cmdTeam(ctx, ["assign", "agent-web-dev-1", "use-login"], { stdin: async () => "Continue\n", from: "fix-login" });
+  assert.equal(keys["user.forge.base.use-login"], "agent/fix-login");
+  await assert.rejects(() => cmdTeam(ctx, ["status"], { from: "fix-login" }), /--from only goes with assign/);
+});
+
 test("an empty instruction is refused before any Incus call", async () => {
   const { ctx } = setup();
   await assert.rejects(() => cmdTeam(ctx, ["assign", "agent-web-dev-1", "fix-login"], { stdin: async () => "  \n" }), /instruction is empty/);

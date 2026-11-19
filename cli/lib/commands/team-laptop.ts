@@ -14,7 +14,7 @@ import { printableText } from "../printable.ts";
 import type { TeamStatus } from "./team.ts";
 
 const USAGE = `Usage: forge team up [<team>] [--host <name>]
-       forge team assign <container> [<task>] [--host <name>]   (the instruction is read from stdin)
+       forge team assign <container> [<task>] [--from <task>] [--host <name>]   (the instruction is read from stdin)
        forge team release <container> [--host <name>]
        forge team status [--json] [--quick] [--host <name>]
        forge team sync <team> [--host <name>]
@@ -57,7 +57,7 @@ async function readBody(): Promise<string | null> {
   return text.trim() === "" ? null : text;
 }
 
-export type TeamLaptopOptions = { host?: string; json?: boolean; quick?: boolean; stdin?: () => Promise<string> };
+export type TeamLaptopOptions = { host?: string; json?: boolean; quick?: boolean; from?: string; stdin?: () => Promise<string> };
 
 async function readStdin(): Promise<string> {
   // Un terminal ne donne pas de consigne : le dire plutôt qu'attendre sans rien afficher.
@@ -85,13 +85,17 @@ export async function cmdTeamLaptop(ctx: Context, args: string[], opts: TeamLapt
     throw new ForgeError(`--json only goes with status, inbox and question: forge team status --json\n${USAGE}`);
   }
   if (opts.quick && sub !== "status") throw new ForgeError(`--quick only goes with status: forge team status --quick\n${USAGE}`);
+  if (opts.from !== undefined && sub !== "assign") {
+    throw new ForgeError(`--from only goes with assign: forge team assign <container> <task> --from <task>\n${USAGE}`);
+  }
   switch (sub) {
     case "up": return up(ctx, await selectHost(ctx, opts.host), a);
     case "assign": {
       if (a === undefined) throw new ForgeError(`a container name is required.\n${USAGE}`);
       const text = await (opts.stdin ?? readStdin)();
       const host = await selectHost(ctx, opts.host);
-      return relayed(ctx, await remoteExec(ctx, host, ["forge", "team", "assign", a, ...(b ? [b] : [])], text));
+      return relayed(ctx, await remoteExec(ctx, host,
+        ["forge", "team", "assign", a, ...(b ? [b] : []), ...(opts.from !== undefined ? ["--from", opts.from] : [])], text));
     }
     case "release":
       if (a === undefined) throw new ForgeError(`a container name is required.\n${USAGE}`);
