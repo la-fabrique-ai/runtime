@@ -212,8 +212,8 @@ Our own text, in English (the role prompts stay in French), each a
 | Skill | Roles | Inspired by | Does |
 |---|---|---|---|
 | `design` | Pilot | Superpowers `brainstorming`, Pocock `grill-me` | Refreshes the clone, explores with `scout`, asks the human one question at a time, lays out 2–3 approaches with a pick, writes a short design to `/workspace/designs/<slug>.md`, gets the human's approval, then assigns it to the Lead (the design as the message body). Never writes a plan: that is the Lead's job. |
-| `split-request` | Lead | Superpowers `writing-plans`, Pocock `to-tickets` | Turns a design into independent sub-tasks (goal, files, what to verify), orders dependent ones one after another, assigns one per free developer. Keeps the split in `~/notes.md`. |
-| `tdd` | Developer | Superpowers `test-driven-development`, Pocock `tdd` | Red, green, refactor, within the repository's own test conventions. |
+| `split-request` | Lead | Superpowers `writing-plans`, Pocock `to-tickets` | Turns a design into sub-tasks: each is one developer's work and gives one pull request, built in successive commits. A request stays one sub-task while its pull request is reviewable in one sitting (one concern, a diff read at once); it is split only when one pull request would be too big for a careful human review, the point of the split (maintainer's review of #179). Orders dependent ones one after another, stacked, assigns one per free developer. Keeps the split in `~/notes.md`. |
+| `tdd` | Developer | Superpowers `test-driven-development`, Pocock `tdd` | Red, green, refactor, within the repository's own test conventions; commits each green step, so the pull request reads commit by commit. |
 | `diagnose` | Developer | Superpowers `systematic-debugging`, Pocock `diagnosing-bugs` | Reproduce, hypothesise, check one hypothesis at a time; a pre-existing failure is reported, not fixed in passing. |
 | `verify-before-report` | Developer, Reviewer | Superpowers `verification-before-completion` | Runs the project's checks one by one and puts the commands and their results in the report; names the checks it could not run in the container. |
 | `review-branch` | Reviewer | Pocock `code-review`, Superpowers `requesting-code-review` | Fetches `team/agent/<task>`, runs two `branch-reviewer` sub-agents (instruction, conventions) on the whole branch, or on the commits since the one it last reviewed, merges and ranks the findings, reports them to the Lead with the commit it reviewed up to. Never fixes. |
@@ -254,11 +254,18 @@ in the flow, whom it reports to, which skill to use when. Changes:
   (`forge-team assign <dev> <task> --from <first>`, added on 2026-11-19 at the
   maintainer's request): its pull request stacks on the first, which `forge
   ship` already handles. The Lead does not wait for the first to be merged.
+  The Lead asks the Pilot what it knows better (the request's context, the
+  client's other repositories) by a message whose summary starts with
+  `Question :`, and the human through `forge-team ask`; it reports once, with
+  a summary starting with `Rapport :`, the only message the Pilot releases it
+  on. The Reviewer reviews a stacked task against `team/agent/<A>`, so only its
+  own commits (maintainer's review of #179).
 - **Common instructions**: the release rule of `container/CLAUDE.md` ("relire,
   c'est `git fetch team` puis lire la branche") gains: for a Lead with a
   Reviewer, the Reviewer's report is the review.
-- **Developer**: `tdd`, `diagnose`, `verify-before-report`; reports branch,
-  what was done, what was checked, what was not, frictions.
+- **Developer**: `tdd`, `diagnose`, `verify-before-report`; builds its pull
+  request in successive commits, each a step a human reads on its own; reports
+  branch, what was done, what was checked, what was not, frictions.
 - **Reviewer** (new): `review-branch`; reports to the Lead; never fixes, never
   assigns.
 
