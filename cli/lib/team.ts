@@ -19,6 +19,7 @@ export type Member = {
   env: string | null; // the role's .env, as an expanded host path
   lfs: boolean; // the role's `lfs`; always false for the Pilot
   reference: ReferenceKit | null; // le kit d'un rôle de référence, null pour un prompt personnalisé
+  designs: Record<string, string>; // équipe → `designs` : la sienne pour un membre, toutes pour le Pilote
 };
 
 // Ce qu'un rôle de référence reçoit en plus de son prompt (teams/reference/roles.json).
@@ -69,6 +70,7 @@ export function members(cfg: ForgeConfig): Member[] {
       prompt: cfg.pilot.prompt === "reference" ? join(REFERENCE_PROMPTS, "pilot.md") : cfg.pilot.prompt, env: hostPath(cfg.pilot.env),
       lfs: false,
       reference: cfg.pilot.prompt === "reference" ? referenceKit("pilot") : null,
+      designs: Object.fromEntries(Object.entries(cfg.teams).flatMap(([t, c]) => c.designs === null ? [] : [[t, c.designs]])),
     });
   }
   for (const [team, t] of Object.entries(cfg.teams)) {
@@ -83,6 +85,7 @@ export function members(cfg: ForgeConfig): Member[] {
           capabilities: r.capabilities, talkTo: [], strict: r.strict, memory: r.memory, cpu: r.cpu,
           plugins: r.plugins, prompt: rolePrompt(t.prompts, role), env: hostPath(r.env), lfs: r.lfs,
           reference: t.prompts === "reference" ? referenceKit(role) : null,
+          designs: t.designs === null ? {} : { [team]: t.designs },
         });
       }
     }

@@ -117,6 +117,16 @@ test("pushed files: token, team instructions plus the role prompt, settings with
   assert.ok(file("/usr/local/bin/forge-agent") && file("/home/aiuser/.claude/hooks/pre-bash.sh") && file("/home/aiuser/.claude.json"));
 });
 
+test("a team's designs path reaches its members' and the Pilot's instructions", async () => {
+  const cfg = config({ designs: "docs/specs" });
+  for (const [name, expected] of [["agent-web-dev-1", "sous `docs/specs`"], [PILOT, "- `web` : `docs/specs`"]]) {
+    const { fake, run } = provision(name, cfg);
+    await run();
+    const claudeMd = fake.files.get(`agent-forge/${name}/home/aiuser/.claude/CLAUDE.md`)!.content;
+    assert.ok(claudeMd.includes(expected), claudeMd.slice(-400));
+  }
+});
+
 test("without plugins the settings carry no enabledPlugins", async () => {
   const { fake, run } = provision("agent-web-dev-1");
   await run();

@@ -225,7 +225,7 @@ export async function installMemberFiles(ctx: Context, m: Member): Promise<{ ins
   ctx.out("Installing Claude team instructions...");
   const rolePrompt = m.prompt === null ? "" : readPrompt(m);
   const instructions = readFileSync(join(repoRoot(), "container", "CLAUDE.md"), "utf8");
-  const text = rolePrompt === "" ? instructions : `${instructions}\n${rolePrompt}`;
+  const text = [instructions, rolePrompt, designsNote(m)].filter((p) => p !== "").join("\n");
   // Le .env du rôle, lu et vérifié avant que quoi que ce soit soit poussé.
   const env = m.env === null ? null : readEnvFile(m.env);
   const before = await pullText(ctx, m.name, CLAUDE_MD);
@@ -247,6 +247,24 @@ export async function installMemberFiles(ctx: Context, m: Member): Promise<{ ins
   await requireHookBlocks(ctx, m.name);
   const kitChanged = await installReferenceKit(ctx, m);
   return { instructionsChanged: before !== text || envChanged || kitChanged };
+}
+
+// Où le dépôt de l'équipe versionne ses designs (teams.<équipe>.designs), à la
+// fin des instructions : un membre lit celui de son équipe, le Pilote celui de
+// chaque équipe. Sans la clé, rien : les designs restent chez le Pilote.
+function designsNote(m: Member): string {
+  const entries = Object.entries(m.designs);
+  if (entries.length === 0) return "";
+  if (m.team !== null) {
+    return "## Designs de l'équipe\n" +
+      `Le dépôt versionne ses designs sous \`${entries[0][1]}\` : la première sous-tâche d'une demande y commite ` +
+      "le design du Pilote. Ceux qui y sont déjà donnent le contexte des demandes passées.\n";
+  }
+  return "## Designs des équipes\n" +
+    "Ces dépôts versionnent leurs designs, et la première sous-tâche d'une demande y commite le tien. " +
+    "Avant d'écrire un design, relis ceux qui touchent la demande " +
+    "(sous `/workspace/depots/<équipe>/<chemin>`, si tu as `read-repos`) :\n" +
+    entries.map(([team, path]) => `- \`${team}\` : \`${path}\`\n`).join("");
 }
 
 // Le .env du rôle : poussé (uid 1001, mode 600) quand le membre en a un, retiré

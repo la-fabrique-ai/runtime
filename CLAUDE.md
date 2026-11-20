@@ -106,7 +106,7 @@ Les suites restent légères.
 - Pour un script (hook git, `pre-bash.sh`, scripts shell), seulement les quelques cas qui protègent un choix important : les garde-fous de sécurité, un cas nominal, un cas d'échec. Pas de balayage de cas limites : ceux-là se vérifient à la main en relecture.
 
 ### Dans une équipe forge
-Dans un container d'équipe (Pilote, Lead, développeur, Reviewer), il n'y a pas d'Incus : seuls `npm test` et `npm run check` tournent. Ne tournent pas : `FORGE_INTEGRATION=1`, `ansible/tests/vm-test.sh`, `npm run test:ansible` et `ansible-lint` : ils se lancent sur la VM de dev ou chez le mainteneur, et les comptes rendus disent qu'ils n'ont pas tourné. La première sous-tâche d'une demande commite le design du Pilote sous `docs/superpowers/specs/`.
+Dans un container d'équipe (Pilote, Lead, développeur, Reviewer), il n'y a pas d'Incus : seuls `npm test` et `npm run check` tournent. Ne tournent pas : `FORGE_INTEGRATION=1`, `ansible/tests/vm-test.sh`, `npm run test:ansible` et `ansible-lint` : ils se lancent sur la VM de dev ou chez le mainteneur, et les comptes rendus disent qu'ils n'ont pas tourné.
 
 ### Sécurité
 - Ne jamais hardcoder de credentials, clés, tokens

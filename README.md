@@ -330,7 +330,11 @@ Other role settings: `count`, `talkTo`, `strict` (the container's egress is
 role with `repo`: the container reads the repository's Git LFS files, see
 [Large files](#rules-for-getting-work-back)). A team also takes
 `prompts` (a directory of `<role>.md` files appended to each role's
-instructions) and `gitIdentity` (the commits' identity, the host's otherwise).
+instructions), `gitIdentity` (the commits' identity, the host's otherwise) and
+`designs` (a folder of the repository, such as `docs/designs`, where the first
+sub-task of a request commits the Pilot's design; forge tells the team and the
+Pilot, who reads the earlier ones for context. Without it, designs stay with
+the Pilot).
 
 #### A role has its own `.env`
 

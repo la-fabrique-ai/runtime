@@ -18,6 +18,10 @@ export type RoleConfig = {
 export type TeamConfig = {
   repo: string; roles: Record<string, RoleConfig>; prompts: string | null;
   gitIdentity: { name: string; email: string } | null;
+  // Where the repository keeps its designs, relative to its root: the first
+  // sub-task of a request commits the Pilot's design there. null: the designs
+  // stay with the Pilot.
+  designs: string | null;
 };
 export type PilotConfig = {
   capabilities: Capability[]; talkTo: string[]; strict: boolean; memory: string | null;
@@ -37,7 +41,7 @@ export function parseTeams(path: string, raw: unknown): Record<string, TeamConfi
   for (const [name, value] of Object.entries(fields(raw, "teams", Object.keys(raw as object ?? {})))) {
     const at = `teams.${name}`;
     if (!TEAM_NAME.test(name)) throw invalid(at, "a team name such as web or data-eng ([a-z0-9], single dashes)", name);
-    const team = fields(value, at, ["repo", "roles", "prompts", "gitIdentity"]);
+    const team = fields(value, at, ["repo", "roles", "prompts", "gitIdentity", "designs"]);
     if (typeof team.repo !== "string") throw invalid(`${at}.repo`, "an owner/repo string", team.repo);
     try {
       validateRepo(team.repo);
@@ -90,7 +94,10 @@ export function parseTeams(path: string, raw: unknown): Record<string, TeamConfi
       }
       gitIdentity = { name: g.name as string, email: g.email as string };
     }
-    teams[name] = { repo: team.repo, roles, prompts: (team.prompts as string | null | undefined) ?? null, gitIdentity };
+    teams[name] = {
+      repo: team.repo, roles, prompts: (team.prompts as string | null | undefined) ?? null, gitIdentity,
+      designs: designsPath(invalid, `${at}.designs`, team.designs),
+    };
   }
   return teams;
 }
@@ -116,6 +123,16 @@ export function parsePilot(path: string, raw: unknown): PilotConfig | null {
 }
 
 type Invalid = (key: string, expected: string, got: unknown) => ForgeError;
+
+// A path inside the repository, written into the agents' instructions: plain
+// segments only, so it can neither leave the clone nor break the text.
+function designsPath(invalid: Invalid, key: string, v: unknown): string | null {
+  if (v === undefined || v === null) return null;
+  const ok = typeof v === "string" &&
+    v.split("/").every((seg) => /^[A-Za-z0-9._-]+$/.test(seg) && seg !== "." && seg !== "..");
+  if (!ok) throw invalid(key, "null or a path inside the repository, such as docs/designs (no leading /, no . or ..)", v);
+  return v;
+}
 
 function capabilities(invalid: Invalid, key: string, v: unknown): Capability[] {
   if (v === undefined) return [];

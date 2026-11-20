@@ -38,7 +38,7 @@ function kitRoot(): string {
 const DEV: Member = {
   name: "agent-x", team: "t", role: "dev", index: null, repo: "o/x", capabilities: ["repo"], talkTo: [],
   strict: false, memory: null, cpu: null, plugins: [], prompt: null, env: null, lfs: false,
-  reference: { skills: ["tdd", "diagnose"], agents: ["scout"], memory: true },
+  reference: { skills: ["tdd", "diagnose"], agents: ["scout"], memory: true }, designs: {},
 };
 
 const lines = (c: ReturnType<typeof fakeContext>) => c.calls.map((x) => x.join(" "));

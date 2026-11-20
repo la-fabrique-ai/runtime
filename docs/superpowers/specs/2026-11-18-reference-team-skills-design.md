@@ -220,12 +220,24 @@ Our own text, in English (the role prompts stay in French), each a
 | `checkpoint` | Pilot, Lead | Pocock `handoff` | Brings the notes up to date (requests in flight, who has what, what waits for the human, unanswered messages), so a fresh session can resume; moves what stays true across requests to the memory (§5.8). In part 2, ends with the restart. |
 
 **The skills stay generic.** What is particular to a repository (its test
-conventions, the checks that can't run in a container, where it commits its
-designs) comes from that repository's own `CLAUDE.md`, which every agent with
-a clone reads. For agent-forge, its root `CLAUDE.md` gains a short section on
-team containers: only `npm test`, typing and lint run there (no integration
-tests, no `vm-test.sh`), and the first sub-task of a request commits the
-Pilot's design under `docs/superpowers/specs/`.
+conventions, the checks that can't run in a container) comes from that
+repository's own `CLAUDE.md`, which every agent with a clone reads. For
+agent-forge, its root `CLAUDE.md` gains a short section on team containers:
+only `npm test`, typing and lint run there (no integration tests, no
+`vm-test.sh`).
+
+**Designs in the repository** (added on 2026-11-20 at the maintainer's
+request: a committed design gives other forges, and later Pilots, the context
+of past requests). A team takes `designs`, a path inside its repository
+(`"designs": "docs/superpowers/specs"` for agent-forge); forge refuses an
+absolute path or a `.`/`..` segment. forge appends a generated section to the
+instructions: « Designs de l'équipe » for the team's members (the first
+sub-task of a request commits the Pilot's design there), « Designs des
+équipes » for the Pilot (each team's folder; it reads the earlier designs
+that touch a request before writing one). Without the key, nothing is
+committed and the design stays in the Pilot's `/workspace/designs`. Only
+designs: the Lead's split stays in its notes, since the merged pull requests
+and their commits already tell how the work was cut.
 
 **Frictions in the reports.** The report formats in the prompts gain a last
 line, *ce qui a frotté* (an unclear instruction, a missing tool, a rule that

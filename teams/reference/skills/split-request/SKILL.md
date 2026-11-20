@@ -14,7 +14,7 @@ A sub-task is one developer's piece of work and gives one pull request, which th
 5. Never create more sub-tasks at once than there are free developers (`forge-team status`).
 6. Give each a short lowercase-dash task name, for example `add-login-form`.
 7. Write the split in `~/notes.md`: sub-task, developer, state, branch, base.
-8. When the repository commits its designs, the first sub-task commits the design file. The developer cannot read the Pilot's files: put the design's full text in that sub-task's instruction.
+8. When your instructions have a « Designs de l'équipe » section, the first sub-task commits the Pilot's design in the folder it names, under the design's file name. The developer cannot read the Pilot's files: put the design's full text in that sub-task's instruction.
 9. Assign with `forge-team assign <developer> <task>` (plus `--from <task>` for a dependent one), the instruction on stdin.
 
 Ask while you work, without waiting for the answer when you can go on:
