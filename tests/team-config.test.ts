@@ -65,6 +65,13 @@ test("lfs is a boolean of a role that has a clone", () => {
   rejects(web({ dev: { capabilities: ["publish"], lfs: true } }), /teams\.web\.roles\.dev\.lfs must be .*"repo"/);
 });
 
+test("designs is a path inside the team's repository", () => {
+  assert.equal(parse(web({}, { designs: "docs/superpowers/specs" })).teams.web.designs, "docs/superpowers/specs");
+  assert.equal(parse(web({})).teams.web.designs, null);
+  rejects(web({}, { designs: "/etc/designs" }), /teams\.web\.designs/);
+  rejects(web({}, { designs: "docs/../../x" }), /teams\.web\.designs/);
+});
+
 test("the pilot talks to teams only", () => {
   rejects({ pilot: { talkTo: ["nobody"] }, teams: {} }, /pilot\.talkTo/);
   rejects({ pilot: { capabilities: ["push"] } }, /pilot\.capabilities/);
@@ -80,4 +87,9 @@ test("a role and the pilot may name a .env file, absolute or under ~", () => {
 
 test("the tickets capability is refused, with a pointer to env", () => {
   rejects(web({ lead: { capabilities: ["repo", "tickets"] } }), /capabilities.*tickets.*`env`/);
+});
+
+test("read-repos is the Pilot's: accepted on the pilot, refused on a team role", () => {
+  assert.ok(parse({ pilot: { capabilities: ["assign", "read-repos"] } }).pilot!.capabilities.includes("read-repos"));
+  rejects(web({ lead: { capabilities: ["repo", "read-repos"] } }), /teams\.web\.roles\.lead\.capabilities.*read-repos/);
 });

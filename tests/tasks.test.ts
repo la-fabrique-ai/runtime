@@ -51,6 +51,16 @@ test("the owner of an existing branch switches to it, its base is unchanged", as
   assert.equal(keys(DEV1)["user.forge.task"], "fix-login");
 });
 
+test("a task started from another task of the same developer branches from it and records it as its base", async () => {
+  const { ctx, keys, flat } = setup({ [DEV1]: { "user.forge.base.fix-login": "origin/main" } });
+  await assign(ctx, cfg, { to: DEV1, task: "use-login", from: "fix-login", text: "Continue", by: HUMAN });
+  assert.ok(flat().some((c) => c.includes("git -C /workspace switch -c agent/use-login agent/fix-login")), flat().join("\n"));
+  assert.ok(!flat().some((c) => c.includes("origin/main") && c.includes("switch -c")));
+  // forge ship reads `agent/<task>` as a stacked base: the PR of use-login opens on agent/fix-login.
+  assert.equal(keys(DEV1)["user.forge.base.use-login"], "agent/fix-login");
+  assert.equal(keys(DEV1)["user.forge.task"], "use-login");
+});
+
 test("refusals change nothing: no state, no git switch, no session", async () => {
   const cases: [string, Record<string, Record<string, string>>, Parameters<typeof assign>[2], RegExp, ExecRule[]?][] = [
     ["busy", { [DEV1]: { "user.forge.task": "other", "user.forge.assigned_by": "human" } },
@@ -64,6 +74,15 @@ test("refusals change nothing: no state, no git switch, no session", async () =>
       [{ match: "status --porcelain", stdout: " M a.ts\n?? b.ts\n" }]],
     ["an invalid task name", {}, { to: DEV1, task: "a b", text: "x", by: HUMAN }, /task-name/],
     ["an undeclared member", {}, { to: "agent-web-dev-9", task: "a", text: "x", by: HUMAN }, /not declared.*agent-web-dev-1/],
+    ["a base task another developer owns", { [DEV1]: { "user.forge.base.fix-login": "origin/main" } },
+      { to: DEV2, task: "use-login", from: "fix-login", text: "x", by: HUMAN }, /fix-login belongs to agent-web-dev-1: give use-login to agent-web-dev-1/],
+    ["a base task nobody owns", {}, { to: DEV1, task: "use-login", from: "fix-login", text: "x", by: HUMAN }, /no developer owns task fix-login/],
+    ["a base for a task that already exists", { [DEV1]: { "user.forge.base.fix-login": "origin/main", "user.forge.base.use-login": "origin/main" } },
+      { to: DEV1, task: "use-login", from: "fix-login", text: "x", by: HUMAN }, /use-login already exists: --from only starts a new task/],
+    ["a base without a task name", {}, { to: REV, task: null, from: "fix-login", text: "x", by: HUMAN }, /--from goes with a task name/],
+    ["a task based on itself", { [DEV1]: { "user.forge.base.fix-login": "origin/main" } },
+      { to: DEV1, task: "fix-login", from: "fix-login", text: "x", by: HUMAN }, /cannot start from itself/],
+    ["an invalid base name", {}, { to: DEV1, task: "a", from: "../x", text: "x", by: HUMAN }, /task-name/],
   ];
   for (const [label, config, req, pattern, rules] of cases) {
     const { ctx, keys, flat } = setup(config, rules ?? []);

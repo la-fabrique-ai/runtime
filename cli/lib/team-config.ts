@@ -6,7 +6,7 @@ import { configHelpers, SIZE } from "./config-fields.ts";
 import { validateRepo } from "./validate.ts";
 import { ForgeError } from "./context.ts";
 
-export const CAPABILITIES = ["repo", "publish", "read-team", "assign", "ask-human", "services"] as const;
+export const CAPABILITIES = ["repo", "publish", "read-team", "assign", "ask-human", "services", "read-repos"] as const;
 export type Capability = (typeof CAPABILITIES)[number];
 
 export type RoleConfig = {
@@ -18,6 +18,10 @@ export type RoleConfig = {
 export type TeamConfig = {
   repo: string; roles: Record<string, RoleConfig>; prompts: string | null;
   gitIdentity: { name: string; email: string } | null;
+  // Where the repository keeps its designs, relative to its root: the first
+  // sub-task of a request commits the Pilot's design there. null: the designs
+  // stay with the Pilot.
+  designs: string | null;
 };
 export type PilotConfig = {
   capabilities: Capability[]; talkTo: string[]; strict: boolean; memory: string | null;
@@ -37,7 +41,7 @@ export function parseTeams(path: string, raw: unknown): Record<string, TeamConfi
   for (const [name, value] of Object.entries(fields(raw, "teams", Object.keys(raw as object ?? {})))) {
     const at = `teams.${name}`;
     if (!TEAM_NAME.test(name)) throw invalid(at, "a team name such as web or data-eng ([a-z0-9], single dashes)", name);
-    const team = fields(value, at, ["repo", "roles", "prompts", "gitIdentity"]);
+    const team = fields(value, at, ["repo", "roles", "prompts", "gitIdentity", "designs"]);
     if (typeof team.repo !== "string") throw invalid(`${at}.repo`, "an owner/repo string", team.repo);
     try {
       validateRepo(team.repo);
@@ -60,6 +64,10 @@ export function parseTeams(path: string, raw: unknown): Record<string, TeamConfi
         throw invalid(`${rat}.cpu`, "null or a positive integer", r.cpu);
       }
       const caps = capabilities(invalid, `${rat}.capabilities`, r.capabilities);
+      if (caps.includes("read-repos")) {
+        throw invalid(`${rat}.capabilities`,
+          'no "read-repos" on a team role: it is the Pilot\'s; a team role reads its repository with "repo"', r.capabilities);
+      }
       const lfs = bool(invalid, `${rat}.lfs`, r.lfs);
       // The LFS content is read from the clone of the team's repository: a role without one has nothing to read it into.
       if (lfs && !caps.includes("repo")) throw invalid(`${rat}.lfs`, 'false, or true on a role with the "repo" capability', r.lfs);
@@ -86,7 +94,10 @@ export function parseTeams(path: string, raw: unknown): Record<string, TeamConfi
       }
       gitIdentity = { name: g.name as string, email: g.email as string };
     }
-    teams[name] = { repo: team.repo, roles, prompts: (team.prompts as string | null | undefined) ?? null, gitIdentity };
+    teams[name] = {
+      repo: team.repo, roles, prompts: (team.prompts as string | null | undefined) ?? null, gitIdentity,
+      designs: designsPath(invalid, `${at}.designs`, team.designs),
+    };
   }
   return teams;
 }
@@ -112,6 +123,16 @@ export function parsePilot(path: string, raw: unknown): PilotConfig | null {
 }
 
 type Invalid = (key: string, expected: string, got: unknown) => ForgeError;
+
+// A path inside the repository, written into the agents' instructions: plain
+// segments only, so it can neither leave the clone nor break the text.
+function designsPath(invalid: Invalid, key: string, v: unknown): string | null {
+  if (v === undefined || v === null) return null;
+  const ok = typeof v === "string" &&
+    v.split("/").every((seg) => /^[A-Za-z0-9._-]+$/.test(seg) && seg !== "." && seg !== "..");
+  if (!ok) throw invalid(key, "null or a path inside the repository, such as docs/designs (no leading /, no . or ..)", v);
+  return v;
+}
 
 function capabilities(invalid: Invalid, key: string, v: unknown): Capability[] {
   if (v === undefined) return [];

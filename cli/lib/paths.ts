@@ -37,6 +37,12 @@ export function workspacesDir(): string {
   return process.env.FORGE_WORKSPACES ?? join(forgeHome(), "workspaces");
 }
 
+// Les mémoires (auto memory de Claude Code) des membres de référence qui en ont
+// une : un dossier par membre, monté dans son container.
+export function memoriesDir(): string {
+  return process.env.FORGE_MEMORIES ?? join(forgeHome(), "memories");
+}
+
 // An empty XDG_CONFIG_HOME counts as unset, as the XDG spec says.
 export function configPath(): string {
   return join(configDir(), "config.json");

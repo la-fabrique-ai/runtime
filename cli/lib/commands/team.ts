@@ -21,7 +21,7 @@ import { ageLabel, mirrorLine } from "../age.ts";
 import { printableText } from "../printable.ts";
 import { columnWidths, formatRow } from "../table.ts";
 import { members, teamWantsLfs, type Member } from "../team.ts";
-import { installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
+import { ensureMemberMounts, installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
 import { requireHostLfs } from "./provision.ts";
 import { refreshTeamMirror } from "../team-mirror.ts";
 import { teamMirrorPath } from "../mirror.ts";
@@ -29,7 +29,7 @@ import { hostReserveBytes, memoryWarning } from "../team-memory.ts";
 import { containerConfig, safeRef } from "./task-base.ts";
 
 const USAGE = `Usage: forge team converge [<team>]
-       forge team assign <container> [<task>]   (the instruction is read from stdin)
+       forge team assign <container> [<task>] [--from <task>]   (the instruction is read from stdin)
        forge team release <container>
        forge team question <question id> [--json]   (the summary and the detail of a question of the Inbox)
        forge team answer <question id> [--json]   (the answer is read from stdin, as JSON: {"summary": "…", "body": "…"})
@@ -39,7 +39,7 @@ const USAGE = `Usage: forge team converge [<team>]
 
 
 // `hostMemory` : la RAM de l'hôte, en octets ; les tests la fixent.
-export type TeamOptions = { json?: boolean; quick?: boolean; stdin?: () => Promise<string>; hostMemory?: number };
+export type TeamOptions = { json?: boolean; quick?: boolean; from?: string; stdin?: () => Promise<string>; hostMemory?: number };
 
 async function readStdinUpTo(max: number, what: string, usage: string): Promise<string> {
   // Un terminal ne donne pas de consigne : le dire plutôt qu'attendre sans rien afficher.
@@ -64,6 +64,9 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
     throw new ForgeError(`--json only goes with status, question and answer: forge team status --json\n${USAGE}`);
   }
   if (opts.quick && sub !== "status") throw new ForgeError(`--quick only goes with status: forge team status --quick\n${USAGE}`);
+  if (opts.from !== undefined && sub !== "assign") {
+    throw new ForgeError(`--from only goes with assign: forge team assign <container> <task> --from <task>\n${USAGE}`);
+  }
   if (!["converge", "assign", "release", "answer", "question", "status", "sync", "for-repo", "task-base", "upload-pack"].includes(sub ?? "")) {
     throw new ForgeError(USAGE);
   }
@@ -75,7 +78,7 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
   }
   switch (sub) {
     case "converge": return converge(ctx, cfg, a, opts);
-    case "assign": return assignCommand(ctx, cfg, a, b, opts.stdin ?? readStdin);
+    case "assign": return assignCommand(ctx, cfg, a, b, opts.from ?? null, opts.stdin ?? readStdin);
     case "release": return releaseCommand(ctx, cfg, a);
     case "question": return questionCommand(ctx, a, opts.json === true);
     case "answer": return answerCommand(ctx, cfg, a, opts.stdin ?? readAnswer, opts.json === true);
@@ -123,7 +126,12 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
           `Delete it (incus --project ${forgeProject()} delete ${m.name} --force; its workspace survives) and run converge again.`);
       }
       ctx.out(`Updating ${m.name}...`);
+      await ensureMemberMounts(ctx, cfg, m);
       changed = (await installMemberFiles(ctx, m)).instructionsChanged;
+    }
+    if (m.role === "pilot" && m.reference !== null && !m.capabilities.includes("read-repos")) {
+      notes.push(`NOTE: ${m.name} uses the reference prompt, which designs from the code: ` +
+        'add "read-repos" to pilot.capabilities, then run converge again.');
     }
     // Le Pilote a une session permanente : elle repart si elle manque ou si elle
     // est morte (startSession retire d'abord l'ancien terminal).
@@ -138,6 +146,17 @@ async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined
         notes.push(`NOTE: ${m.name}'s instructions or environment changed, but its running session keeps the old ones. ` +
           "To restart it (the conversation is lost): stop its `agent` terminal in Herdr App (or `hc kill <the Pilot's machine>/agent`), " +
           "then run forge team up again.");
+      }
+    }
+  }
+  // Converger une seule équipe écarte le Pilote (sans équipe) : il lirait pourtant
+  // le dépôt de cette équipe. S'il tourne et déclare read-repos (le clone passe par
+  // un exec), ses montages (idempotents) reçoivent le miroir et le clone de
+  // l'équipe. Jamais créé ni démarré ici.
+  if (team !== undefined) {
+    for (const m of members(cfg)) {
+      if (m.team === null && m.capabilities.includes("read-repos") && existing.get(m.name)?.status === "Running") {
+        await ensureMemberMounts(ctx, cfg, m);
       }
     }
   }
@@ -178,12 +197,12 @@ async function printMembers(ctx: Context, cfg: ForgeConfig, wanted: Member[], te
 const taskLabel = (task: string | null) => task ?? "free";
 
 async function assignCommand(
-  ctx: Context, cfg: ForgeConfig, to: string | undefined, task: string | undefined, stdin: () => Promise<string>,
+  ctx: Context, cfg: ForgeConfig, to: string | undefined, task: string | undefined, from: string | null, stdin: () => Promise<string>,
 ): Promise<number> {
   if (to === undefined) throw new ForgeError(`a container name is required.\n${USAGE}`);
   const text = (await stdin()).trim();
   if (text === "") throw new ForgeError("the instruction is empty: give it on stdin (forge team assign <container> <task> < instruction.md).");
-  await assign(ctx, cfg, { to, task: task ?? null, text, by: "human" });
+  await assign(ctx, cfg, { to, task: task ?? null, from, text, by: "human" });
   ctx.out(`Assigned ${task ?? "a task"} to ${to}.`);
   return 0;
 }

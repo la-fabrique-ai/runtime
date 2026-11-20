@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseConfig } from "../cli/lib/config.ts";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { members, memberNamed, PILOT, REFERENCE_PROMPTS } from "../cli/lib/team.ts";
+import { members, memberNamed, PILOT, REFERENCE_PROMPTS, referenceDir } from "../cli/lib/team.ts";
 
 const cfg = (teams: Record<string, unknown>, pilot: unknown = { talkTo: ["web"] }) =>
   parseConfig("/c.json", {
@@ -59,6 +59,7 @@ test("memberNamed lists the declared names when the name is unknown", () => {
 const REFERENCE = { web: { repo: "o/web", prompts: "reference", roles: {
   lead: { capabilities: ["repo", "read-team", "assign", "ask-human"], talkTo: ["pilot", "team"] },
   dev: { count: 2, capabilities: ["repo", "publish"], talkTo: ["lead"] },
+  reviewer: { capabilities: ["repo", "read-team"], talkTo: ["lead"] },
 } } };
 
 test("the reference team's members take the prompts under teams/reference/prompts, and every file exists", () => {
@@ -68,11 +69,27 @@ test("the reference team's members take the prompts under teams/reference/prompt
     ["agent-web-lead", join(REFERENCE_PROMPTS, "lead.md")],
     ["agent-web-dev-1", join(REFERENCE_PROMPTS, "dev.md")],
     ["agent-web-dev-2", join(REFERENCE_PROMPTS, "dev.md")],
+    ["agent-web-reviewer", join(REFERENCE_PROMPTS, "reviewer.md")],
   ]);
   for (const m of all) assert.ok(existsSync(m.prompt!), m.prompt!);
 });
 
+test("a reference member carries its role's kit; a custom team's member none", () => {
+  const c = cfg(REFERENCE, { talkTo: ["web"], prompt: "reference" });
+  assert.deepEqual(memberNamed(c, "agent-web-dev-1").reference, { skills: ["tdd", "diagnose", "verify-before-report"], agents: ["scout"], memory: false });
+  assert.equal(memberNamed(c, PILOT).reference!.memory, true);
+  assert.equal(memberNamed(cfg(WEB), "agent-web-dev-1").reference, null);
+});
+
+test("every skill and sub-agent a reference role names exists", () => {
+  const roles = JSON.parse(readFileSync(join(referenceDir(), "roles.json"), "utf8")) as Record<string, { skills: string[]; agents: string[] }>;
+  for (const kit of Object.values(roles)) {
+    for (const s of kit.skills) assert.ok(existsSync(join(referenceDir(), "skills", s, "SKILL.md")), s);
+    for (const a of kit.agents) assert.ok(existsSync(join(referenceDir(), "agents", `${a}.md`)), a);
+  }
+});
+
 test("a role with no reference prompt is refused, with the reference roles listed", () => {
-  const web = { web: { ...REFERENCE.web, roles: { ...REFERENCE.web.roles, reviewer: { capabilities: ["repo"] } } } };
-  assert.throws(() => members(cfg(web)), /no reference prompt for role reviewer \(reference roles: dev, lead\)/);
+  const web = { web: { ...REFERENCE.web, roles: { ...REFERENCE.web.roles, qa: { capabilities: ["repo"] } } } };
+  assert.throws(() => members(cfg(web)), /no reference prompt for role qa \(reference roles: dev, lead, reviewer\)/);
 });

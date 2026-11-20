@@ -39,6 +39,12 @@ test("assign forwards the instruction as stdin, with the host's own command and 
   assert.deepEqual(ctx.out_lines, ["Assigned fix-login to agent-web-dev-1."]);
 });
 
+test("assign --from is relayed to the host's command", async () => {
+  const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'assign'", stdout: "Assigned use-login to agent-web-dev-1.\n" }] });
+  await cmdTeamLaptop(ctx, ["assign", "agent-web-dev-1", "use-login"], { stdin: async () => "X", from: "fix-login" });
+  assert.equal(ctx.calls[0].at(-1), "'forge' 'team' 'assign' 'agent-web-dev-1' 'use-login' '--from' 'fix-login'");
+});
+
 test("up checks hc, converges with the agent forwarded, then registers the machines of every declared container", async () => {
   const rows = JSON.stringify({ members: [{ name: "agent-web-lead" }, { name: "agent-web-dev-1" }], inbox: [], mirrors: [] });
   const ctx = fakeContext({ rules: [

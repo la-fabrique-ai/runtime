@@ -51,6 +51,15 @@ test("assign reads the instruction from stdin and gives the task on behalf of th
     "[forge] task fix-login from human\n\nCorrige le login");
 });
 
+test("assign --from starts the task from another task of the same developer; --from goes with assign only", async () => {
+  const { fake, ctx } = setup();
+  const keys = fake.instances.get("agent-forge")!.get("agent-web-dev-1")!.config;
+  keys["user.forge.base.fix-login"] = "origin/main";
+  await cmdTeam(ctx, ["assign", "agent-web-dev-1", "use-login"], { stdin: async () => "Continue\n", from: "fix-login" });
+  assert.equal(keys["user.forge.base.use-login"], "agent/fix-login");
+  await assert.rejects(() => cmdTeam(ctx, ["status"], { from: "fix-login" }), /--from only goes with assign/);
+});
+
 test("an empty instruction is refused before any Incus call", async () => {
   const { ctx } = setup();
   await assert.rejects(() => cmdTeam(ctx, ["assign", "agent-web-dev-1", "fix-login"], { stdin: async () => "  \n" }), /instruction is empty/);
@@ -411,6 +420,20 @@ test("question shows a question's summary and detail without control characters;
   assert.deepEqual(ctx.out_lines.slice(1), ["Quel séparateur ?", "", "Ligne un\nLigne deux[2J"]);
   assert.match(ctx.out_lines[0], /^#7 from agent-web-lead, 2 min ago \(open\)$/);
   await assert.rejects(() => cmdTeam(ctx, ["question", "99"]), /no question 99/);
+});
+
+test("converging one team gives a running read-repos pilot that team's mirror, without touching its session", async () => {
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
+    pilot: { capabilities: ["assign", "read-repos"], talkTo: ["web"] },
+    teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo", "publish"] } } } },
+  }));
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-pilot", { status: "Running" });
+  fake.addInstance("agent-forge", "agent-web-dev-1", { status: "Running" });
+  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "test -d /workspace/depots/", code: 1 }] });
+  await cmdTeam(ctx, ["converge", "web"]);
+  assert.equal(fake.expandedDevices("agent-forge", "agent-pilot")["origin-web"]?.path, "/forge/origins/web.git");
+  assert.ok(!ctx.calls.some((c) => c.join(" ").includes("hc run")), "the pilot's session is left as it is");
 });
 
 const lfsConfig = (lfs: boolean) => writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({

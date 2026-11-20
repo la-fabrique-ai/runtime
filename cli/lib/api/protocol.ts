@@ -10,7 +10,8 @@ export type Op = (typeof OPS)[number];
 
 export type ApiRequest =
   | { op: "message"; to: string; summary: string; body: string | null }
-  | { op: "assign"; to: string; task: string | null; text: string }
+  // `from` : la tâche dont part la nouvelle branche, absente pour origin/main.
+  | { op: "assign"; to: string; task: string | null; from?: string; text: string }
   | { op: "release"; to: string }
   | { op: "ask-human"; summary: string; body: string | null }
   | { op: "status" };
@@ -37,7 +38,7 @@ type Kind = "string" | "optional-string";
 // Les champs exacts de chaque verbe ; `op` est lu à part.
 const FIELDS: Record<Op, Record<string, Kind>> = {
   message: { to: "string", summary: "string", body: "optional-string" },
-  assign: { to: "string", task: "optional-string", text: "string" },
+  assign: { to: "string", task: "optional-string", from: "optional-string", text: "string" },
   release: { to: "string" },
   "ask-human": { summary: "string", body: "optional-string" },
   status: {},
@@ -153,9 +154,11 @@ export function parseRequest(line: string, secrets: readonly string[]): ApiReque
       const to = container("to");
       const task = optional("task");
       if (task !== null) validateTaskName(task);
+      const from = optional("from");
+      if (from !== null) validateTaskName(from);
       const text = str("text");
       checkText(text, INSTRUCTION_MAX, "instruction", secrets);
-      return { op: "assign", to, task, text };
+      return { op: "assign", to, task, ...(from === null ? {} : { from }), text };
     }
     case "release":
       return { op: "release", to: container("to") };
