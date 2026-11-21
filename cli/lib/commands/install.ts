@@ -182,6 +182,7 @@ export async function cmdInstall(ctx: Context, opts: InstallOptions = {}): Promi
     if (inventories) host.deployedInventory = inventories; else delete host.deployedInventory;
     return "done";
   });
+  // 9. Every run: forge's file follows the list of hosts.
   await step("ssh", () => sshConfig(ctx, host), true);
   // 10. The host's account and runtime, over the alias.
   await step("identity", async () => ((await ensureGitIdentity(ctx, host)) === "set" ? "done" : "already there"));
