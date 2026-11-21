@@ -123,7 +123,8 @@ In between it does, in order:
    a free port if that one is taken; workspaces live inside the VM);
 3. writes the inventory, once, to
    `~/.config/agent-forge/hosts/forge-local/inventory.yml` (your edits are
-   kept) and runs the playbook from the checkout;
+   kept: after editing an inventory, run `forge install --host <host>`, which
+   replays the playbook) and runs the playbook from the checkout;
 4. writes the SSH alias `forge-local` to `~/.ssh/config.d/agent-forge.config`,
    a file that is forge's own, with forge's own `known_hosts`
    (`~/.config/agent-forge/known_hosts`);
