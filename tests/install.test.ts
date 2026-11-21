@@ -1143,6 +1143,24 @@ test("the relay's first connection happens while its key is unknown", async () =
   assert.deepEqual(host.done, CLOUD_ALL);
 });
 
+// The case that motivated the fingerprint: the relay's inventory fixed by hand
+// after a failure at the relay step replays both playbooks, then the step.
+test("a resume after a relay failure with the relay's inventory edited since re-runs both playbooks", async () => {
+  const first = cloudLaptop({
+    answers: ["dev", "alice", ...CLOUD_ANSWERS, TRUSTED, 1, TOKEN, BOT_TOKEN, 2, 2],
+    rules: [{ match: "github-token.new", code: 1 }],
+  });
+  await assert.rejects(cmdInstall(first, { checkout: CHECKOUT, cloud: true, sleep: noWait }));
+  assert.deepEqual(loadHosts()[0].done, ["vm", "inventory", "playbook", "ssh", "claude"]);
+  assert.deepEqual(attached(first).filter((a) => a.startsWith("ansible-playbook")), playbooks());
+  appendFileSync(relayInventoryPath("forge-dev"), "# fixed by hand\n");
+  const ctx = cloudLaptop({ rules: [TOKEN_STORED], answers: [BOT_TOKEN, 2, 2] });
+  assert.equal(await cmdInstall(ctx, { checkout: CHECKOUT, host: "forge-dev", sleep: noWait }), 0);
+  assert.deepEqual(attached(ctx).filter((a) => a.startsWith("ansible-playbook")), playbooks());
+  assert.ok(ctx.out_lines.includes("  relay setup: done"), ctx.out_lines.join("\n"));
+  assert.deepEqual(loadHosts()[0].done, CLOUD_ALL);
+});
+
 test("the playbook step runs contributor.yml with the relay link, then relay.yml", async () => {
   const ctx = await newCloud();
   assert.deepEqual(attached(ctx).filter((a) => a.startsWith("ansible-playbook")), playbooks());
