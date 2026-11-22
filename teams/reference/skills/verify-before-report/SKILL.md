@@ -5,7 +5,7 @@ description: "Use before you report a task as done or a review as finished: no c
 
 # Verify before you report
 
-1. Find the checks the repository names: its `CLAUDE.md`, its scripts (`package.json`, a Makefile, CI files).
+1. Find the checks the repository names: its `CLAUDE.md`, its scripts (`package.json`, a Makefile, CI files). Find too how it installs its dependencies (`npm ci`, …): a fresh clone has none, so install them first.
 2. Run them one by one, on the final state of the work (the committed branch, or the checkout under review).
 3. Put each command and its result in your report, in the form `command: result`. A result is what you saw, not what you expect.
 4. Name the checks that cannot run in this container, with the reason (a missing tool, a missing service, no network).

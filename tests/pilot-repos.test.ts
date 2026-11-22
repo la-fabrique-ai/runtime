@@ -41,6 +41,20 @@ const config = (caps: string[]) => parseConfig("/c.json", {
 
 const flat = (ctx: ReturnType<typeof fakeContext>) => ctx.calls.map((c) => c.join(" "));
 
+test("the Pilot's mounts and clones are announced when made, and silent when already there", async () => {
+  const cfg = config(["assign", "read-repos"]);
+  const fake = FakeIncus.withRuntime({ commit: "IMGSHA" });
+  const ctx = fakeContext({ incus: fake, rules: [{ match: "test -d /workspace/depots/", code: 1 }, ...IDENTITY, ...HOOK_BLOCKS] });
+  await provisionMember(ctx, cfg, memberNamed(cfg, "agent-pilot"));
+  for (const team of ["web", "data"]) {
+    assert.ok(ctx.out_lines.includes(`Mounting the ${team} mirror in agent-pilot (read-only)...`), ctx.out_lines.join("\n"));
+    assert.ok(ctx.out_lines.includes(`Cloning o/${team} into agent-pilot:/workspace/depots/${team}...`), ctx.out_lines.join("\n"));
+  }
+  const again = fakeContext({ incus: fake, rules: [...IDENTITY, ...HOOK_BLOCKS] });
+  await ensurePilotRepos(again, cfg, memberNamed(cfg, "agent-pilot"));
+  assert.deepEqual(again.out_lines.filter((l) => l.startsWith("Mounting") || l.startsWith("Cloning")), []);
+});
+
 test("a Pilot with read-repos gets each team's mirror read-only and a clone of it, the mirror fetched first", async () => {
   const cfg = config(["assign", "read-repos"]);
   const fake = FakeIncus.withRuntime({ commit: "IMGSHA" });

@@ -113,7 +113,8 @@ test("pushed files: token, team instructions plus the role prompt, settings with
   assert.equal(file("/home/aiuser/.claude/settings.json")!.uid, "0");
   // Lire le corps d'un message sans demander l'humain, en lecture seule : pas de
   // dossier de travail de plus (additionalDirectories ouvrirait aussi l'écriture).
-  assert.deepEqual(settings.permissions, { allow: ["Read(~/.forge/messages/**)"] });
+  // forge-team sans classifieur : l'API décide qui peut libérer ou écrire à qui.
+  assert.deepEqual(settings.permissions, { allow: ["Read(~/.forge/messages/**)", "Bash(forge-team:*)"] });
   assert.ok(file("/usr/local/bin/forge-agent") && file("/home/aiuser/.claude/hooks/pre-bash.sh") && file("/home/aiuser/.claude.json"));
 });
 
@@ -159,6 +160,7 @@ test("a reference Lead's memory is a host directory, mounted where Claude Code k
   const mkdir = calls.findIndex((c) => c.includes("--user 1001") && c.endsWith("mkdir -p /home/aiuser/.claude/projects/-workspace"));
   const add = calls.findIndex((c) => c.includes("config device add") && c.includes(" memory disk"));
   assert.ok(mkdir >= 0 && add > mkdir, calls.join("\n"));
+  assert.ok(ctx.out_lines.includes(`Mounting agent-web-lead's memory from ${source}...`), ctx.out_lines.join("\n"));
 });
 
 test("a reference developer has no memory: its settings turn it off", async () => {

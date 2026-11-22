@@ -196,9 +196,13 @@ The retros will show whether a guard is worth adding.
 
 Pushed to `/home/aiuser/.claude/agents/`:
 
-- **`scout`** (every role): read-only tools, a cheaper model
-  (`model: haiku`), answers a precise question with at most ~30 lines:
-  where things are, how they connect, with `path:line`.
+- **`scout`** (every role): a cheaper model (`model: haiku`), answers a
+  precise question with at most ~30 lines: where things are, how they
+  connect, with `path:line`. Read, Grep, Glob and Bash, with read commands
+  only (`ls`, `find`, `git log`, `git show`, `git blame`, `git grep`): without
+  Bash it could neither list a folder nor read the history, which the Pilot
+  needs to design (the #179 recette). Read-only is an instruction, as for
+  `branch-reviewer`: a sub-agent has its parent's rights, under the same hook.
 - **`branch-reviewer`** (Reviewer; the Lead only when its team has no
   Reviewer): read-only, reads one branch against `origin/main`, or the
   commits since a given one, along one axis (conformance to the instruction,
@@ -270,8 +274,13 @@ in the flow, whom it reports to, which skill to use when. Changes:
   client's other repositories) by a message whose summary starts with
   `Question :`, and the human through `forge-team ask`; it reports once, with
   a summary starting with `Rapport :`, the only message the Pilot releases it
-  on. The Reviewer reviews a stacked task against `team/agent/<A>`, so only its
-  own commits (maintainer's review of #179).
+  on; a blocker goes as a `Question :`, never as a `Rapport :`. The Reviewer
+  reviews a stacked task against `team/agent/<A>`, so only its own commits
+  (maintainer's review of #179). A fix or a follow-up on an unshipped branch
+  goes back to its developer under the same task name: `release` keeps the
+  branch and its owner, and the new `assign` resumes it (`container/CLAUDE.md`
+  says so since the #179 recette; forge refuses the `assign` over uncommitted
+  changes).
 - **Common instructions**: the release rule of `container/CLAUDE.md` ("relire,
   c'est `git fetch team` puis lire la branche") gains: for a Lead with a
   Reviewer, the Reviewer's report is the review.
@@ -360,6 +369,48 @@ own session, nothing else (no capability needed, no target).
   session per task).
 - The human gets the same through `forge team restart <container>`, with no
   capability check, like `assign` and `release`.
+
+### 5.10 What the #179 recette adds for part 2
+
+The recette ran a real request on agent-forge (#174, shipped as
+la-fabrique-ai/runtime#180) on a 4 GB host, then stopped the host in the
+middle of a follow-up and resized it.
+
+- **The Lead does not grow.** It gets each request as a task without a branch,
+  and the release ends its session: every request starts from a fresh Lead.
+  Measured on #174: 46k tokens of context at the first call, 62k at the last
+  (16 calls, 47 minutes); the fixed part (tools, instructions, skills) is three
+  quarters of it. The restart matters for a long request and for the Pilot,
+  whose session never ends.
+- **A host restart leaves tasks held by dead sessions.** After the restart,
+  `forge team status` showed the Lead and the Reviewer `lost`, the developer
+  `exited`, all three still holding their task, and the Pilot `idle`, waiting
+  on the Lead. forge has the signal; nothing uses it. Resuming took two human
+  steps: Claude Code's auto mode refused the Pilot's `forge-team release` as
+  destructive, and the new Lead would not release the developer before knowing
+  that `release` keeps the branch (it does; now in `container/CLAUDE.md`).
+- **The Pilot was blind.** Its `forge-team status` lists only the agents it
+  talks to (the Lead), and its depots are clones of the origin mirror, where
+  an unshipped branch does not exist: it concluded the work was lost and
+  proposed to "recreate the branch from main". It was not lost (4 commits,
+  then a fifth).
+- **Proposal: forge resumes, from facts.** At `forge team up`, every held task
+  whose session is `lost` or `exited` restarts in a fresh session, on its
+  branch, with a first line from forge: the task resumed after the host
+  restarted, its original instruction, the messages received since. The API
+  journal (`cli/lib/api/journal.ts`, append-only: every `assign` with its
+  instruction, every message, release, question and answer) is that source,
+  not the agent's notes alone. The same rebrief serves `forge-team restart`.
+- **`forge-team history`**: an agent's own lines of the journal (where it is
+  the caller or the target), with the state of the tasks it assigned (session,
+  branch, commits). It keeps today's access model: each agent reads only its
+  own exchanges. Whether the Pilot gets a whole-team view, perhaps without
+  message bodies, is a change of that model and the maintainer's call.
+- **`forge-team` commands are allowed outright** in the agents' settings
+  (`Bash(forge-team:*)` in `container/settings.json`, validated by the
+  maintainer on 2026-11-22 and shipped in #179): the API already enforces who
+  may release or message whom, and a classifier refusing a release blocks the
+  whole protocol. The hook still sees every command.
 
 ## 6. Constraints
 

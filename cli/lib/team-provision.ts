@@ -210,6 +210,7 @@ async function ensureMemory(ctx: Context, m: Member): Promise<void> {
   const source = join(memoriesDir(), m.name);
   mkdirSync(source, { recursive: true });
   if ((await deviceNames(ctx, m.name)).includes(MEMORY_DEVICE)) return;
+  ctx.out(`Mounting ${m.name}'s memory from ${source}...`);
   await mustSucceed("create the memory parent",
     execAsAgentArgv(ctx, m.name, ["mkdir", "-p", dirname(MEMORY_PATH)]));
   await mustSucceed("mount the memory", ctx.exec(incus("config", "device", "add", m.name,
