@@ -147,8 +147,8 @@ What step 3 writes and replays, under `~/.config/agent-forge/hosts/<name>/`
 
 | What forge install changes | Written | Your edits | Replayed |
 |---|---|---|---|
-| `inventory.yml`, the host's inventory | Once, at the first install | Kept | The playbook runs again when the file changed since the last deployment |
-| `relay-inventory.yml`, the relay's inventory (a cloud host has a relay) | Once, at the first install | Kept | The relay's playbook runs again when the file changed since its last deployment, including after a run that failed at the relay step |
+| `inventory.yml`, the host's inventory | Once, at the first install | Kept | The playbook runs again on every `forge install` of a finished host, and on a resume after a failure when either inventory changed since the last deployment (for a cloud host, the playbooks of the host and of its relay) |
+| `relay-inventory.yml`, the relay's inventory (a cloud host has a relay) | Once, at the first install | Kept | Same as the host's inventory: the playbooks (the relay's too) run again, whichever of the two files you edited, including after a run that failed at the relay step |
 
 After editing an inventory, run `forge install` again (`forge install --host
 <name>` for a remote host).
