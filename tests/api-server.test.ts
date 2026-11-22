@@ -80,6 +80,36 @@ test("a line that never ends is refused at the cap, and the connection closes", 
   assert.equal(out, '{"ok":false,"error":"request too long"}\n');
 });
 
+// Le serveur du beforeEach s'arrête ; un autre prend sa place, au délai de ligne
+// court et aux appels lents (un `assign` sur un hôte chargé dépasse ce délai).
+async function restartSlow(lineTimeoutMs: number, execDelayMs: number): Promise<void> {
+  stop.abort();
+  await served;
+  const fake = FakeIncus.withRuntime();
+  for (const n of NAMES) fake.addInstance("agent-forge", n, { status: "Running" });
+  const base = fakeContext({ incus: fake });
+  const ctx = { ...base, exec: async (...args: Parameters<typeof base.exec>) => {
+    await new Promise((r) => setTimeout(r, execDelayMs));
+    return base.exec(...args);
+  } };
+  stop = new AbortController();
+  served = serveApi({
+    ctx, cfg, journal: Journal.open(join(root, "slow.jsonl")), secrets: [], now: () => new Date(), lineTimeoutMs,
+  }, stop.signal);
+  for (let i = 0; i < 100 && !existsSync(hostSocketPath(NAMES.at(-1)!)); i++) await new Promise((r) => setTimeout(r, 10));
+}
+
+test("a request slower than the line timeout still gets its answer", async () => {
+  await restartSlow(100, 300);
+  const out = await talk("agent-web-dev-1", '{"op":"status"}\n');
+  assert.equal((JSON.parse(out) as { ok: boolean }).ok, true, out);
+});
+
+test("a line still unfinished at the line timeout is cut", async () => {
+  await restartSlow(100, 0);
+  assert.equal(await talk("agent-web-dev-1", '{"op":"status"'), "");
+});
+
 test("a socket path over the Unix limit is refused", () => {
   process.env.FORGE_API_RUNTIME = "/run/user/1000/" + "d".repeat(35);
   assert.throws(() => hostSocketPath("agent-" + "x".repeat(56)), /longer than 107 bytes/);

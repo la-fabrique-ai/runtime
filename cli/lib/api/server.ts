@@ -16,6 +16,9 @@ const SOCKET_PATH_MAX = 107;
 // Une connexion qui n'a pas fini sa ligne en 10 s est coupée.
 const LINE_TIMEOUT_MS = 10_000;
 
+// `lineTimeoutMs` : pour les tests, qui n'attendent pas 10 s.
+export type ServeDeps = ApiDeps & { lineTimeoutMs?: number };
+
 // Un membre qui parle à d'autres, confie des tâches ou questionne l'humain.
 export function needsApi(m: Member): boolean {
   return m.talkTo.length > 0 || m.capabilities.includes("assign") || m.capabilities.includes("ask-human");
@@ -33,10 +36,10 @@ export function hostSocketPath(container: string): string {
 const reply = (socket: Socket, r: unknown) => socket.end(`${JSON.stringify(r)}\n`);
 
 // Une requête par connexion : la première ligne, la réponse, puis la fermeture.
-function onConnection(d: ApiDeps, caller: Member, socket: Socket): void {
+function onConnection(d: ServeDeps, caller: Member, socket: Socket): void {
   const chunks: Buffer[] = [];
   let size = 0;
-  socket.setTimeout(LINE_TIMEOUT_MS, () => socket.destroy());
+  socket.setTimeout(d.lineTimeoutMs ?? LINE_TIMEOUT_MS, () => socket.destroy());
   socket.on("error", () => socket.destroy());
   const onData = (chunk: Buffer) => {
     chunks.push(chunk);
@@ -46,6 +49,10 @@ function onConnection(d: ApiDeps, caller: Member, socket: Socket): void {
     if (eol < 0 && size <= REQUEST_MAX) return;
     socket.off("data", onData);
     socket.pause();
+    // La ligne est lue : le délai ne vaut plus. Armé, il couperait une demande
+    // plus lente que lui (un `assign` sur un hôte chargé) qui aboutirait quand
+    // même, sa réponse perdue : l'agent la croirait échouée et la referait.
+    socket.setTimeout(0);
     if (eol < 0 || eol > REQUEST_MAX) return reply(socket, { ok: false, error: "request too long" });
     handleRequest(d, caller, all.subarray(0, eol).toString("utf8")).then(
       (r) => reply(socket, r),
@@ -58,7 +65,7 @@ function onConnection(d: ApiDeps, caller: Member, socket: Socket): void {
 }
 
 // Résout quand chaque socket est fermée (le signal), leurs fichiers retirés.
-export async function serveApi(d: ApiDeps, signal: AbortSignal): Promise<void> {
+export async function serveApi(d: ServeDeps, signal: AbortSignal): Promise<void> {
   const dir = apiRuntimeDir();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
