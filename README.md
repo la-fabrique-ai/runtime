@@ -121,9 +121,8 @@ In between it does, in order:
 2. creates and starts the Lima VM from `ansible/lima/forge.yaml` (plain mode:
    no shared folder, no port forwarding besides SSH on `127.0.0.1:60022`, or
    a free port if that one is taken; workspaces live inside the VM);
-3. writes the inventory, once, to
-   `~/.config/agent-forge/hosts/forge-local/inventory.yml` (your edits are
-   kept) and runs the playbook from the checkout;
+3. writes the host's inventory, once, and runs the playbook from the checkout
+   (see the table below);
 4. writes the SSH alias `forge-local` to `~/.ssh/config.d/agent-forge.config`,
    a file that is forge's own, with forge's own `known_hosts`
    (`~/.config/agent-forge/known_hosts`);
@@ -142,6 +141,17 @@ In between it does, in order:
    ships, copies it so that the forge bar can anchor there (see
    [the forge mod](#see-the-team-answer-its-questions));
 10. prints a summary and opens herdr (the TUI).
+
+What step 3 writes and replays, under `~/.config/agent-forge/hosts/<name>/`
+(`<name>` is `forge-local` for the local VM):
+
+| What forge install changes | Written | Your edits | Replayed |
+|---|---|---|---|
+| `inventory.yml`, the host's inventory | Once, at the first install | Kept | The playbook runs again when the file changed since the last deployment |
+| `relay-inventory.yml`, the relay's inventory (a cloud host has a relay) | Once, at the first install | Kept | The relay's playbook runs again when the file changed since its last deployment, including after a run that failed at the relay step |
+
+After editing an inventory, run `forge install` again (`forge install --host
+<name>` for a remote host).
 
 A run that fails stops with the step to fix; run `forge install` again and it
 resumes. `forge install` refuses a `forge-local` Lima VM or a `Host` entry it
