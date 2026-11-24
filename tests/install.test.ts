@@ -170,6 +170,7 @@ test("a first local install runs every step in order and ends in herdr", async (
   assert.deepEqual(h, {
     name: "forge-local", kind: "lima", address: "127.0.0.1", port: 60022, user: "forge", admin: "alice",
     adminKey: join(home, ".lima/_config/user"), exposure: "local", done: ALL, deployed: HEAD,
+    deployedInventory: createHash("sha256").update(readFileSync(inventoryPath("forge-local"))).update("\0").digest("hex"),
   });
   assert.equal(readFileSync(forgeKeyPath("forge-local"), "utf8"), `${KEY}\n`);
   assert.equal(statSync(forgeKeyPath("forge-local")).mode & 0o777, 0o644);
@@ -333,6 +334,35 @@ test("a resume after a setup failure with the same checkout skips the playbook",
     "ssh -o ForwardAgent=no -t forge-local -- 'forge' 'image' 'build'",
     HERDR_LOCAL.join(" "),
   ]);
+});
+
+const replayed = (): string[] => [
+  `ansible-galaxy collection install -r ${CHECKOUT}/ansible/requirements.yml -p ${join(home, ".local/share/agent-forge/collections")}`,
+  `ansible-playbook -i ${inventoryPath("forge-local")} ${CHECKOUT}/ansible/site.yml`,
+  "ssh -o ForwardAgent=no forge-local -- 'forge' 'setup'",
+  "ssh -o ForwardAgent=no -t forge-local -- 'forge' 'image' 'build'",
+  HERDR_LOCAL.join(" "),
+];
+
+test("a resume after a setup failure with an inventory edited since re-runs the playbook", async () => {
+  const world: World = { vm: null };
+  await failedAtSetup(world);
+  appendFileSync(inventoryPath("forge-local"), "# fixed by hand\n");
+  const ctx = laptop(world);
+  assert.equal(await cmdInstall(ctx, OPTS), 0);
+  assert.deepEqual(attached(ctx), replayed());
+});
+
+test("a state recorded before the inventory fingerprint deploys once more", async () => {
+  const world: World = { vm: null };
+  await failedAtSetup(world);
+  const [h] = loadHosts();
+  delete h.deployedInventory;
+  saveHost(h);
+  const ctx = laptop(world);
+  assert.equal(await cmdInstall(ctx, OPTS), 0);
+  assert.deepEqual(attached(ctx), replayed());
+  assert.ok(loadHosts()[0].deployedInventory);
 });
 
 test("a resume after a setup failure with a new checkout commit re-runs playbook, setup and image", async () => {
@@ -1111,6 +1141,24 @@ test("the relay's first connection happens while its key is unknown", async () =
   const host = loadHosts()[0];
   assert.equal(host.relayAddress, "203.0.113.21");
   assert.deepEqual(host.done, CLOUD_ALL);
+});
+
+// The case that motivated the fingerprint: the relay's inventory fixed by hand
+// after a failure at the relay step replays both playbooks, then the step.
+test("a resume after a relay failure with the relay's inventory edited since re-runs both playbooks", async () => {
+  const first = cloudLaptop({
+    answers: ["dev", "alice", ...CLOUD_ANSWERS, TRUSTED, 1, TOKEN, BOT_TOKEN, 2, 2],
+    rules: [{ match: "github-token.new", code: 1 }],
+  });
+  await assert.rejects(cmdInstall(first, { checkout: CHECKOUT, cloud: true, sleep: noWait }));
+  assert.deepEqual(loadHosts()[0].done, ["vm", "inventory", "playbook", "ssh", "claude"]);
+  assert.deepEqual(attached(first).filter((a) => a.startsWith("ansible-playbook")), playbooks());
+  appendFileSync(relayInventoryPath("forge-dev"), "# fixed by hand\n");
+  const ctx = cloudLaptop({ rules: [TOKEN_STORED], answers: [BOT_TOKEN, 2, 2] });
+  assert.equal(await cmdInstall(ctx, { checkout: CHECKOUT, host: "forge-dev", sleep: noWait }), 0);
+  assert.deepEqual(attached(ctx).filter((a) => a.startsWith("ansible-playbook")), playbooks());
+  assert.ok(ctx.out_lines.includes("  relay setup: done"), ctx.out_lines.join("\n"));
+  assert.deepEqual(loadHosts()[0].done, CLOUD_ALL);
 });
 
 test("the playbook step runs contributor.yml with the relay link, then relay.yml", async () => {
