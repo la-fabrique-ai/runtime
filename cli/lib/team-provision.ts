@@ -5,14 +5,14 @@
 // ses marqueurs `user.forge.*` et ses plugins. Le container a son propre hc
 // (dans l'image) : forge n'y lance une session qu'à l'assignation d'une tâche.
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Context } from "./context.ts";
 import { ForgeError, mustSucceed } from "./context.ts";
 import type { ForgeConfig } from "./config.ts";
 import {
   BASE_IMAGE, latestImageCommit, PROVISIONING_KEY, PROVISIONING_WORKSPACE_KEY,
 } from "./containers.ts";
-import { configSet, configUnset, execAsAgent, execAsAgentArgv, forgeProject, incus, pullText, pushText, waitReady } from "./incus.ts";
+import { configSet, configUnset, deviceNames, execAsAgent, execAsAgentArgv, forgeProject, incus, pullText, pushText, waitReady } from "./incus.ts";
 import {
   cloneWorkspace, ensureMirror, ensureTeamMirror, fetchMirrorLfs, MIRROR_MOUNT, mirrorRepo, ORIGIN_DEVICE, pointOriginAtMirror,
   originMirrorPath, requireMirrorOf, TEAM_DEVICE, TEAM_MOUNT, teamMirrorPath,
@@ -22,11 +22,13 @@ import {
   requireClaudeToken, requireHookBlocks, requireHostLfs, requireRuntime, workspaceIsReusable,
 } from "./commands/provision.ts";
 import { egressNames, PROFILE } from "./objects.ts";
-import { repoRoot, workspacesDir } from "./paths.ts";
+import { memoriesDir, repoRoot, workspacesDir } from "./paths.ts";
 import { applyStrictSettings, requireStrictRuntime, strictLaunchArgs } from "./strict.ts";
 import type { Member } from "./team.ts";
 import { CONTAINER_ENV_PATH, readEnvFile } from "./dotenv.ts";
 import { ensureApiAccess } from "./api/access.ts";
+import { ensurePilotRepos } from "./pilot-repos.ts";
+import { installReferenceKit } from "./reference-kit.ts";
 
 const MODE = "supervised";
 const CLAUDE_MD = "/home/aiuser/.claude/CLAUDE.md";
@@ -112,6 +114,7 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   }
   await mustSucceed("mount workspace", ctx.exec(incus("config", "device", "add", m.name, "workspace", "disk",
     `source=${workspaceDir}`, "path=/workspace")));
+  await ensureMemberMounts(ctx, cfg, m);
 
   if (origin !== null) {
     if (reuseWorkspace) {
@@ -186,6 +189,34 @@ export async function provisionMember(ctx: Context, cfg: ForgeConfig, m: Member)
   ctx.out(`Container ${m.name} provisioned.`);
 }
 
+// Les montages et clones qui dépendent de la config d'un membre et qui s'ajoutent
+// après sa création : `provisionMember` l'appelle pour un container neuf,
+// `converge` pour un container déjà là.
+export async function ensureMemberMounts(ctx: Context, cfg: ForgeConfig, m: Member): Promise<void> {
+  await ensurePilotRepos(ctx, cfg, m);
+  await ensureMemory(ctx, m);
+}
+
+// Où Claude Code garde sa mémoire automatique dans le container.
+export const MEMORY_PATH = "/home/aiuser/.claude/projects/-workspace/memory";
+export const MEMORY_DEVICE = "memory";
+
+// Le Pilote et le Lead de référence ont une mémoire sur l'hôte, qui survit au
+// container. Incus crée en root le parent manquant du chemin d'un device : on crée
+// d'abord le dossier du projet en aiuser, sinon Claude Code ne pourrait plus y
+// écrire ses transcripts.
+async function ensureMemory(ctx: Context, m: Member): Promise<void> {
+  if (m.reference?.memory !== true) return;
+  const source = join(memoriesDir(), m.name);
+  mkdirSync(source, { recursive: true });
+  if ((await deviceNames(ctx, m.name)).includes(MEMORY_DEVICE)) return;
+  ctx.out(`Mounting ${m.name}'s memory from ${source}...`);
+  await mustSucceed("create the memory parent",
+    execAsAgentArgv(ctx, m.name, ["mkdir", "-p", dirname(MEMORY_PATH)]));
+  await mustSucceed("mount the memory", ctx.exec(incus("config", "device", "add", m.name,
+    MEMORY_DEVICE, "disk", `source=${source}`, `path=${MEMORY_PATH}`)));
+}
+
 // Ce que forge pose dans un membre et qu'une mise à jour de forge ou du prompt
 // d'un rôle change : les instructions (avec le prompt du rôle), le lanceur, le
 // canal d'API et forge-team, le hook et les réglages. `provisionMember` l'appelle
@@ -195,7 +226,7 @@ export async function installMemberFiles(ctx: Context, m: Member): Promise<{ ins
   ctx.out("Installing Claude team instructions...");
   const rolePrompt = m.prompt === null ? "" : readPrompt(m);
   const instructions = readFileSync(join(repoRoot(), "container", "CLAUDE.md"), "utf8");
-  const text = rolePrompt === "" ? instructions : `${instructions}\n${rolePrompt}`;
+  const text = [instructions, rolePrompt, designsNote(m)].filter((p) => p !== "").join("\n");
   // Le .env du rôle, lu et vérifié avant que quoi que ce soit soit poussé.
   const env = m.env === null ? null : readEnvFile(m.env);
   const before = await pullText(ctx, m.name, CLAUDE_MD);
@@ -215,7 +246,26 @@ export async function installMemberFiles(ctx: Context, m: Member): Promise<{ ins
   await mustSucceed("push Claude settings",
     pushText(ctx, m.name, "/home/aiuser/.claude/settings.json", settingsFor(m), { uid: 0, gid: 0, mode: "644" }));
   await requireHookBlocks(ctx, m.name);
-  return { instructionsChanged: before !== text || envChanged };
+  const kitChanged = await installReferenceKit(ctx, m);
+  return { instructionsChanged: before !== text || envChanged || kitChanged };
+}
+
+// Où le dépôt de l'équipe versionne ses designs (teams.<équipe>.designs), à la
+// fin des instructions : un membre lit celui de son équipe, le Pilote celui de
+// chaque équipe. Sans la clé, rien : les designs restent chez le Pilote.
+function designsNote(m: Member): string {
+  const entries = Object.entries(m.designs);
+  if (entries.length === 0) return "";
+  if (m.team !== null) {
+    return "## Designs de l'équipe\n" +
+      `Le dépôt versionne ses designs sous \`${entries[0][1]}\` : la première sous-tâche d'une demande y commite ` +
+      "le design du Pilote. Ceux qui y sont déjà donnent le contexte des demandes passées.\n";
+  }
+  return "## Designs des équipes\n" +
+    "Ces dépôts versionnent leurs designs, et la première sous-tâche d'une demande y commite le tien. " +
+    "Avant d'écrire un design, relis ceux qui touchent la demande " +
+    "(sous `/workspace/depots/<équipe>/<chemin>`, si tu as `read-repos`) :\n" +
+    entries.map(([team, path]) => `- \`${team}\` : \`${path}\`\n`).join("");
 }
 
 // Le .env du rôle : poussé (uid 1001, mode 600) quand le membre en a un, retiré
@@ -236,6 +286,8 @@ async function installEnv(ctx: Context, m: Member, env: string | null): Promise<
 function settingsFor(m: Member): string {
   const base = JSON.parse(readFileSync(join(repoRoot(), "container", "settings.json"), "utf8")) as Record<string, unknown>;
   if (m.plugins.length > 0) base.enabledPlugins = Object.fromEntries(m.plugins.map((p) => [p, true]));
+  // Les développeurs et le Reviewer de référence n'ont pas de mémoire.
+  if (m.reference?.memory === false) base.autoMemoryEnabled = false;
   return `${JSON.stringify(base, null, 2)}\n`;
 }
 

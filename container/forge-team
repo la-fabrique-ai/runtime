@@ -5,7 +5,8 @@
 // par ce que ce script dit. Aucune dépendance.
 //
 //   forge-team message <container> <résumé>     le corps : stdin, s'il n'est pas un terminal et pas vide
-//   forge-team assign <container> [<tâche>]     la consigne : stdin
+//   forge-team assign <container> [<tâche>] [--from <tâche>]
+//                                               la consigne : stdin ; --from part de la branche d'une autre tâche
 //   forge-team release <container>
 //   forge-team ask <résumé>                     une question pour l'humain ; le corps comme pour message
 //   forge-team status
@@ -17,7 +18,7 @@ const net = require("node:net");
 
 const SOCKET = process.env.FORGE_API_SOCKET || "/var/lib/forge/api.sock";
 const USAGE = `usage: forge-team message <container> <summary>   (the body, if any, on stdin)
-       forge-team assign <container> [<task>]    (the instruction on stdin)
+       forge-team assign <container> [<task>] [--from <task>]   (the instruction on stdin)
        forge-team release <container>
        forge-team ask <summary>                  (the body, if any, on stdin)
        forge-team status`;
@@ -51,10 +52,18 @@ async function request() {
       arity(2, 2);
       return { op: "message", to: args[0], summary: args[1], ...(await optionalBody()) };
     case "assign": {
+      // `--from <tâche>` : la nouvelle branche part de celle d'une autre tâche du même développeur.
+      let from;
+      const at = args.indexOf("--from");
+      if (at !== -1) {
+        from = args[at + 1];
+        if (from === undefined || from.startsWith("-")) usage("--from takes a task name");
+        args.splice(at, 2);
+      }
       arity(1, 2);
       const text = await stdinText();
       if (text.trim() === "") usage("assign reads the instruction from stdin");
-      return { op: "assign", to: args[0], ...(args[1] === undefined ? {} : { task: args[1] }), text };
+      return { op: "assign", to: args[0], ...(args[1] === undefined ? {} : { task: args[1] }), ...(from === undefined ? {} : { from }), text };
     }
     case "release":
       arity(1, 1);

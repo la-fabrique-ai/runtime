@@ -243,19 +243,20 @@ Lima and Ansible, which may use them for other things.
 
 A team lives in the host's `~/.config/agent-forge/config.json`, next to the
 settings of [Configuration](#configuration): a repository and its roles. forge
-ships a small reference team, a pilot, a lead and two developers on one
+ships a small reference team, a pilot, a lead, two developers and a reviewer on one
 repository, whose role prompts are in `teams/reference/prompts`:
 
 ```json
 {
-  "pilot": { "memory": "1GiB", "prompt": "reference", "capabilities": ["assign"], "talkTo": ["web"] },
+  "pilot": { "memory": "1GiB", "prompt": "reference", "capabilities": ["assign", "read-repos"], "talkTo": ["web"] },
   "teams": {
     "web": {
       "repo": "acme/widgets",
       "prompts": "reference",
       "roles": {
         "lead": { "memory": "1GiB", "capabilities": ["repo", "read-team", "assign", "ask-human"], "talkTo": ["pilot", "team"] },
-        "dev": { "count": 2, "memory": "2GiB", "capabilities": ["repo", "publish"], "talkTo": ["lead"] }
+        "dev": { "count": 2, "memory": "2GiB", "capabilities": ["repo", "publish"], "talkTo": ["lead"] },
+        "reviewer": { "memory": "1GiB", "capabilities": ["repo", "read-team"], "talkTo": ["lead"] }
       }
     }
   }
@@ -263,15 +264,33 @@ repository, whose role prompts are in `teams/reference/prompts`:
 ```
 
 `"prompts": "reference"` and the pilot's `"prompt": "reference"` are opt-in:
-without them nothing changes. The reference roles are `lead` and `dev` (and the
+without them nothing changes. The reference roles are `lead`, `dev` and `reviewer` (and the
 pilot); any other role name is refused at `converge` with that list. To compose
 your own team, point `prompts` at a directory of `<role>.md` files, with the
 roles you want.
 
-That is four containers: `agent-pilot`, `agent-web-lead`, `agent-web-dev-1` and
-`agent-web-dev-2`. Every role has a `memory` because a role without one gets the
+In the reference team the pilot reads every team's repository, read-only
+(`read-repos`: clones under `/workspace/depots/<team>`), and designs a request
+with the human before handing it to a lead. It links the repositories, which
+is how it designs a feature that spans several of them, and its memory spans
+them too: one host serves one client, never put two clients' repositories on
+the same host. The lead splits it, has the
+reviewer read each developer's branch, and releases the developer when the
+reviewer finds nothing blocking. A team without a `reviewer` role still works:
+its lead reviews with a sub-agent itself. Each reference member also gets
+skills and sub-agents in its container, in `~/.claude/skills` and
+`~/.claude/agents`; forge owns these directories and replaces their content whenever the
+reference kit changes, so skills you add there by hand are lost at that point. The pilot's and the leads'
+memories live on the host, under `~/memories/<container>` (in the forge user's
+home), so they survive a container's recreation; developers and the reviewer
+keep none. On an existing reference pilot or lead, the container-local memory
+is hidden under that mount (not deleted), and an existing pilot's `~/notes.md`
+is no longer read: its prompt tells it to move the content to `/workspace/notes.md`.
+
+That is five containers: `agent-pilot`, `agent-web-lead`, `agent-web-dev-1`,
+`agent-web-dev-2` and `agent-web-reviewer`. Every role has a `memory` because a role without one gets the
 profile's 75% of the host's memory, and a few of those add up to more than the
-host has: these 6 GiB fit a VM of 8 GiB minus what the host keeps for itself
+host has: these 7 GiB fit a VM of 8 GiB minus what the host keeps for itself
 (640 MiB by default), and `forge team converge` warns when a team does not.
 Create them from your machine:
 
@@ -295,6 +314,8 @@ A role's **capabilities** decide what its containers get:
   mirror of it as `origin`;
 - `publish`: the agent works on branches `agent/<task>`, which `forge fetch`
   brings to your machine;
+- `read-repos` (the pilot only): every team's repository, read-only, cloned
+  under `/workspace/depots/<team>`; no branch leaves it;
 - `read-team`: a read-only remote `team` with the branches of the developers,
   to read and compare;
 - `assign`, `ask-human`: what the agent may ask of the team through
@@ -309,7 +330,11 @@ Other role settings: `count`, `talkTo`, `strict` (the container's egress is
 role with `repo`: the container reads the repository's Git LFS files, see
 [Large files](#rules-for-getting-work-back)). A team also takes
 `prompts` (a directory of `<role>.md` files appended to each role's
-instructions) and `gitIdentity` (the commits' identity, the host's otherwise).
+instructions), `gitIdentity` (the commits' identity, the host's otherwise) and
+`designs` (a folder of the repository, such as `docs/designs`, where the first
+sub-task of a request commits the Pilot's design; forge tells the team and the
+Pilot, who reads the earlier ones for context. Without it, designs stay with
+the Pilot).
 
 #### A role has its own `.env`
 
@@ -344,6 +369,13 @@ EOF
 forge team status          # each agent's task, session and wait, the Inbox, the mirror's age (--json for a program)
 forge team release agent-web-dev-1
 ```
+
+A task that needs another one's code starts from its branch rather than from
+`origin/main`: `forge team assign agent-web-dev-1 use-login --from fix-login`
+(an agent with `assign` does the same with `forge-team`). The target must be
+the developer who has `fix-login`, since the branch comes from its clone;
+`use-login` is then a stacked task, which `forge ship` delivers as a pull
+request on `agent/fix-login`.
 
 #### See the team, answer its questions
 
@@ -527,7 +559,7 @@ link):
 | `forge install [--remote <address>] [--host <name>]` | Install or update a host: the local VM by default, a new remote VM with `--remote`, an installed host with `--host` |
 | `forge open [--host <name>]` | Open the herdr TUI on a host |
 | `forge team up [<team>] [--host <name>]` | Converge the teams on the host (with your SSH agent forwarded), then add each container as a Herdr App machine |
-| `forge team assign <container> [<task>]`, `release <container>`, `status [--json] [--quick]`, `sync <team>` | The same commands as on the host, over SSH; `assign` reads the instruction on stdin |
+| `forge team assign <container> [<task>] [--from <task>]`, `release <container>`, `status [--json] [--quick]`, `sync <team>` | The same commands as on the host, over SSH; `assign` reads the instruction on stdin |
 | `forge team watch [--host <name>]` | The team, its Inbox and the mirror's age, redrawn every 5 s |
 | `forge answer <id> "<summary>" [--host <name>]` | Answer an agent's question; a body piped on stdin goes to a file the agent reads |
 | `forge fetch [--host <name>]` | In your clone: fetch the developers' branches from the team mirror and list the tasks (needs no `gh`) |
@@ -567,7 +599,7 @@ Ansible installs and `forge team converge` restarts.
 | Command | What it does |
 |---|---|
 | `forge-team message <container> "<summary>"` | Send a message to a container of the agent's `talkTo`; the body, if any, on stdin |
-| `forge-team assign <container> [<task>]` | Give a task, the instruction on stdin; the agent needs `assign`, and the same rules as `forge team assign` apply (free target, owned task) |
+| `forge-team assign <container> [<task>] [--from <task>]` | Give a task, the instruction on stdin (`--from`: its branch starts from another task of the same developer); the agent needs `assign`, and the same rules as `forge team assign` apply (free target, owned task) |
 | `forge-team release <container>` | Free an agent: only the one that gave the task (or you) can |
 | `forge-team ask "<summary>"` | A question for you, the detail on stdin; the agent needs `ask-human` |
 | `forge-team status` | The agents it may talk to: task, session state, and what each waits on |

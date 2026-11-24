@@ -72,6 +72,14 @@ test("assign sends the task and the instruction; ask is ask-human", async () => 
   assert.equal(received[2], '{"op":"release","to":"agent-web-dev-1"}');
 });
 
+test("assign --from sends the base task; --from without its value is a usage error", async () => {
+  await run(["assign", "agent-web-dev-1", "use-login", "--from", "fix-login"], "Continue");
+  assert.equal(received[0], '{"op":"assign","to":"agent-web-dev-1","task":"use-login","from":"fix-login","text":"Continue"}');
+  const r = await run(["assign", "agent-web-dev-1", "use-login", "--from"], "Continue");
+  assert.equal(r.code, 64);
+  assert.equal(received.length, 1);
+});
+
 test("status prints one line per row", async () => {
   answer = '{"ok":true,"you":{"name":"agent-web-lead","role":"lead","capabilities":["repo","assign"],"talkTo":["agent-web-dev-1"]},"team":[{"name":"agent-web-dev-1","role":"dev","publishes":true,"busy":true,"assignedByYou":true,"task":"fix-login","session":"idle","waitingOn":"agent-web-lead"}]}';
   const r = await run(["status"], "");

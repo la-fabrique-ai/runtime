@@ -103,7 +103,7 @@ async function run(d: ApiDeps, caller: Member, req: ApiRequest, reserve: (id: nu
     case "assign":
       needCapability("assign");
       mayTalkTo(req.to);
-      await exclusive(() => assign(ctx, cfg, { to: req.to, task: req.task, text: req.text, by: caller.name }));
+      await exclusive(() => assign(ctx, cfg, { to: req.to, task: req.task, from: req.from ?? null, text: req.text, by: caller.name }));
       return { reply: (id) => ({ ok: true, id }) };
     case "release":
       await exclusive(() => release(ctx, cfg, { to: req.to, by: caller.name }));

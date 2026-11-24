@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
@@ -19,10 +19,11 @@ beforeEach(() => {
   process.env.FORGE_REPO_DIR = process.cwd();
   process.env.FORGE_WORKSPACES = join(home, "workspaces");
   process.env.FORGE_MIRRORS = join(home, "mirrors");
+  process.env.FORGE_MEMORIES = join(home, "memories");
 });
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });
-  for (const k of ["FORGE_HOME", "FORGE_REPO_DIR", "FORGE_WORKSPACES", "FORGE_MIRRORS"]) delete process.env[k];
+  for (const k of ["FORGE_HOME", "FORGE_REPO_DIR", "FORGE_WORKSPACES", "FORGE_MIRRORS", "FORGE_MEMORIES"]) delete process.env[k];
 });
 
 const IDENTITY: ExecRule[] = [
@@ -112,8 +113,19 @@ test("pushed files: token, team instructions plus the role prompt, settings with
   assert.equal(file("/home/aiuser/.claude/settings.json")!.uid, "0");
   // Lire le corps d'un message sans demander l'humain, en lecture seule : pas de
   // dossier de travail de plus (additionalDirectories ouvrirait aussi l'écriture).
-  assert.deepEqual(settings.permissions, { allow: ["Read(~/.forge/messages/**)"] });
+  // forge-team sans classifieur : l'API décide qui peut libérer ou écrire à qui.
+  assert.deepEqual(settings.permissions, { allow: ["Read(~/.forge/messages/**)", "Bash(forge-team:*)"] });
   assert.ok(file("/usr/local/bin/forge-agent") && file("/home/aiuser/.claude/hooks/pre-bash.sh") && file("/home/aiuser/.claude.json"));
+});
+
+test("a team's designs path reaches its members' and the Pilot's instructions", async () => {
+  const cfg = config({ designs: "docs/specs" });
+  for (const [name, expected] of [["agent-web-dev-1", "sous `docs/specs`"], [PILOT, "- `web` : `docs/specs`"]]) {
+    const { fake, run } = provision(name, cfg);
+    await run();
+    const claudeMd = fake.files.get(`agent-forge/${name}/home/aiuser/.claude/CLAUDE.md`)!.content;
+    assert.ok(claudeMd.includes(expected), claudeMd.slice(-400));
+  }
 });
 
 test("without plugins the settings carry no enabledPlugins", async () => {
@@ -130,6 +142,41 @@ test("the team's git identity wins over the host's", async () => {
   const calls = flat(ctx);
   assert.ok(calls.some((c) => c.includes("git config --global user.name Team Bot")));
   assert.ok(!calls.some((c) => c.includes("--includes user.name")));
+});
+
+const refConfig = () => parseConfig("/c.json", {
+  pilot: { capabilities: ["assign"], talkTo: ["web"] },
+  teams: { web: { repo: "o/web", prompts: "reference", roles: { lead: {}, dev: {} } } },
+});
+
+test("a reference Lead's memory is a host directory, mounted where Claude Code keeps it", async () => {
+  const { fake, ctx, run } = provision("agent-web-lead", refConfig());
+  await run();
+  const source = join(home, "memories", "agent-web-lead");
+  assert.deepEqual(fake.expandedDevices("agent-forge", "agent-web-lead").memory,
+    { type: "disk", source, path: "/home/aiuser/.claude/projects/-workspace/memory" });
+  assert.ok(existsSync(source));
+  const calls = flat(ctx);
+  const mkdir = calls.findIndex((c) => c.includes("--user 1001") && c.endsWith("mkdir -p /home/aiuser/.claude/projects/-workspace"));
+  const add = calls.findIndex((c) => c.includes("config device add") && c.includes(" memory disk"));
+  assert.ok(mkdir >= 0 && add > mkdir, calls.join("\n"));
+  assert.ok(ctx.out_lines.includes(`Mounting agent-web-lead's memory from ${source}...`), ctx.out_lines.join("\n"));
+});
+
+test("a reference developer has no memory: its settings turn it off", async () => {
+  const { fake, run } = provision("agent-web-dev", refConfig());
+  await run();
+  assert.equal(fake.expandedDevices("agent-forge", "agent-web-dev").memory, undefined);
+  const settings = JSON.parse(fake.files.get("agent-forge/agent-web-dev/home/aiuser/.claude/settings.json")!.content);
+  assert.equal(settings.autoMemoryEnabled, false);
+});
+
+test("a custom team's member keeps Claude Code's default memory", async () => {
+  const { fake, run } = provision("agent-web-dev-1");
+  await run();
+  assert.equal(fake.expandedDevices("agent-forge", "agent-web-dev-1").memory, undefined);
+  const settings = JSON.parse(fake.files.get("agent-forge/agent-web-dev-1/home/aiuser/.claude/settings.json")!.content);
+  assert.ok(!("autoMemoryEnabled" in settings));
 });
 
 test("a role with lfs fetches the LFS objects into the mirror before the container exists", async () => {
