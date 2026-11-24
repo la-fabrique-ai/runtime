@@ -103,6 +103,13 @@ function call(req) {
 (async () => {
   const req = await request();
   const out = await call(req);
+  // Une connexion fermée sans réponse ne dit pas que la demande a échoué : elle a
+  // pu aboutir. La refaire à l'aveugle donnerait un doublon (un second assign).
+  if (out === "") {
+    process.stderr.write("forge-team: no answer from the forge API: the request may have been carried out; " +
+      "check forge-team status before trying again\n");
+    process.exit(2);
+  }
   let reply;
   try {
     reply = JSON.parse(out.split("\n")[0]);

@@ -15,8 +15,8 @@ let dir: string;
 let forgeTeam: string;
 let server: Server;
 let received: string[];
-// Ce que le faux serveur répond à la prochaine requête.
-let answer: string;
+// Ce que le faux serveur répond à la prochaine requête ; null : il ferme sans répondre.
+let answer: string | null;
 
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "forge-team-"));
@@ -31,7 +31,8 @@ beforeEach(async () => {
       line += c;
       if (line.includes("\n")) {
         received.push(line.trimEnd());
-        socket.end(`${answer}\n`);
+        if (answer === null) socket.end();
+        else socket.end(`${answer}\n`);
       }
     });
   });
@@ -93,6 +94,13 @@ test("a refusal exits 1 with the reason on stderr; an unreachable socket exits 2
   const nowhere = await run(["status"], "", join(dir, "absent.sock"));
   assert.equal(nowhere.code, 2);
   assert.match(nowhere.stderr, /cannot reach the forge API/);
+});
+
+test("a connection closed without an answer says the request may have gone through", async () => {
+  answer = null;
+  const r = await run(["release", "agent-web-dev-1"], "");
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /no answer from the forge API: the request may have been carried out; check forge-team status/);
 });
 
 test("assign without an instruction is a usage error, not a request", async () => {
