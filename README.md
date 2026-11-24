@@ -114,9 +114,8 @@ In between it does, in order:
 2. creates and starts the Lima VM from `ansible/lima/forge.yaml` (plain mode:
    no shared folder, no port forwarding besides SSH on `127.0.0.1:60022`, or
    a free port if that one is taken; workspaces live inside the VM);
-3. writes the inventory, once, to
-   `~/.config/agent-forge/hosts/forge-local/inventory.yml` (your edits are
-   kept) and runs the playbook from the checkout;
+3. writes the host's inventory, once, and runs the playbook from the checkout
+   (see the table below);
 4. writes the SSH alias `forge-local` to `~/.ssh/config.d/agent-forge.config`,
    a file that is forge's own, with forge's own `known_hosts`
    (`~/.config/agent-forge/known_hosts`);
@@ -134,6 +133,17 @@ In between it does, in order:
    yes: they are a setting of the client, not of the host (see
    [step 3](#3-start-a-task-from-herdr));
 10. prints a summary and opens herdr.
+
+What step 3 writes and replays, under `~/.config/agent-forge/hosts/<name>/`
+(`<name>` is `forge-local` for the local VM):
+
+| What forge install changes | Written | Your edits | Replayed |
+|---|---|---|---|
+| `inventory.yml`, the host's inventory | Once, at the first install | Kept | The playbook runs again on every `forge install` of a finished host, and on a resume after a failure when either inventory changed since the last deployment (for a cloud host, the playbooks of the host and of its relay) |
+| `relay-inventory.yml`, the relay's inventory (a cloud host has a relay) | Once, at the first install | Kept | Same as the host's inventory: the playbooks (the relay's too) run again, whichever of the two files you edited, including after a run that failed at the relay step |
+
+After editing an inventory, run `forge install` again (`forge install --host
+<name>` for a remote host).
 
 A run that fails stops with the step to fix; run `forge install` again and it
 resumes. `forge install` refuses a `forge-local` Lima VM or a `Host` entry it
@@ -155,7 +165,7 @@ touches: one per SSH connection.
 | Path | What | Mode | Asked |
 |---|---|---|---|
 | `~/.config/agent-forge/hosts.json` | The hosts this machine installed | 0600 | No |
-| `~/.config/agent-forge/hosts/<name>/` | Per host: `inventory.yml`, the generated inventory, written once (your edits are kept), and `forge-key.pub`, the public half of your GitHub key | 0700; 0600 and 0644 | No |
+| `~/.config/agent-forge/hosts/<name>/` | Per host: `inventory.yml`, the generated inventory, and for a cloud host `relay-inventory.yml`, its relay's, both written once (your edits are kept; they apply when you run `forge install` again, `forge install --host <name>` for a remote host, which replays the playbook), and `forge-key.pub`, the public half of your GitHub key | 0700; 0600 and 0644 | No |
 | `~/.config/agent-forge/known_hosts` | forge's own `known_hosts`: the hosts' keys, for the alias and for Ansible | Written by ssh | No |
 | `~/.local/share/agent-forge/collections` | The Ansible collections the playbook needs | Written by `ansible-galaxy` | No |
 | `~/.ssh/config.d/agent-forge.config` | forge's own SSH file: one block per host, rewritten on every run | 0600; 0700 for a directory forge creates | No |

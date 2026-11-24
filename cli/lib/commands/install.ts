@@ -10,6 +10,7 @@ import {
   chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync,
   statSync, symlinkSync, writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ForgeError, type Context } from "../context.ts";
@@ -156,11 +157,14 @@ export async function cmdInstall(ctx: Context, opts: InstallOptions = {}): Promi
     const relay = host.kind === "cloud" ? await relayInventory(ctx, host, checkout) : "kept";
     return dev === "written" || relay === "written" ? "done" : "already there";
   }, true);
-  // 8. On a finished host, or on a checkout that moved since the playbook last
-  // deployed it (a git pull after a failed step), the update's steps are run
-  // and recorded again. A HEAD that cannot be read counts as moved.
+  // 8. On a finished host, on a checkout that moved since the playbook last
+  // deployed it (a git pull after a failed step), or on inventories edited
+  // since (the fix of a failed step), the update's steps are run and recorded
+  // again. A HEAD or an inventory that cannot be read counts as changed.
   const head = await checkoutHead(ctx, checkout);
-  if (finished || (host.done.includes("playbook") && (!head || head !== host.deployed))) {
+  const inventories = inventoryFingerprint(host);
+  if (finished || (host.done.includes("playbook")
+    && (!head || head !== host.deployed || !inventories || inventories !== host.deployedInventory))) {
     const update = UPDATE.filter((s) => steps.includes(s));
     host.done = host.done.filter((s) => !update.includes(s));
     saveHost(host);
@@ -168,6 +172,7 @@ export async function cmdInstall(ctx: Context, opts: InstallOptions = {}): Promi
   await step("playbook", async () => {
     await playbook(ctx, host, checkout);
     if (head) host.deployed = head; else delete host.deployed;
+    if (inventories) host.deployedInventory = inventories; else delete host.deployedInventory;
     return "done";
   });
   // 9. Every run: forge's file follows the list of hosts.
@@ -223,6 +228,17 @@ async function whichHost(ctx: Context, opts: InstallOptions): Promise<Target> {
     throw new ForgeError("no host chosen: pass --host <name> for an installed host, or --remote <address> for a new remote one");
   }
   return i <= hosts.length ? { kind: hosts[i - 1].kind, listed: hosts[i - 1], address: hosts[i - 1].address } : { kind: "lima", address: "127.0.0.1" };
+}
+
+// A fingerprint of the inventories the playbook runs with: the host's and, for
+// a cloud host, its relay's. "" when one cannot be read (a missing file).
+function inventoryFingerprint(host: LaptopHost): string {
+  const paths = [inventoryPath(host.name), ...(host.kind === "cloud" ? [relayInventoryPath(host.name)] : [])];
+  const hash = createHash("sha256");
+  try {
+    for (const p of paths) hash.update(readFileSync(p)).update("\0");
+  } catch { return ""; }
+  return hash.digest("hex");
 }
 
 // The commit the playbook deploys; "" when the checkout cannot tell (not a git checkout).

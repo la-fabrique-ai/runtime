@@ -30,6 +30,10 @@ export type LaptopHost = {
   // The checkout commit the playbook last deployed: another one, after a git
   // pull, is deployed again on the next forge install.
   deployed?: string;
+  // The sha256 of the inventories (the host's, and a cloud host's relay's) the
+  // playbook last ran with: an edit after a failed step is deployed again on
+  // the next forge install. Absent (an older state) counts as changed.
+  deployedInventory?: string;
   done: InstallStep[];
 };
 
@@ -84,6 +88,7 @@ function isHost(h: unknown): h is LaptopHost {
     (o.identityAgent === undefined || typeof o.identityAgent === "string") &&
     (o.relayAddress === undefined || typeof o.relayAddress === "string") &&
     (o.deployed === undefined || typeof o.deployed === "string") &&
+    (o.deployedInventory === undefined || typeof o.deployedInventory === "string") &&
     Array.isArray(o.done) && o.done.every((s) => typeof s === "string" && STEPS.includes(s));
 }
 
