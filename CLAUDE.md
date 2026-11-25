@@ -3,14 +3,14 @@
 ## Contexte
 Tu travailles sur `agent-forge`, un repo d'infrastructure pour faire tourner des agents Claude Code dans des containers Incus isolés, sur un hôte provisionné par Ansible : une VM distante (cloud ou LAN), ou une VM Lima locale sur la machine de dev (mode local, macOS ou Ubuntu).
 
-Ce fichier décrit la v2, sortie sur `main` (la v1, LXD, n'est plus maintenue). Les cinq sous-projets de la v2 sont livrés : hôte Ansible, runtime Incus, mode strict (liste blanche de sortie), orchestration herdr, mode local et docs ; l'orchestration est ensuite devenue celle des équipes (herdr-core). Le `README.md` est le guide d'installation par mode (local Lima, distant), par `forge install` ; les étapes manuelles sont dans `ansible/README.md`.
+Ce fichier décrit la v2, sortie sur `main` (la v1, LXD, n'est plus maintenue). Les cinq sous-projets de la v2 sont livrés : hôte Ansible, runtime Incus, mode strict (liste blanche de sortie), orchestration herdr, mode local et docs ; l'orchestration est ensuite devenue celle des équipes (herdr-core), puis celle d'un projet piloté par des tickets. Le `README.md` est le guide d'installation par mode (local Lima, distant), par `forge install` ; les étapes manuelles sont dans `ansible/README.md`.
 
 ## Stack
 - **Hôte** : Ubuntu 26.04 LTS, Incus 7.0 LTS (dépôt Zabbly), nftables (table `inet forge_host`), fail2ban (sauf en `forge_exposure: local`) — provisionné par `ansible/site.yml`. En local, la VM vient du template Lima `ansible/lima/forge.yaml`
 - **Runtime Incus** : projet `agent-forge`, bridge `forgebr0`, ACL `forge-egress`, profil `agent-forge` ; pour le mode strict, le container `forge-proxy`, son profil, les ACL `forge-proxy` et `forge-egress-strict` — tous créés par `forge setup`
 - **Image** `agent-base` : `images:ubuntu/26.04`, Node.js 24, pnpm, Claude Code, Google Chrome headless + `chrome-devtools-mcp`, Docker rootless — construite par `forge image build`
-- **Orchestration** : des équipes d'agents (DX 5). Une équipe se déclare dans `~/.config/agent-forge/config.json` de l'hôte (`teams`, `pilot`) ; chaque agent est un container, avec son propre core herdr-core (`hc`, version épinglée dans `cli/lib/hc.ts`) ; `forge team up` (machine de dev) converge l'hôte puis ajoute chaque container comme machine de Herdr App, par `forge hc-via` (machine de dev) et `forge hc-exec` (hôte). Le TUI herdr (`forge open`) reste
-- **CLI** : `forge`, en TypeScript exécuté par Node (`cli/`) : des commandes hôte (`setup`, `team converge`, `team assign`, …) et des commandes laptop (`install`, `open`, `team up`, `fetch`, `ship`), lancées depuis le checkout sur la machine de dev
+- **Orchestration** : un projet piloté par des tickets (spec `docs/superpowers/specs/2026-11-25-ticket-driven-forge-design.md`). Le projet se déclare dans `~/.config/agent-forge/config.json` de l'hôte (`project` : ses dépôts, ses exécuteurs, `project.tickets.base`, la base des tickets) ; `teams` et `pilot` n'existent plus (une config qui les déclare est refusée). La base des tickets est un dossier de fichiers Markdown (un dossier par ticket, `ticket.md` et `subtasks/<n>.md`, un en-tête `clé: valeur` puis le texte ; statuts d'un ticket `todo`, `spec`, `dev`, `qa`, `human-review`, `pr-review`, `done`, `cancelled`, d'une sous-tâche `ready`, `in-dev`, `done`). Le container de contrôle `agent-control` monte la base et fait tourner l'orchestrateur (service `forge-orchestrator`, utilisateur `forge-orch`) ; il confie chaque sous-tâche prête d'un ticket en `dev` à un exécuteur libre (`agent-executor-<n>`, un clone de chaque dépôt sous `/workspace/<dépôt>`) comme une **mission** : une session neuve sur `agent/<sous-tâche>`, que l'exécuteur rend par `forge-team done`. Chaque container a son propre core herdr-core (`hc`, version épinglée dans `cli/lib/hc.ts`) ; `forge team up` (machine de dev) converge l'hôte puis ajoute chaque container comme machine de Herdr App, par `forge hc-via` (machine de dev) et `forge hc-exec` (hôte). Le TUI herdr (`forge open`) reste
+- **CLI** : `forge`, en TypeScript exécuté par Node (`cli/`) : des commandes hôte (`setup`, `team converge`, `team status`, `team assign`, …) et des commandes laptop (`install`, `open`, `team up`, `fetch`, `ship`), lancées depuis le checkout sur la machine de dev
 - **User agent** : `aiuser` (UID/GID 1001, no sudo, scoped to `/workspace`)
 - **Auth** : une clé SSH (une clé matérielle par exemple), transmise à l'hôte par l'agent SSH ; aucune credential GitHub dans les containers (l'hôte clone et fetch avec l'agent SSH transmis). Le token Claude (`claude setup-token`) vit sur l'hôte et dans chaque container, un fichier de mode 600 que le lanceur `forge-agent` exporte au seul processus de l'agent
 
@@ -28,7 +28,7 @@ Ce fichier décrit la v2, sortie sur `main` (la v1, LXD, n'est plus maintenue). 
 - Messages conventionnels : `feat:`, `fix:`, `chore:`, `docs:`, `test:`.
 - **Dans un container forge v2** (mode `supervised`, le seul mode de container de la v2 ; la VM de dev a le sien, `contributor`, plus bas) :
   - tu commites sur `agent/<tâche>`. Les commits sont non signés et portent l'identité git de l'hôte ;
-  - tu ne pousses jamais et tu n'utilises jamais `gh` : aucune credential n'existe, ils échouent (le hook ne surveille plus git dans un container supervisé). `origin` est un miroir en lecture seule (`/forge/origin.git`, rafraîchi par l'hôte, `forge team sync`) : `git fetch origin` marche, `git push` non ;
+  - tu ne pousses jamais et tu n'utilises jamais `gh` : aucune credential n'existe, ils échouent (le hook ne surveille plus git dans un container supervisé). `origin` est un miroir en lecture seule (`/forge/origins/<dépôt>.git`, rafraîchi par l'hôte, `forge team sync <dépôt>`) : `git fetch origin` marche, `git push` non ;
   - pour rafraîchir ta branche : `git fetch origin` puis `git rebase origin/main`, jamais `git merge` (un commit de merge fait refuser la branche par `forge ship`) ;
   - le mainteneur récupère ton travail depuis sa machine avec `forge fetch` dans son clone, le relit, puis `forge ship <tâche>` le re-signe, le pousse et ouvre la PR.
 - **Sur la machine de dev** (une session Claude Code dans ce repo, dont `.claude/settings.json` applique `container/pre-bash.sh`) :
@@ -76,15 +76,20 @@ strict), `docs/superpowers/specs/2026-10-17-v2-orchestration-herdr-design.md`
   non-objectifs de la v2.0. Le concept de mode reste (marqueur
   `~/.claude/forge-mode`, règles autonomous de `container/pre-bash.sh`).
 - Sortie réseau : ouverte par défaut (plages privées bloquées par
-  `forge-egress`) ; mode strict par rôle (`strict: true` dans la config de l'équipe) ou par container
+  `forge-egress`) ; mode strict pour les exécuteurs (`strict: true` dans `project.executors`) ou par container
   (`forge egress`), à travers `forge-proxy` et la liste blanche.
 - Les commits de l'agent portent l'identité git de l'hôte (`user.name` et
   `user.email` du `git config --global` de l'utilisateur forge) et sont non
   signés (`commit.gpgsign=false`). L'utilisateur les re-signe en publiant.
-- Les équipes remplacent `forge start`, `attach`, `resume` et `finish` : `forge team
-  converge` crée ou démarre les containers, `forge team assign` donne une tâche
-  (une session neuve dans le `hc` du container), `release` la libère. Chaque agent
-  garde son terminal hc, qui survit à la fermeture de la machine de dev.
+- Le projet remplace `forge start`, `attach`, `resume` et `finish`, puis les
+  équipes : `forge team converge` crée ou démarre les containers et installe
+  l'orchestrateur, qui confie les missions par l'API (verbes de mission
+  seulement : `assign`, `release`, `status`, `events` pour le contrôle, `done` et
+  `status` pour un exécuteur). `forge team assign <exécuteur> <sous-tâche>` et
+  `release` restent la main de l'humain, sans l'orchestrateur, journalisées sous
+  l'appelant `human`. `forge fetch` et `forge ship <sous-tâche>` récupèrent les
+  branches depuis le miroir des agents de chaque dépôt. Chaque exécuteur garde
+  son terminal hc, qui survit à la fermeture de la machine de dev.
 - Les tests unitaires tournent avec un faux `incus`. Les tests
   d'intégration réels (`FORGE_INTEGRATION=1`) demandent un Incus de test
   jetable (une VM Lima ou une VM cloud) ; le playbook se teste avec
@@ -105,8 +110,8 @@ Les suites restent légères.
 - Pas de tests sur le contenu de la documentation : `README.md`, `CLAUDE.md`, `container/CLAUDE.md`, `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`…
 - Pour un script (hook git, `pre-bash.sh`, scripts shell), seulement les quelques cas qui protègent un choix important : les garde-fous de sécurité, un cas nominal, un cas d'échec. Pas de balayage de cas limites : ceux-là se vérifient à la main en relecture.
 
-### Dans une équipe forge
-Dans un container d'équipe (Pilote, Lead, développeur, Reviewer), il n'y a pas d'Incus. Le clone n'a pas de `node_modules` : commence par `npm ci`. Lance ensuite, une à une, `npm run test:unit`, `npm run test:contract` et `npm run check`. `npm run test:bash` échoue par construction dans un container d'équipe (`tests/test-pre-bash.sh` lit le vrai mode de la machine, #178) : ne lance pas `npm test` complet, qui l'inclut. Ne tournent pas non plus : `FORGE_INTEGRATION=1`, `ansible/tests/vm-test.sh`, `npm run test:ansible` et `ansible-lint` : ils se lancent sur la VM de dev ou chez le mainteneur, et les comptes rendus disent qu'ils n'ont pas tourné.
+### Dans un container forge
+Dans un container d'exécution (ou de contrôle), il n'y a pas d'Incus. Le clone n'a pas de `node_modules` : commence par `npm ci`. Lance ensuite, une à une, `npm run test:unit`, `npm run test:contract` et `npm run check`. `npm run test:bash` échoue par construction dans un container forge (`tests/test-pre-bash.sh` lit le vrai mode de la machine, #178) : ne lance pas `npm test` complet, qui l'inclut. Ne tournent pas non plus : `FORGE_INTEGRATION=1`, `ansible/tests/vm-test.sh`, `npm run test:ansible` et `ansible-lint` : ils se lancent sur la VM de dev ou chez le mainteneur, et les comptes rendus disent qu'ils n'ont pas tourné.
 
 ### Sécurité
 - Ne jamais hardcoder de credentials, clés, tokens
