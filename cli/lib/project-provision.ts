@@ -1,10 +1,8 @@
 // Le provisioning des containers d'un projet (forge à tickets) : le container
 // de contrôle, où l'orchestrateur tiendra la base des tickets, et les
-// exécuteurs, qui ont un clone de chaque dépôt. Même parcours que
-// provisionMember (team-provision.ts), dont il reprend les aides ; ce qui
-// change : les clés `user.forge.role=executor|control` sans équipe, un clone
-// par dépôt sous /workspace/<nom>, et le contrôle, qui n'a ni clone ni session
-// dans la partie 1.
+// exécuteurs, qui ont un clone de chaque dépôt (/workspace/<nom>). Les fichiers
+// que forge pose dans chacun sont ceux d'agent-files.ts ; le contrôle n'a ni
+// clone ni session dans la partie 1.
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -25,10 +23,10 @@ import { apiDataDir, configPath, forgeHome, memoriesDir, mirrorsDir, repoRoot, w
 import { ensureRepoMirrors, repoOriginMirror, repoTeamMirror, type ProjectMember } from "./project.ts";
 import type { ProjectConfig } from "./project-config.ts";
 import { applyStrictSettings, requireStrictRuntime, strictLaunchArgs } from "./strict.ts";
-import { referenceDir, referenceKit, type Member, type ReferenceKit } from "./team.ts";
+import { referenceDir, referenceKit, type ReferenceKit } from "./reference-kit.ts";
 import { AIUSER_SOCKET, CONTAINER_SOCKET, ORCH_SOCKET } from "./api/access.ts";
 import { ensureRunning } from "./session.ts";
-import { installMemberFiles, installPlugins, requirePlugins } from "./team-provision.ts";
+import { installAgentFiles, installPlugins, requirePlugins, type AgentFiles } from "./agent-files.ts";
 
 const MODE = "supervised";
 
@@ -52,11 +50,10 @@ const NO_ORCH = "the image has no forge-orch user: run forge image build";
 
 // Le kit d'un exécuteur et son prompt : le rôle `executor` de roles.json et
 // teams/reference/prompts/executor.md. Les instructions du container (la mission,
-// container/CLAUDE-executor.md) sont les mêmes pour le contrôle, qui les lit pour
+// container/CLAUDE.md) sont les mêmes pour le contrôle, qui les lit pour
 // comprendre ce que font les exécuteurs.
 export const executorKit = (): ReferenceKit => referenceKit("executor");
 const executorPrompt = (): string => join(referenceDir(), "prompts", "executor.md");
-export const MISSION_INSTRUCTIONS = "CLAUDE-executor.md";
 
 function requireProject(cfg: ForgeConfig): ProjectConfig {
   if (cfg.project === null) throw new ForgeError("no project in the configuration");
@@ -101,17 +98,15 @@ export function ticketsBase(p: ProjectConfig): string {
   return base;
 }
 
-// Un container de projet vu comme un membre, pour les aides de team-provision
-// (instructions, hook, réglages, kit, plugins) : ni équipe, ni dépôt unique, ni
-// correspondant ; son canal d'API est posé à part (installMemberFiles, `api`).
-function asMember(p: ProjectConfig, m: ProjectMember): Member {
+// Ce que les aides d'agent-files.ts lisent d'un container du projet : le kit,
+// le prompt, les plugins et le .env des exécuteurs ; rien de tout cela pour le contrôle.
+function agentFiles(p: ProjectConfig, m: ProjectMember): AgentFiles {
   const executor = m.kind === "executor";
   const e = p.executors;
   return {
-    name: m.name, team: null, role: m.kind, index: m.index, repo: null, capabilities: [], talkTo: [],
-    strict: executor && e.strict, memory: executor ? e.memory : null, cpu: executor ? e.cpu : null,
-    plugins: executor ? e.plugins : [], prompt: executor ? executorPrompt() : null, env: executor && e.env !== null ? hostPath(e.env) : null,
-    lfs: false, reference: executor ? executorKit() : null, designs: {},
+    name: m.name, strict: executor && e.strict, plugins: executor ? e.plugins : [],
+    prompt: executor ? executorPrompt() : null, env: executor && e.env !== null ? hostPath(e.env) : null,
+    reference: executor ? executorKit() : null,
   };
 }
 
@@ -136,7 +131,7 @@ async function pushAgentState(ctx: Context, name: string): Promise<void> {
 }
 
 // `workspace` : le marqueur du workspace a été posé au lancement (exécuteur).
-async function finish(ctx: Context, m: Member, workspace: boolean): Promise<void> {
+async function finish(ctx: Context, m: AgentFiles, workspace: boolean): Promise<void> {
   await refreshClaude(ctx, m.name, m.strict);
   await installPlugins(ctx, m);
   ctx.out("Recording forge mode marker...");
@@ -155,7 +150,7 @@ async function finish(ctx: Context, m: Member, workspace: boolean): Promise<void
 
 export async function provisionExecutor(ctx: Context, cfg: ForgeConfig, m: ProjectMember): Promise<void> {
   const p = requireProject(cfg);
-  const member = asMember(p, m);
+  const member = agentFiles(p, m);
   // Préconditions, toutes vérifiées avant de rien créer.
   requireClaudeToken();
   requirePlugins(member);
@@ -163,7 +158,7 @@ export async function provisionExecutor(ctx: Context, cfg: ForgeConfig, m: Proje
   await requireRuntime(ctx);
   if (Object.values(p.repositories).some((r) => r.lfs)) await requireHostLfs(ctx);
   const plan = member.strict ? await requireStrictRuntime(ctx) : null;
-  // Les miroirs (SSH, agent de l'humain) avant le lancement, comme provisionMember.
+  // Les miroirs (SSH, agent de l'humain) avant le lancement.
   await ensureRepoMirrors(ctx, p);
 
   const workspaceDir = join(workspacesDir(), m.name);
@@ -173,8 +168,8 @@ export async function provisionExecutor(ctx: Context, cfg: ForgeConfig, m: Proje
     "-c", `${PROVISIONING_WORKSPACE_KEY}=${reuse ? "kept" : "new"}`,
     "-c", "user.forge.role=executor",
   ];
-  if (member.memory !== null) keys.push("-c", `limits.memory=${member.memory}`);
-  if (member.cpu !== null) keys.push("-c", `limits.cpu=${member.cpu}`);
+  if (p.executors.memory !== null) keys.push("-c", `limits.memory=${p.executors.memory}`);
+  if (p.executors.cpu !== null) keys.push("-c", `limits.cpu=${p.executors.cpu}`);
   await launch(ctx, m.name, keys, plan ? strictLaunchArgs(plan, egressNames(forgeProject())) : []);
   if (plan) await applyStrictSettings(ctx, m.name, plan);
 
@@ -185,7 +180,7 @@ export async function provisionExecutor(ctx: Context, cfg: ForgeConfig, m: Proje
   await ensureExecutorRepos(ctx, p, m.name);
   await configureGit(ctx, m.name, identity);
   await pushAgentState(ctx, m.name);
-  await installMemberFiles(ctx, member, { owner: AIUSER_SOCKET, instructions: MISSION_INSTRUCTIONS });
+  await installAgentFiles(ctx, member, AIUSER_SOCKET);
   await finish(ctx, member, true);
 }
 
@@ -203,7 +198,7 @@ export async function convergeExecutor(ctx: Context, cfg: ForgeConfig, m: Projec
     await ensureRepoMirrors(ctx, { ...p, repositories: added });
   }
   await ensureExecutorRepos(ctx, p, m.name);
-  return installMemberFiles(ctx, asMember(p, m), { owner: AIUSER_SOCKET, instructions: MISSION_INSTRUCTIONS });
+  return installAgentFiles(ctx, agentFiles(p, m), AIUSER_SOCKET);
 }
 
 // Les filtres LFS globaux d'aiuser : avec le smudge dès qu'un dépôt lit ses
@@ -269,7 +264,7 @@ async function cloneRepo(ctx: Context, name: string, repo: string, ownerRepo: st
 
 export async function provisionControl(ctx: Context, cfg: ForgeConfig, m: ProjectMember): Promise<void> {
   const p = requireProject(cfg);
-  const member = asMember(p, m);
+  const member = agentFiles(p, m);
   requireClaudeToken();
   const identity = p.gitIdentity ?? await hostGitIdentity(ctx);
   await requireRuntime(ctx);
@@ -288,7 +283,7 @@ export async function provisionControl(ctx: Context, cfg: ForgeConfig, m: Projec
   await ensureTicketBase(ctx, p, m.name);
   await configureGit(ctx, m.name, identity);
   await pushAgentState(ctx, m.name);
-  await installMemberFiles(ctx, member, { owner: ORCH_SOCKET, instructions: MISSION_INSTRUCTIONS });
+  await installAgentFiles(ctx, member, ORCH_SOCKET);
   await installOrchestrator(ctx, cfg, m);
   await finish(ctx, member, false);
 }
@@ -301,7 +296,7 @@ export async function convergeControl(ctx: Context, cfg: ForgeConfig, m: Project
   await ensureRunning(ctx, m.name);
   await requireOrchestratorImage(ctx, m.name);
   await ensureTicketBase(ctx, p, m.name);
-  const files = await installMemberFiles(ctx, asMember(p, m), { owner: ORCH_SOCKET, instructions: MISSION_INSTRUCTIONS });
+  const files = await installAgentFiles(ctx, agentFiles(p, m), ORCH_SOCKET);
   await installOrchestrator(ctx, cfg, m);
   return files;
 }

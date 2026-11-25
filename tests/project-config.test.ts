@@ -64,9 +64,9 @@ test("each rule is refused naming its key", () => {
   rejects(proj({ extra: 1 }), /unknown key project\.extra/);
 });
 
-test("project refuses teams and pilot", () => {
-  const msg = `${PATH}: project replaces teams and pilot: keep only project`;
+test("a config that still holds teams or pilot is refused, with or without a project", () => {
+  const msg = `${PATH}: teams and pilot are gone (the ticket-driven model): declare a project, see the release notes`;
   assert.throws(() => parse({ ...proj(), teams: { web: { repo: "o/web" } } }), { message: msg });
-  assert.throws(() => parse({ ...proj(), pilot: {} }), { message: msg });
-  assert.doesNotThrow(() => parse({ ...proj(), teams: {} }));
+  assert.throws(() => parse({ pilot: {} }), { message: msg });
+  assert.throws(() => parse({ teams: {} }), { message: msg });
 });

@@ -16,7 +16,7 @@ import { Journal, journalPath } from "../api/journal.ts";
 import { SUMMARY_ALLOWED } from "../api/protocol.ts";
 import { isLive, sessionState, typeNotice } from "../hc-session.ts";
 import { configPath } from "../paths.ts";
-import { memberNamed } from "../team.ts";
+import { projectMemberNamed } from "../project.ts";
 import { validateContainerName } from "../validate.ts";
 
 const USAGE = "Usage: forge notify <container> memory-kill --pid <n> --rss-kib <n>   (the process name on stdin)";
@@ -62,9 +62,9 @@ export async function cmdNotify(
   validateContainerName(container);
   const pid = count("--pid", opts.pid);
   const rssKib = count("--rss-kib", opts.rssKib);
-  // Seuls les membres d'équipe déclarés : jamais forge-proxy ni un autre container.
-  memberNamed(loadConfig(configPath()), container);
-  // Comme `message` : seulement une session forge-agent vivante. Sans, rien n'est
+  // Seuls les containers du projet : jamais forge-proxy ni un autre container.
+  projectMemberNamed(loadConfig(configPath()).project, container);
+  // Seulement une session forge-agent vivante (celle d'une mission). Sans, rien n'est
   // tapé ni journalisé, et ce n'est pas une erreur : le surveillant ne l'attend pas.
   if (!isLive(await sessionState(ctx, container))) return 0;
   const notice = memoryKillNotice(pid, await (opts.stdin ?? readName)(), rssKib);

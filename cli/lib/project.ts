@@ -26,6 +26,15 @@ export function projectMembers(p: ProjectConfig): ProjectMember[] {
   return members;
 }
 
+// Le membre du projet de ce nom ; refusé quand la config n'a pas de projet ou
+// ne le déclare pas (forge-proxy, un container d'un autre usage).
+export function projectMemberNamed(p: ProjectConfig | null, name: string): ProjectMember {
+  const all = p === null ? [] : projectMembers(p);
+  const found = all.find((m) => m.name === name);
+  if (!found) throw new ForgeError(`${name} is not a container of the project (declared: ${all.map((m) => m.name).join(", ") || "none"})`);
+  return found;
+}
+
 export const repoOriginMirror = (name: string) => mirrorPath(`repo-${name}`);
 export const repoTeamMirror = (name: string) => join(mirrorsDir(), `repo-${name}.agents.git`);
 

@@ -31,10 +31,10 @@ export async function fetchAgents(ctx: Context, opts: { host?: string; cwd?: str
   const asked = await remoteExec(ctx, host, ["forge", "team", "for-repo", ownerRepo]);
   const team = asked.stdout.trim();
   if (asked.code !== 0 || team === "") {
-    // Exit 1 and no output: the host answered, and no team holds this repository.
+    // Exit 1 and no output: the host answered, and its project does not hold this repository.
     throw new ForgeError(asked.code === 1 && team === ""
-      ? `${host.name} has no team for ${ownerRepo}: no team of its forge config declares that repository ` +
-        "(forge team up, after declaring one in ~/.config/agent-forge/config.json on the host)."
+      ? `${host.name} has no repository ${ownerRepo}: its project does not declare it ` +
+        "(add it to project.repositories in ~/.config/agent-forge/config.json on the host, then forge team up)."
       : `forge team for-repo ${ownerRepo} failed on ${host.name}: ${asked.stderr.trim() || `exit code ${asked.code}`}`);
   }
   if (!TEAM_NAME.test(team)) throw new ForgeError(`${host.name} answered a team name that is not one: ${printable(team)}`);

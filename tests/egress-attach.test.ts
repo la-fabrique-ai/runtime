@@ -10,7 +10,6 @@ import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
 import { ensureRunning } from "../cli/lib/session.ts";
 import { startSession } from "../cli/lib/hc-session.ts";
-import type { Member } from "../cli/lib/team.ts";
 
 // The proxy plan comes from the user's config: never the real one.
 process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "forge-egress-attach-xdg-"));
@@ -38,10 +37,7 @@ function egressFake(opts: {
   return fake;
 }
 
-const MEMBER: Member = {
-  name: "agent-x", team: "t", role: "dev", index: null, repo: "o/x", capabilities: ["repo", "publish"], talkTo: [],
-  strict: false, memory: null, cpu: null, plugins: [], prompt: null, env: null, lfs: false, reference: null, designs: {},
-};
+const MEMBER = { name: "agent-x" };
 const AGENT_RULES: ExecRule[] = [];
 const lines = (c: ReturnType<typeof fakeContext>) => c.calls.map((x) => x.join(" "));
 const started = (c: ReturnType<typeof fakeContext>, name: string) =>

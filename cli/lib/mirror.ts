@@ -5,12 +5,11 @@
 // run the agent's commands on the host. Instead forge keeps its own bare
 // mirror, outside the workspaces directory, and only ever runs git on it.
 // The mirror is mounted read-only in the container, which clones from it.
-import { existsSync, mkdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Context, ExecResult } from "./context.ts";
 import { ForgeError } from "./context.ts";
 import { deviceNames, execAsAgentArgv } from "./incus.ts";
-import { mirrorPath, mirrorsDir } from "./paths.ts";
 import { validateRepo } from "./validate.ts";
 
 export const MIRROR_MOUNT = "/forge/origin.git";
@@ -178,24 +177,11 @@ export async function hasOriginDevice(ctx: Context, container: string): Promise<
   return (await deviceNames(ctx, container)).includes(ORIGIN_DEVICE);
 }
 
-// The team mirror (DX 5, §5.5): a bare repository forge fills with the agent
-// branches of a team's developers, and that read-team members mount read-only.
-// It is not a mirror of GitHub: nothing here comes from the network.
-export const TEAM_MOUNT = "/forge/team.git";
-export const TEAM_DEVICE = "team";
-
-export function teamMirrorPath(team: string): string {
-  return join(mirrorsDir(), `team-${team}.agents.git`);
-}
-
-// The hooks are off and received objects are checked: what an agent pushes
-// into this repository is data, and nothing in it may run on the host.
-export function ensureTeamMirror(ctx: Context, team: string): Promise<"created" | "kept"> {
-  return ensureBareTeamMirror(ctx, teamMirrorPath(team));
-}
-
-// Le même miroir, à un chemin donné : celui d'une équipe, ou celui d'un dépôt
-// d'un projet (forge à tickets).
+// Le miroir des agents d'un dépôt d'un projet : un dépôt nu que forge remplit
+// des branches que les exécuteurs rendent (`done`), et que chaque exécuteur
+// monte en lecture seule. Ce n'est pas un miroir de GitHub : rien n'y vient du
+// réseau. Les hooks sont coupés et les objets reçus vérifiés : ce qu'un agent y
+// fait entrer est une donnée, rien n'y tourne sur l'hôte.
 export async function ensureBareTeamMirror(ctx: Context, mirror: string): Promise<"created" | "kept"> {
   if (existsSync(mirror)) return "kept";
   mkdirSync(dirname(mirror), { recursive: true });
@@ -206,19 +192,4 @@ export async function ensureBareTeamMirror(ctx: Context, mirror: string): Promis
     if (r.code !== 0) throw new ForgeError(`configure team mirror failed: ${r.stderr.trim() || `exit code ${r.code}`}`);
   }
   return "created";
-}
-
-// Le miroir d'origine d'une équipe : une copie du dépôt de l'équipe, que
-// `forge team sync` rafraîchit depuis GitHub.
-export const originMirrorPath = (team: string) => mirrorPath(`team-${team}`);
-
-// Son âge, en secondes : celui de son FETCH_HEAD, que chaque fetch réécrit,
-// même quand il n'apporte rien. Null quand le miroir n'a jamais été rafraîchi.
-export function originMirrorAge(team: string, now: Date): number | null {
-  try {
-    const fetched = statSync(join(originMirrorPath(team), "FETCH_HEAD")).mtimeMs;
-    return Math.max(0, Math.round((now.getTime() - fetched) / 1000));
-  } catch {
-    return null;
-  }
 }

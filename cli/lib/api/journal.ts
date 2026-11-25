@@ -1,45 +1,40 @@
-// Le journal de l'API (DX 5, §5.4) : des lignes JSON ajoutées, jamais
-// réécrites. C'est la piste d'audit et la source de l'état d'attente.
+// Le journal de l'API : des lignes JSON ajoutées, jamais réécrites. C'est la
+// piste d'audit, et la source des évènements (`done`) que l'orchestrateur lit.
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ForgeError } from "../context.ts";
 import { apiDataDir } from "../paths.ts";
 import type { HeldMission } from "../orchestrator/host.ts";
-import type { MissionOp } from "./missions.ts";
-import type { Op } from "./protocol.ts";
+import type { MissionVerb } from "./missions.ts";
 
-// `answer` est la réponse de l'humain à une question (`forge team answer`) : il
-// n'est jamais écrit par l'API, aucun agent ne peut l'appeler. Les verbes de
-// mission (`events`, `done`) sont ceux d'un projet (api/missions.ts).
-export type JournalOp = Op | MissionOp | "answer";
+// Les verbes de mission (api/missions.ts). Un journal tenu avant le modèle à
+// tickets garde ses lignes et leurs ids : elles se lisent, leur `op` (message,
+// ask-human, answer) n'est plus écrit.
+export type JournalOp = MissionVerb;
 
 // `op` est null pour une ligne que le protocole n'a pas pu lire : elle n'a pas de verbe.
 // `notify` n'est pas un verbe : c'est un avis que forge a écrit de lui-même
 // (`forge notify`), de l'hôte, sans passer par une socket. Il a l'identifiant 0,
 // hors de la suite que le service numérote en mémoire : deux écrivains ne
-// peuvent donc jamais prendre le même numéro. Une réponse a le même
-// identifiant 0 : elle se retrouve par `question`, pas par le sien.
+// peuvent donc jamais prendre le même numéro. `forge team assign` et `release`
+// (l'appelant `human`) ont le même identifiant 0.
 export type Entry = {
   id: number; time: string; caller: string; op: JournalOp | "notify" | null; to: string | null; task: string | null;
   outcome: "ok" | "refused"; error: string | null;
-  summary: string | null; // message, ask-human
-  text: string | null; // le corps d'un message ou d'une question, la consigne d'un assign
-  question: number | null; // pour une réponse : l'identifiant de la question qu'elle ferme
-  // La mission d'un `assign` ou d'un `done` de projet, sans sa consigne : un
-  // `done` accepté devient un évènement (`events`). Absente des autres lignes.
+  summary: string | null; // l'avis de `forge notify`
+  text: string | null; // la consigne d'un assign
+  // La mission d'un `assign` ou d'un `done`, sans sa consigne : un `done`
+  // accepté devient un évènement (`events`). Absente des autres lignes.
   mission?: HeldMission;
 };
 
-// Ce que `Journal.append` demande : `question` est facultatif, il vaut null.
-export type NewEntry = Omit<Entry, "id" | "time" | "question"> & { question?: number | null };
+export type NewEntry = Omit<Entry, "id" | "time">;
 
 function parseLines(path: string, text: string, first: number, into: Entry[]): void {
   text.split("\n").forEach((line, i) => {
     if (line === "") return;
     try {
-      // Une ligne d'avant les réponses n'a pas `question` : elle se lit null.
-      const e = JSON.parse(line) as Entry;
-      into.push({ ...e, question: e.question ?? null });
+      into.push(JSON.parse(line) as Entry);
     } catch {
       throw new ForgeError(`${path} line ${first + i + 1} is not valid JSON: the journal is never rewritten, fix or move it`);
     }
@@ -64,7 +59,7 @@ export class Journal {
   private readonly path: string;
   private readonly list: Entry[];
   // Les octets du fichier déjà lus : le journal a plusieurs écrivains (le
-  // service, `forge notify`, `forge team answer`), `refresh` lit ce qu'ils ont ajouté.
+  // service, `forge notify`, `forge team assign|release`), `refresh` lit ce qu'ils ont ajouté.
   private offset: number;
 
   private constructor(path: string, list: Entry[], offset: number) {
@@ -102,7 +97,7 @@ export class Journal {
     this.next = Math.max(this.next, added.reduce((max, e) => Math.max(max, e.id), 0) + 1);
   }
 
-  // L'identifiant se prend tout de suite : deux messages simultanés n'en
+  // L'identifiant se prend tout de suite : deux appels simultanés n'en
   // partagent jamais un.
   reserve(): number {
     return this.next++;
@@ -114,7 +109,7 @@ export class Journal {
   append(e: NewEntry, now: Date, id?: number): Entry {
     // Ce qu'un autre écrivain a ajouté d'abord : l'id réservé ici le suit.
     if (id === undefined) this.refresh();
-    const entry: Entry = { id: id ?? this.reserve(), time: now.toISOString(), ...e, question: e.question ?? null };
+    const entry: Entry = { id: id ?? this.reserve(), time: now.toISOString(), ...e };
     appendFileSync(this.path, `${JSON.stringify(entry)}\n`);
     this.refresh();
     return entry;
@@ -123,46 +118,4 @@ export class Journal {
   entries(): readonly Entry[] {
     return this.list;
   }
-}
-
-// Une question ouverte de l'humain : ce que la boîte montre.
-export type Question = { id: number; from: string; time: string; summary: string; hasBody: boolean };
-
-const answeredIds = (entries: readonly Entry[]): Set<number> =>
-  new Set(entries.filter((e) => e.op === "answer" && e.outcome === "ok" && e.question !== null).map((e) => e.question as number));
-
-const asQuestion = (e: Entry): Question => ({ id: e.id, from: e.caller, time: e.time, summary: e.summary ?? "", hasBody: e.text !== null });
-
-// Les `ask-human` acceptés sans réponse acceptée, du plus ancien au plus récent.
-export function inbox(entries: readonly Entry[]): Question[] {
-  const answered = answeredIds(entries);
-  return entries.filter((e) => e.op === "ask-human" && e.outcome === "ok" && !answered.has(e.id)).map(asQuestion);
-}
-
-export function findQuestion(entries: readonly Entry[], id: number): Question | "answered" | null {
-  const ask = entries.find((e) => e.id === id && e.op === "ask-human" && e.outcome === "ok");
-  if (ask === undefined) return null;
-  return answeredIds(entries).has(id) ? "answered" : asQuestion(ask);
-}
-
-// Ce que `container` attend : `human` après une question, le nom d'un container
-// après un message, tant que celui-ci n'a pas répondu par un message. Voir
-// `memberWaitingOn` pour ce qui l'écarte.
-export function waitingOn(entries: readonly Entry[], container: string): string | null {
-  const ok = entries.filter((e) => e.outcome === "ok");
-  const answered = answeredIds(ok);
-  const lastIndex = ok.findLastIndex((e) => e.caller === container && (e.op === "message" || e.op === "ask-human"));
-  if (lastIndex < 0) return null;
-  const last = ok[lastIndex];
-  if (last.op === "ask-human") return answered.has(last.id) ? null : "human";
-  const replied = ok.slice(lastIndex + 1).some((e) => e.op === "message" && e.caller === last.to && e.to === container);
-  return replied ? null : last.to;
-}
-
-// La règle des deux affichages (`forge team status`, le `status` de l'API) : seule
-// une session vivante qui ne travaille pas (`idle`, `done`) attend. La fin de la
-// session clôt l'attente (`release` l'arrête), pas l'absence de tâche : le Pilote,
-// que personne n'assigne, attend aussi.
-export function memberWaitingOn(entries: readonly Entry[], container: string, session: string): string | null {
-  return session === "idle" || session === "done" ? waitingOn(entries, container) : null;
 }

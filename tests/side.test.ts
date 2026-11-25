@@ -34,8 +34,8 @@ test("another host command on the laptop names ssh", () => {
     e.message === "forge list runs on the forge host: ssh <host> forge list.");
 });
 
-test("the host commands that forge fetch and ship call over SSH say where they run", () => {
-  for (const cmd of ["upload-pack", "task-base"]) {
+test("the host command that forge fetch calls over SSH says where it runs", () => {
+  for (const cmd of ["upload-pack"]) {
     assert.throws(() => requireSide(cmd, "laptop"), (e: unknown) =>
       e instanceof ForgeError &&
       e.message === `forge ${cmd} runs on the forge host: ssh <host> forge ${cmd}.`);

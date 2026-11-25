@@ -1,21 +1,11 @@
 #!/usr/bin/env node
-// forge-team : la façon dont un agent parle à ses coéquipiers et à l'humain
-// (DX 5, §5.4). Une requête JSON sur une ligne vers la socket de l'API de
-// l'hôte, une réponse sur une ligne ; l'hôte sait qui appelle par la socket, pas
-// par ce que ce script dit. Aucune dépendance.
+// forge-team : la façon dont un exécuteur parle à forge. Une requête JSON sur
+// une ligne vers la socket de l'API de l'hôte, une réponse sur une ligne ;
+// l'hôte sait qui appelle par la socket, pas par ce que ce script dit. Aucune
+// dépendance.
 //
-//   forge-team message <container> <résumé>     le corps : stdin, s'il n'est pas un terminal et pas vide
-//   forge-team assign <container> [<tâche>] [--from <tâche>]
-//                                               la consigne : stdin ; --from part de la branche d'une autre tâche
-//   forge-team release <container>
-//   forge-team ask <résumé>                     une question pour l'humain ; le corps comme pour message
-//   forge-team status
-//   forge-team done                             un exécuteur de projet : sa mission est faite
-//
-// Dans un exécuteur de projet (la socket répond `status` par une mission),
-// seules `done` et `status` existent : toute autre sous-commande affiche
-// l'usage de la mission et sort en 64. Les autres sous-commandes sont celles
-// des équipes (retirées avec elles).
+//   forge-team done      ta mission est faite et commitée : forge range ta branche
+//   forge-team status    la mission que tu tiens, ou aucune
 //
 // Sorties : 0 accepté ; 1 refusé par l'API (la raison sur stderr) ; 2 socket
 // injoignable ; 64 mauvais usage.
@@ -23,94 +13,27 @@
 const net = require("node:net");
 
 const SOCKET = process.env.FORGE_API_SOCKET || "/var/lib/forge/api.sock";
-const USAGE = `usage: forge-team message <container> <summary>   (the body, if any, on stdin)
-       forge-team assign <container> [<task>] [--from <task>]   (the instruction on stdin)
-       forge-team release <container>
-       forge-team ask <summary>                  (the body, if any, on stdin)
-       forge-team status
-       forge-team done`;
-
-const MISSION_USAGE = `usage: forge-team done     (your mission is finished and committed)
+const USAGE = `usage: forge-team done     (your mission is finished and committed)
        forge-team status`;
 
-function usage(message, text = USAGE) {
-  process.stderr.write(`forge-team: ${message}\n${text}\n`);
+function usage(message) {
+  process.stderr.write(`forge-team: ${message}\n${USAGE}\n`);
   process.exit(64);
 }
 
-// Tout stdin, ou "" quand c'est un terminal : rien à attendre alors.
-async function stdinText() {
-  if (process.stdin.isTTY) return "";
-  const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-// Le corps d'un message ou d'une question : absent s'il est vide.
-async function optionalBody() {
-  const body = await stdinText();
-  return body.trim() === "" ? {} : { body };
-}
-
-// Une sonde `status` : l'API d'un exécuteur de projet répond par une mission.
-// Toute erreur (socket absente, refus, réponse vide) vaut « pas une mission » :
-// la sous-commande suit alors son cours et rapporte sa propre erreur.
-async function holdsMission() {
-  const out = await call({ op: "status" }, false);
-  try {
-    return "mission" in JSON.parse(out.split("\n")[0]);
-  } catch {
-    return false;
-  }
-}
-
-async function request() {
+function request() {
   const [command, ...args] = process.argv.slice(2);
-  if (command !== "done" && command !== "status" && await holdsMission()) {
-    usage(command === undefined ? "a command is required" : `${command} does not exist in a mission container`, MISSION_USAGE);
+  if (command !== "done" && command !== "status") {
+    usage(command === undefined ? "a command is required" : `unknown command ${command}`);
   }
-  const arity = (min, max) => {
-    if (args.length < min || args.length > max) usage(`${command} takes ${min === max ? min : `${min} to ${max}`} argument(s)`);
-  };
-  switch (command) {
-    case "message":
-      arity(2, 2);
-      return { op: "message", to: args[0], summary: args[1], ...(await optionalBody()) };
-    case "assign": {
-      // `--from <tâche>` : la nouvelle branche part de celle d'une autre tâche du même développeur.
-      let from;
-      const at = args.indexOf("--from");
-      if (at !== -1) {
-        from = args[at + 1];
-        if (from === undefined || from.startsWith("-")) usage("--from takes a task name");
-        args.splice(at, 2);
-      }
-      arity(1, 2);
-      const text = await stdinText();
-      if (text.trim() === "") usage("assign reads the instruction from stdin");
-      return { op: "assign", to: args[0], ...(args[1] === undefined ? {} : { task: args[1] }), ...(from === undefined ? {} : { from }), text };
-    }
-    case "release":
-      arity(1, 1);
-      return { op: "release", to: args[0] };
-    case "ask":
-      arity(1, 1);
-      return { op: "ask-human", summary: args[0], ...(await optionalBody()) };
-    case "status":
-      arity(0, 0);
-      return { op: "status" };
-    case "done":
-      arity(0, 0);
-      return { op: "done" };
-    default:
-      return usage(command === undefined ? "a command is required" : `unknown command ${command}`);
-  }
+  if (args.length > 0) usage(`${command} takes no argument`);
+  return { op: command };
 }
 
 // La requête part sans fermer l'écriture : le device proxy d'Incus prend la fin
 // du flux d'un côté pour la fin de la connexion, et la réponse serait perdue.
 // La réponse est une ligne, que l'on attend jusqu'à son saut de ligne.
-function call(req, fatal = true) {
+function call(req) {
   return new Promise((resolve) => {
     const socket = net.connect(SOCKET);
     let out = "";
@@ -121,7 +44,6 @@ function call(req, fatal = true) {
       if (out.includes("\n")) socket.destroy();
     });
     socket.on("error", (e) => {
-      if (!fatal) return resolve("");
       process.stderr.write(`forge-team: cannot reach the forge API at ${SOCKET}: ${e.code || e.message}\n`);
       process.exit(2);
     });
@@ -130,10 +52,10 @@ function call(req, fatal = true) {
 }
 
 (async () => {
-  const req = await request();
+  const req = request();
   const out = await call(req);
   // Une connexion fermée sans réponse ne dit pas que la demande a échoué : elle a
-  // pu aboutir. La refaire à l'aveugle donnerait un doublon (un second assign).
+  // pu aboutir. La refaire à l'aveugle donnerait un doublon.
   if (out === "") {
     process.stderr.write("forge-team: no answer from the forge API: the request may have been carried out; " +
       "check forge-team status before trying again\n");
@@ -150,22 +72,17 @@ function call(req, fatal = true) {
     process.stderr.write(`forge-team: ${reply.error}\n`);
     process.exit(1);
   }
-  if (reply.warning) process.stderr.write(`forge-team: warning: ${reply.warning}\n`);
   if (req.op === "status" && "mission" in reply) {
-    // La réponse d'un exécuteur de projet : sa mission, ou aucune.
     const m = reply.mission;
     process.stdout.write(m === null ? "ok\nmission: none\n"
       : `ok\nmission: ${m.subtask} ticket=${m.ticket} repository=${m.repository} branch=${m.branch} base=${m.base}\n`);
-  } else if (req.op === "status") {
+  } else if (req.op === "status" && Array.isArray(reply.executors)) {
+    // La réponse du contrôle : une ligne par exécuteur.
     process.stdout.write("ok\n");
-    const you = reply.you;
-    process.stdout.write(`you: ${you.name} role=${you.role} capabilities=${you.capabilities.join(",") || "none"} ` +
-      `may-talk-to=${you.talkTo.join(",") || "nobody"}\n`);
-    for (const r of reply.team) {
-      process.stdout.write(`${r.name} role=${r.role} ${r.publishes ? "takes-a-task-name" : "no-task-name"} ${r.busy ? `task=${r.task === null ? "(no branch)" : r.task}` : "free"}${r.assignedByYou ? " assigned-by-you" : ""} ` +
-        `session=${r.session}${r.waitingOn ? ` waiting-on=${r.waitingOn}` : ""}\n`);
+    for (const e of reply.executors) {
+      process.stdout.write(`${e.name} session=${e.session} mission=${e.mission === null ? "none" : e.mission.subtask}\n`);
     }
   } else {
-    process.stdout.write(`ok ${reply.id}\n`);
+    process.stdout.write(`ok${typeof reply.id === "number" ? ` ${reply.id}` : ""}\n`);
   }
 })();

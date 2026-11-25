@@ -1,9 +1,9 @@
 // forge hc-exec <container> <line>   (on the host)
 //
-// The host end of Herdr App's transport: runs hc's own shell line in a member's
+// The host end of Herdr App's transport: runs hc's own shell line in a project's
 // container, as aiuser. The line comes from the human's hc client, through the
-// human's SSH session: never from an agent. Only containers the host's config
-// declares are served: no other container of the host, and no name that is not
+// human's SSH session: never from an agent. Only the containers of the host's
+// project are served: no other container of the host, and no name that is not
 // one, reaches `incus exec`.
 //
 // hc starts its core on first use, at the place its environment names. A
@@ -18,13 +18,13 @@ import { provisioningMarker } from "../containers.ts";
 import { HC_ENV, HC_RUNTIME_DIR } from "../hc-session.ts";
 import { incus } from "../incus.ts";
 import { configPath } from "../paths.ts";
-import { memberNamed } from "../team.ts";
+import { projectMemberNamed } from "../project.ts";
 import { validateContainerName } from "../validate.ts";
 
 export async function cmdHcExec(ctx: Context, container: string | undefined, line: string | undefined): Promise<number> {
   validateContainerName(container ?? "");
   if (line === undefined || line === "") throw new ForgeError("Usage: forge hc-exec <container> <line>");
-  memberNamed(loadConfig(configPath()), container as string);
+  projectMemberNamed(loadConfig(configPath()).project, container as string);
   if (await provisioningMarker(ctx, container as string) !== null) {
     throw new ForgeError(`${container} is still being provisioned: try again when forge team converge has finished.`);
   }

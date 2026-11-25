@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fakeContext, type ExecRule, type FakeContext } from "./lib/fake-context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
 import { parseConfig } from "../cli/lib/config.ts";
-import type { ApiDeps } from "../cli/lib/api/handle.ts";
+import type { ApiDeps } from "../cli/lib/api/missions.ts";
 import { Journal } from "../cli/lib/api/journal.ts";
 import { hostSocketPath, serveApi } from "../cli/lib/api/server.ts";
 import { handleMission, MISSION_KEY, parseMissionRequest } from "../cli/lib/api/missions.ts";

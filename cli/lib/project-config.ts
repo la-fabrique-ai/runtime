@@ -1,8 +1,7 @@
 // La clé `project` de la configuration (forge à tickets) : les dépôts du
 // projet, ses exécuteurs, l'endroit des tickets. Validée à la main comme
-// `teams` : une faute de frappe arrête forge avec le fichier et la clé.
-import { configHelpers } from "./config-fields.ts";
-import { bool, envPath, memory, plugins } from "./team-config.ts";
+// le reste de la config : une faute de frappe arrête forge avec le fichier et la clé.
+import { bool, configHelpers, envPath, memory, plugins } from "./config-fields.ts";
 import { validateRepo } from "./validate.ts";
 import { isTicketId } from "./tickets/model.ts";
 

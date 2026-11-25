@@ -1,4 +1,4 @@
-// Les sessions d'un membre d'équipe tournent dans le core hc de son container
+// La session d'un exécuteur tourne dans le core hc de son container
 // (DX 5, §5.8) : forge les pilote par `incus exec` avec un argv, jamais par un
 // shell. Le texte d'une consigne arrive comme fichier, jamais dans un argv.
 import type { Context, ExecResult } from "./context.ts";
@@ -120,11 +120,10 @@ async function requireStarted(ctx: Context, container: string, timeoutMs?: numbe
 // lit et la donne à claude comme premier message. `task` est le nom de la
 // branche, ou null pour une tâche sans branche ; le marqueur `--forge-task` suit
 // la forme `<container>-<tâche>` que `forge list` et `forge stop` lisent.
-// `cwd` : le dossier où l'agent travaille, /workspace pour un membre d'équipe,
-// le clone d'un dépôt (/workspace/<nom>) pour un exécuteur.
-// `timeoutMs` : chaque appel hc ou incus qui suit l'egress a ce délai (l'API de
-// projet, dans sa file) ; dépassé, c'est un refus qui nomme l'étape. Sans, rien
-// ne change pour les équipes.
+// `cwd` : le dossier où l'agent travaille, le clone d'un dépôt
+// (/workspace/<nom>) pour un exécuteur, /workspace par défaut.
+// `timeoutMs` : chaque appel hc ou incus qui suit l'egress a ce délai (l'API,
+// dans sa file) ; dépassé, c'est un refus qui nomme l'étape.
 export async function startSession(
   ctx: Context, m: { name: string }, task: string | null, instruction: string, opts: { cwd?: string; timeoutMs?: number } = {},
 ): Promise<void> {
@@ -167,9 +166,9 @@ export async function clearMessages(ctx: Context, container: string, opts: { tim
     execAsAgentArgv(ctx, container, ["find", MESSAGES_DIR, "-mindepth", "1", "-delete"], opts));
 }
 
-// Vrai d'un membre jamais assigné comme d'un membre libéré (`release` arrête sa
-// session).
-export const NO_SESSION = "has no live session: a member has one from the moment someone assigns it a task until it is released (forge-team assign, with that capability)";
+// Vrai d'un exécuteur jamais assigné comme d'un exécuteur libéré (`release`
+// arrête sa session).
+export const NO_SESSION = "has no live session: an executor has one from the moment it is given a mission until it is released";
 
 // Arrête la session sans retirer le terminal : l'humain peut relire la session
 // terminée dans Herdr App, et le prochain `assign` la remplace (startSession).
@@ -178,59 +177,6 @@ export const NO_SESSION = "has no live session: a member has one from the moment
 export async function stopSession(ctx: Context, container: string, opts: { timeoutMs?: number } = {}): Promise<boolean> {
   const r = await inTime(`hc kill in ${container}`, opts.timeoutMs, execMaybeTimed(ctx, hcArgv(container, ["kill", SESSION]), opts.timeoutMs));
   return r.code === 0;
-}
-
-// Un message de l'API (DX 5, §5.4) : le corps, s'il y en a un, devient un
-// fichier du container du destinataire ; la session ne reçoit qu'une ligne, que
-// forge seul écrit : son préfixe, un identifiant de journal, le nom de
-// l'expéditeur (tiré de la socket) et le résumé, que le protocole a vérifié
-// contre sa liste de caractères. Aucun corps ne passe par un argv ni par un
-// terminal. L'avis est tapé tout de suite, même pendant un tour : Claude Code
-// le reçoit à sa prochaine frontière d'outil, dans le tour en cours.
-// Quand l'expéditeur est un agent que le destinataire a lui-même assigné,
-// l'avis le dit (`retained` : sa tâche) et nomme qui libérer : un rappel écrit
-// par forge, au moment où l'agent doit agir. Ce ne sont que des noms de
-// container et de tâche que forge a déjà validés, jamais un texte d'agent
-// avant le résumé.
-export async function deliverMessage(
-  ctx: Context, container: string, from: string, id: number, summary: string, body: string | null,
-  retained: { task: string | null } | null = null,
-): Promise<{ turn: number }> {
-  const path = `${MESSAGES_DIR}/${id}.md`;
-  const onTask = retained === null ? "" :
-    `, on the task you assigned it (${retained.task ?? "without a branch"}; forge-team release ${from} once it is finished)`;
-  return { turn: await typeWithBody(ctx, container, `[forge] message ${id} from ${from}${onTask}: ${summary}`, path, body) };
-}
-
-// La réponse de l'humain à une question de l'agent (`forge team answer`), livrée
-// comme un message : le résumé derrière le préfixe de forge, le corps dans un
-// fichier `a<question>.md`. Seulement à une session forge-agent vivante : sans
-// elle, rien n'est tapé (« no-session »). Un autre échec de livraison se lève,
-// et la question reste ouverte pour qu'on la réessaie.
-export async function deliverAnswer(
-  ctx: Context, container: string, question: number, summary: string, body: string | null,
-): Promise<"delivered" | "no-session"> {
-  if (!(await awaitLiveSession(ctx, container))) return "no-session";
-  try {
-    await typeWithBody(ctx, container, `[forge] answer ${question} from human: ${summary}`, `${MESSAGES_DIR}/a${question}.md`, body);
-  } catch (e) {
-    // La session s'est arrêtée entre le regard et l'envoi.
-    if (e instanceof ForgeError && e.message.includes(NO_SESSION)) return "no-session";
-    throw e;
-  }
-  return "delivered";
-}
-
-// Le corps, s'il y en a un, devient un fichier du container (uid d'aiuser, mode
-// 600) ; la ligne tapée le nomme, derrière ce que forge a écrit.
-async function typeWithBody(ctx: Context, container: string, line: string, path: string, body: string | null): Promise<number> {
-  if (body !== null) {
-    const pushed = await pushText(ctx, container, path, body, { uid: 1001, gid: 1001, mode: "600" });
-    if (pushed.code !== 0) {
-      throw new ForgeError(`delivery to ${container} failed: ${firstLine(pushed.stderr) || `exit code ${pushed.code}`}`);
-    }
-  }
-  return typeNotice(ctx, container, `${line}${body === null ? "" : ` (detail: ${path})`}`);
 }
 
 // Tape une ligne que forge a écrite dans la session `agent` du container : un

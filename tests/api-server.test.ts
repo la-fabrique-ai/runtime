@@ -13,19 +13,9 @@ import { REQUEST_MAX } from "../cli/lib/api/protocol.ts";
 import { hostSocketPath, serveApi } from "../cli/lib/api/server.ts";
 
 const cfg = parseConfig("/c.json", {
-  teams: {
-    web: {
-      repo: "o/web",
-      roles: {
-        lead: { capabilities: ["repo", "assign", "ask-human"], talkTo: ["team"] },
-        dev: { count: 2, capabilities: ["repo", "publish"], talkTo: ["lead"] },
-        reviewer: { capabilities: ["repo"], talkTo: ["lead"] },
-      },
-    },
-  },
-  pilot: { capabilities: ["assign"], talkTo: ["web"] },
+  project: { repositories: { web: { repo: "o/web" } }, executors: { count: 2 } },
 });
-const NAMES = ["agent-pilot", "agent-web-lead", "agent-web-dev-1", "agent-web-dev-2", "agent-web-reviewer"];
+const NAMES = ["agent-control", "agent-executor-1", "agent-executor-2"];
 
 let root: string;
 let stop: AbortController;
@@ -64,19 +54,19 @@ function talk(container: string, payload: string | Buffer): Promise<string> {
   });
 }
 
-test("each member that needs the API has a private socket in a private directory", () => {
+test("each container of the project has a private socket in a private directory", () => {
   for (const n of NAMES) assert.equal(statSync(hostSocketPath(n)).mode & 0o777, 0o600, n);
   assert.equal(statSync(process.env.FORGE_API_RUNTIME!).mode & 0o777, 0o700);
 });
 
-test("the caller is the socket's member: the same line gets each member's own answer", async () => {
-  const rows = async (c: string) => (JSON.parse(await talk(c, '{"op":"status"}\n')) as { team: { name: string }[] }).team.map((r) => r.name);
-  assert.deepEqual(await rows("agent-web-dev-1"), ["agent-web-lead"]);
-  assert.deepEqual(await rows("agent-web-lead"), ["agent-web-dev-1", "agent-web-dev-2", "agent-web-reviewer"]);
+test("the caller is the socket's container: the same line gets each container's own answer", async () => {
+  assert.deepEqual(JSON.parse(await talk("agent-executor-1", '{"op":"status"}\n')), { ok: true, mission: null });
+  const control = JSON.parse(await talk("agent-control", '{"op":"status"}\n')) as { executors: { name: string }[] };
+  assert.deepEqual(control.executors.map((e) => e.name), ["agent-executor-1", "agent-executor-2"]);
 });
 
 test("a line that never ends is refused at the cap, and the connection closes", async () => {
-  const out = await talk("agent-web-dev-1", Buffer.alloc(REQUEST_MAX + 1, 0x61));
+  const out = await talk("agent-executor-1", Buffer.alloc(REQUEST_MAX + 1, 0x61));
   assert.equal(out, '{"ok":false,"error":"request too long"}\n');
 });
 
@@ -101,13 +91,13 @@ async function restartSlow(lineTimeoutMs: number, execDelayMs: number): Promise<
 
 test("a request slower than the line timeout still gets its answer", async () => {
   await restartSlow(100, 300);
-  const out = await talk("agent-web-dev-1", '{"op":"status"}\n');
+  const out = await talk("agent-executor-1", '{"op":"status"}\n');
   assert.equal((JSON.parse(out) as { ok: boolean }).ok, true, out);
 });
 
 test("a line still unfinished at the line timeout is cut", async () => {
   await restartSlow(100, 0);
-  assert.equal(await talk("agent-web-dev-1", '{"op":"status"'), "");
+  assert.equal(await talk("agent-executor-1", '{"op":"status"'), "");
 });
 
 test("a socket path over the Unix limit is refused", () => {
@@ -122,9 +112,9 @@ test("aborting closes every listener and removes the socket files", async () => 
   assert.ok(paths.every((p) => !existsSync(p)));
 });
 
-// Un hôte sans équipe : le service ne sort pas (systemd le relancerait en
+// Un hôte sans projet : le service ne sort pas (systemd le relancerait en
 // boucle), et s'arrête proprement sur SIGTERM.
-test("forge api serve with no team keeps running, and stops cleanly on SIGTERM", async () => {
+test("forge api serve with no project keeps running, and stops cleanly on SIGTERM", async () => {
   const dir = mkdtempSync(join(tmpdir(), "forge-api-idle-"));
   try {
     const child = spawn(join(import.meta.dirname, "..", "cli", "forge"), ["api", "serve"], {

@@ -320,7 +320,7 @@ test("a changed orchestrator source, or a changed prefix, restarts the service a
 test("the instructions of project members are the mission text, with the executor's prompt for an executor only", async () => {
   const cfg = config();
   const { fake, ctx } = setup(NO_CLONE);
-  const mission = readFileSync(join(process.cwd(), "container", "CLAUDE-executor.md"), "utf8");
+  const mission = readFileSync(join(process.cwd(), "container", "CLAUDE.md"), "utf8");
   const prompt = readFileSync(join(process.cwd(), "teams", "reference", "prompts", "executor.md"), "utf8");
   const claudeMd = (name: string) => fake.files.get(`agent-forge/${name}/home/aiuser/.claude/CLAUDE.md`)?.content;
   await provisionExecutor(ctx, cfg, member(cfg, executorName(1)));

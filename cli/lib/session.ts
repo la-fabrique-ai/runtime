@@ -1,4 +1,4 @@
-// Starting a container for a team member: make sure it runs, with the egress
+// Starting a project container: make sure it runs, with the egress
 // rules honoured.
 import type { Context } from "./context.ts";
 import { inTime, mustSucceed } from "./context.ts";

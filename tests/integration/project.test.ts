@@ -9,7 +9,7 @@
 // like incus.test.ts. Nothing talks to GitHub: the origin mirror is seeded from
 // a local repository, and the token is a throwaway string. The converge is the
 // real `forge team converge`; the API runs in this process (serveApi), with the
-// same environment, as api.test.ts does. A session is never a real Claude: each
+// same environment, as the forge-api service does. A session is never a real Claude: each
 // executor's forge-agent is replaced by a stub that announces itself idle and
 // sleeps, so a session stays live without a model.
 import { test, before, after, type TestContext } from "node:test";

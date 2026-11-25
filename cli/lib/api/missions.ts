@@ -1,10 +1,11 @@
-// Les verbes de mission de l'API d'un projet (forge à tickets, plan 1c) : le
-// container de contrôle (l'orchestrateur) confie, libère et observe ; un
-// exécuteur dit qu'il a fini. Le contrat sur le fil est celui du client de
-// l'orchestrateur, cli/lib/orchestrator/host.ts : mêmes clés, mêmes valeurs.
+// Les verbes de mission de l'API d'un projet (forge à tickets) : le container
+// de contrôle (l'orchestrateur) confie, libère et observe ; un exécuteur dit
+// qu'il a fini. Le contrat sur le fil est celui du client de l'orchestrateur,
+// cli/lib/orchestrator/host.ts : mêmes clés, mêmes valeurs. `forge team assign`
+// et `release`, la main de l'humain, passent par les mêmes fonctions.
 //
-// Comme handle.ts : l'appelant vient de la socket, jamais de la requête ; une
-// requête est validée à la main, champ par champ ; chaque appel laisse une
+// L'appelant vient de la socket, jamais de la requête ; une requête est
+// validée à la main, champ par champ ; chaque appel laisse une
 // ligne au journal, sauf les lectures acceptées (status, events, et le status d'un exécuteur, que forge-team sonde).
 // `assign`, `release` et `done` passent un à la fois (`exclusive()`), et l'id
 // d'un `done` se prend en l'écrivant au journal, dans cette file : un
@@ -24,15 +25,26 @@ import { ensureRunning } from "../session.ts";
 import { shellQuote } from "../shell.ts";
 import { isGitRef, isSubtaskId, isTicketId } from "../tickets/model.ts";
 import { validateGitRef } from "../validate.ts";
-import { exclusive, type ApiDeps, type ApiReply } from "./handle.ts";
-import type { Entry, NewEntry } from "./journal.ts";
-import { checkText, INSTRUCTION_MAX, REQUEST_MAX } from "./protocol.ts";
+import type { ForgeConfig } from "../config.ts";
+import type { Entry, Journal, NewEntry } from "./journal.ts";
+import { checkText, hasSecret, INSTRUCTION_MAX, REQUEST_MAX } from "./protocol.ts";
+
+export type ApiDeps = { ctx: Context; cfg: ForgeConfig; journal: Journal; secrets: readonly string[]; now: () => Date };
+export type ApiReply = { ok: true; [k: string]: unknown } | { ok: false; error: string };
+
+// `assign`, `release` et `done` passent un à la fois, tous appelants
+// confondus (l'orchestrateur, un exécuteur, l'humain par `forge team assign`
+// dans le même processus) : deux demandes au même instant ne voient pas le
+// même exécuteur libre.
+let exclusiveChain: Promise<unknown> = Promise.resolve();
+export function exclusive<T>(fn: () => Promise<T>): Promise<T> {
+  const run = exclusiveChain.then(fn, fn);
+  exclusiveChain = run.catch(() => {});
+  return run;
+}
 
 // La mission tenue par un exécuteur : le JSON d'une HeldMission, absent quand il est libre.
 export const MISSION_KEY = "user.forge.mission";
-
-// Les verbes de mission qui ne sont pas déjà des verbes de l'API d'équipe.
-export type MissionOp = "events" | "done";
 
 export type MissionRequest =
   | { op: "status" }
@@ -42,7 +54,7 @@ export type MissionRequest =
   | { op: "done" };
 
 type Kind = ProjectMember["kind"];
-type MissionVerb = MissionRequest["op"];
+export type MissionVerb = MissionRequest["op"];
 
 // Les verbes de chaque socket : un exécuteur ne confie rien, le contrôle ne finit rien.
 const VERBS: Record<Kind, readonly MissionVerb[]> = {
@@ -59,7 +71,6 @@ const HELD_FIELDS = MISSION_FIELDS.filter((k) => k !== "instruction");
 const EXECUTOR = /^agent-executor-[1-9][0-9]*$/;
 const PUT_IN_A_FILE = "put it in a file of your branch and send its path";
 
-const hasSecret = (text: string, secrets: readonly string[]) => secrets.some((s) => s !== "" && text.includes(s));
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 function unknownFields(where: string, o: Record<string, unknown>, allowed: readonly string[]): void {
@@ -254,6 +265,42 @@ async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Prom
     case "done":
       return exclusive(() => done(d, caller));
   }
+}
+
+// ---------------------------------------------------------------- la main de l'humain
+
+// `forge team assign` et `forge team release` (spec §6.10) : les fonctions des
+// verbes, appelées de l'hôte par l'humain, sans l'orchestrateur. La mission est
+// lue comme celle de l'API (mêmes refus) ; chaque appel est journalisé, accepté
+// ou refusé, sous l'appelant `human` et l'id 0, hors de la suite que le service
+// numérote en mémoire (comme `forge notify`) : ce n'est jamais un évènement.
+async function asHuman(journal: Journal, entry: Omit<NewEntry, "caller" | "outcome" | "error">, fn: () => Promise<void>): Promise<void> {
+  const write = (outcome: Entry["outcome"], error: string | null) =>
+    journal.append({ caller: "human", ...entry, outcome, error }, new Date(), 0);
+  try {
+    await fn();
+  } catch (e) {
+    write("refused", e instanceof ForgeError ? e.message : "internal error");
+    throw e;
+  }
+  write("ok", null);
+}
+
+export async function humanAssign(
+  ctx: Context, p: ProjectConfig, journal: Journal, secrets: readonly string[], to: string, spec: unknown,
+): Promise<void> {
+  if (!EXECUTOR.test(to) || !executors(p).some((m) => m.name === to)) throw new ForgeError(`${to} is not an executor of this project`);
+  const mission = parseMission(spec, secrets);
+  if (!Object.hasOwn(p.repositories, mission.repository)) {
+    throw new ForgeError(`repository ${mission.repository} is not declared in the project`);
+  }
+  await asHuman(journal, { op: "assign", to, task: mission.subtask, summary: null, text: mission.instruction, mission: held(mission) },
+    () => assign(ctx, p, to, mission));
+}
+
+export async function humanRelease(ctx: Context, p: ProjectConfig, journal: Journal, to: string): Promise<void> {
+  if (!EXECUTOR.test(to) || !executors(p).some((m) => m.name === to)) throw new ForgeError(`${to} is not an executor of this project`);
+  await asHuman(journal, { op: "release", to, task: null, summary: null, text: null }, () => release(ctx, to));
 }
 
 // Libre, ou tenant déjà cette sous-tâche (la reprise de l'orchestrateur : sa

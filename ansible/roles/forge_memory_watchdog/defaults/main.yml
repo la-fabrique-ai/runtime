@@ -16,8 +16,8 @@ forge_memory_watchdog_interval: 1
 # Incus names a container's cgroup "lxc.payload.<project>_<container>": the
 # containers of the agent-forge project.
 forge_memory_watchdog_cgroup_prefix: lxc.payload.agent-forge_
-# Of those, only the team containers: every one is named agent-<team>-… (or
-# agent-pilot). forge-proxy, in the same project, carries every strict
+# Of those, only the project's containers: every one is named agent-… (the
+# control container, agent-control, and the executors, agent-executor-<n>). forge-proxy, in the same project, carries every strict
 # container's traffic: killing its squid would cut them all off.
 forge_memory_watchdog_container_prefix: agent-
 # Where the script goes, and the node that runs it (NodeSource's, installed by

@@ -1,4 +1,4 @@
-// Herdr App's machines (DX 5, spec §5.6): one per container of the team, named
+// Herdr App's machines (DX 5, spec §5.6): one per container of the project, named
 // after it, reached through `forge hc-via` on the Mac and `forge hc-exec` on the
 // host: a byte pipe, no secret. forge owns the machines whose name starts with
 // `<host alias>-` and whose command is its own transport for that alias; a

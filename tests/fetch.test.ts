@@ -277,7 +277,7 @@ test("a tag with a C1 control is warned about without the control", async () => 
 test("a host with no team for the repository is named, with the repository, before git is asked anything", async () => {
   saveHost(host("forge-local"));
   const ctx = hybridContext({ rules: [{ match: "'forge' 'team' 'for-repo'", code: 1 }] });
-  await assert.rejects(cmdFetch(ctx, { cwd: layout.clone }), /forge-local has no team for acme\/widgets/);
+  await assert.rejects(cmdFetch(ctx, { cwd: layout.clone }), /forge-local has no repository acme\/widgets: its project does not declare it/);
   assert.ok(!ctx.calls.some((c) => c[0] === "git" && c.includes("fetch")));
 });
 
