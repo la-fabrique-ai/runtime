@@ -10,9 +10,11 @@ export function parseDocument(text: string): { fields: Record<string, string>; b
   const body = cut === -1 ? "" : text.slice(cut + 2);
   const fields: Record<string, string> = {};
   if (head !== "") {
-    for (const line of head.split("\n")) {
+    for (const [i, line] of head.split("\n").entries()) {
       const m = LINE.exec(line);
-      if (!m) throw new ConnectorError(`header line is not "key: value": ${JSON.stringify(line)}`);
+      // Le numéro, pas la ligne : elle peut être du texte libre (un corps sans
+      // ligne vide), qui finirait dans le journal de l'orchestrateur.
+      if (!m) throw new ConnectorError(`header line ${i + 1} is not "key: value"`);
       const key = m[1] ?? m[3];
       if (Object.hasOwn(fields, key)) throw new ConnectorError(`header key repeated: ${key}`);
       fields[key] = m[2] ?? "";

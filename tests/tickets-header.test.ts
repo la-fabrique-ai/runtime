@@ -21,8 +21,11 @@ test("une clé répétée est refusée", () => {
   assert.throws(() => parseDocument("id: T-1\nid: T-2\n\nx"), /repeated/);
 });
 
-test("une ligne qui n'est pas un champ est refusée", () => {
-  assert.throws(() => parseDocument("not a field\n\nx"));
+test("une ligne qui n'est pas un champ est refusée, par son numéro, sans citer son texte", () => {
+  assert.throws(
+    () => parseDocument("id: T-1\nun texte libre\n\nx"),
+    (e: Error) => e.message === 'header line 2 is not "key: value"',
+  );
 });
 
 test("formatDocument refuse un saut de ligne dans une valeur", () => {

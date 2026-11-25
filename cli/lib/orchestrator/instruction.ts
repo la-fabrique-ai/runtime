@@ -20,13 +20,14 @@ function cutBytes(s: string, max: number): string {
 export function devInstruction(c: Candidate, resumed: boolean): string {
   const { ticket, subtask } = c;
   const marker = `[cut: read the ticket ${ticket.id} in full]`;
-  const render = (description: string, text: string): string =>
+  type Parts = { title: string; description: string; text: string };
+  const render = ({ title, description, text }: Parts): string =>
     [
       `[forge] mission dev ${subtask.id} (ticket ${ticket.id})`,
       ...(resumed ? ["This mission resumes: your branch already holds the earlier work."] : []),
       "",
       "## Ticket",
-      ticket.title,
+      title,
       "",
       description,
       "",
@@ -41,21 +42,15 @@ export function devInstruction(c: Candidate, resumed: boolean): string {
       "",
     ].join("\n");
 
-  let description = ticket.description;
-  let text = subtask.text;
-  let out = render(description, text);
-  if (bytes(out) <= MAX_BYTES) return out;
-
-  // D'abord la description, puis le texte de la sous-tâche.
-  const excess = bytes(out) - MAX_BYTES + bytes(marker) + 1;
-  const keepDesc = bytes(description) - excess;
-  if (keepDesc >= 0) {
-    description = `${cutBytes(description, keepDesc)}\n${marker}`;
-  } else {
-    description = marker;
-    const rest = bytes(render(description, text)) - MAX_BYTES + bytes(marker) + 1;
-    text = `${cutBytes(text, bytes(text) - rest)}\n${marker}`;
+  const parts: Parts = { title: ticket.title, description: ticket.description, text: subtask.text };
+  // D'abord la description, puis le texte de la sous-tâche, enfin le titre :
+  // chacun est coupé de l'excédent (plus la place du marqueur), ou remplacé
+  // par le seul marqueur s'il est trop court pour l'absorber.
+  for (const key of ["description", "text", "title"] as const) {
+    const excess = bytes(render(parts)) - MAX_BYTES;
+    if (excess <= 0) break;
+    const keep = bytes(parts[key]) - excess - bytes(marker) - 1;
+    parts[key] = keep >= 0 ? `${cutBytes(parts[key], keep)}\n${marker}` : marker;
   }
-  out = render(description, text);
-  return out;
+  return render(parts);
 }

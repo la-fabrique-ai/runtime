@@ -68,8 +68,8 @@ test("candidates : ordre, in-dev, held, problème sans perdre les autres", () =>
   assert.match(r.problems[0], /^T-4: /);
 });
 
-const cand = (description = "Desc", text = "text 1") => ({
-  ticket: { ...ticket("T-1"), description },
+const cand = (description = "Desc", text = "text 1", title = "Title T-1") => ({
+  ticket: { ...ticket("T-1"), description, title },
   subtask: sub("T-1", 1, { text }),
   base: "origin/main",
 });
@@ -96,4 +96,13 @@ test("devInstruction coupe une description géante sur une frontière de caract�
   const bigText = devInstruction(cand("Desc", "y".repeat(100000)), false);
   assert.ok(Buffer.byteLength(bigText) <= 65536);
   assert.ok(bigText.includes(marker));
+});
+
+test("devInstruction coupe aussi un titre géant, après la description et le texte", () => {
+  const marker = "[cut: read the ticket T-1 in full]";
+  const out = devInstruction(cand("Desc", "text", "t".repeat(100000)), false);
+  assert.ok(Buffer.byteLength(out) <= 65536);
+  assert.ok(out.includes(marker));
+  // Tout est coupé, la fin de l'instruction reste.
+  assert.ok(out.endsWith("commit, then run: forge-team done\n"));
 });
