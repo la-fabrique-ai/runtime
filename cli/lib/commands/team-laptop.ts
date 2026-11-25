@@ -100,7 +100,7 @@ async function summary(ctx: Context, opts: TeamLaptopOptions): Promise<number> {
       if (r.code !== 0) throw new Error(r.stderr.trim().split("\n")[0] || `exit code ${r.code}`);
       const status = JSON.parse(r.stdout) as Partial<ProjectStatus>;
       if (!Array.isArray(status.members) || status.members.some((m) => typeof m?.kind !== "string")) {
-        throw new Error("an older forge answered: update the host");
+        throw new Error("an older forge replied: update the host");
       }
       const executors = status.members.filter((m) => m.kind === "executor" && m.present);
       const control = status.members.find((m) => m.kind === "control");

@@ -50,7 +50,7 @@ test("a line written before the ticket-driven model (a team verb) still reads, a
   const { dir, path } = tmp();
   try {
     Journal.open(path);
-    const old = { id: 5, time: NOW.toISOString(), caller: "agent-web-lead", op: "ask-human", to: null, task: null,
+    const old = { id: 5, time: NOW.toISOString(), caller: "agent-web-lead", op: "message", to: null, task: null,
       outcome: "ok", error: null, summary: "q", text: null, question: null };
     appendFileSync(path, `${JSON.stringify(old)}\n`);
     const j = Journal.open(path);

@@ -8,8 +8,8 @@ import type { HeldMission } from "../orchestrator/host.ts";
 import type { MissionVerb } from "./missions.ts";
 
 // Les verbes de mission (api/missions.ts). Un journal tenu avant le modèle à
-// tickets garde ses lignes et leurs ids : elles se lisent, leur `op` (message,
-// ask-human, answer) n'est plus écrit.
+// tickets garde ses lignes et leurs ids : elles se lisent, leur `op` (les
+// verbes des équipes) n'est plus écrit.
 export type JournalOp = MissionVerb;
 
 // `op` est null pour une ligne que le protocole n'a pas pu lire : elle n'a pas de verbe.
