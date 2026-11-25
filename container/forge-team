@@ -10,6 +10,10 @@
 //   forge-team release <container>
 //   forge-team ask <résumé>                     une question pour l'humain ; le corps comme pour message
 //   forge-team status
+//   forge-team done                             un exécuteur de projet : sa mission est faite
+//
+// Dans un exécuteur de projet, `status` montre la mission tenue. Les autres
+// sous-commandes sont celles des équipes (retirées par la partie 1d).
 //
 // Sorties : 0 accepté ; 1 refusé par l'API (la raison sur stderr) ; 2 socket
 // injoignable ; 64 mauvais usage.
@@ -21,7 +25,8 @@ const USAGE = `usage: forge-team message <container> <summary>   (the body, if a
        forge-team assign <container> [<task>] [--from <task>]   (the instruction on stdin)
        forge-team release <container>
        forge-team ask <summary>                  (the body, if any, on stdin)
-       forge-team status`;
+       forge-team status
+       forge-team done`;
 
 function usage(message) {
   process.stderr.write(`forge-team: ${message}\n${USAGE}\n`);
@@ -74,6 +79,9 @@ async function request() {
     case "status":
       arity(0, 0);
       return { op: "status" };
+    case "done":
+      arity(0, 0);
+      return { op: "done" };
     default:
       return usage(command === undefined ? "a command is required" : `unknown command ${command}`);
   }
@@ -122,7 +130,12 @@ function call(req) {
     process.exit(1);
   }
   if (reply.warning) process.stderr.write(`forge-team: warning: ${reply.warning}\n`);
-  if (req.op === "status") {
+  if (req.op === "status" && "mission" in reply) {
+    // La réponse d'un exécuteur de projet : sa mission, ou aucune.
+    const m = reply.mission;
+    process.stdout.write(m === null ? "ok\nmission: none\n"
+      : `ok\nmission: ${m.subtask} ticket=${m.ticket} repository=${m.repository} branch=${m.branch} base=${m.base}\n`);
+  } else if (req.op === "status") {
     process.stdout.write("ok\n");
     const you = reply.you;
     process.stdout.write(`you: ${you.name} role=${you.role} capabilities=${you.capabilities.join(",") || "none"} ` +

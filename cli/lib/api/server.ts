@@ -1,14 +1,18 @@
 // Le serveur de l'API (DX 5, §5.4) : une socket Unix de l'hôte par container.
 // L'appelant est le membre dont la socket a reçu la connexion, jamais ce que la
 // requête dit de lui ; un device `proxy` d'Incus place cette socket dans le
-// container (api/access.ts).
+// container (api/access.ts). Avec un projet (`cfg.project`), une socket par
+// container du projet, dont les requêtes sont des verbes de mission
+// (missions.ts) ; sinon, une par membre d'équipe qui a besoin de l'API.
 import { type Server, type Socket, createServer } from "node:net";
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ForgeError } from "../context.ts";
 import { apiRuntimeDir } from "../paths.ts";
+import { projectMembers } from "../project.ts";
 import { members, type Member } from "../team.ts";
-import { handleRequest, type ApiDeps } from "./handle.ts";
+import { handleRequest, type ApiDeps, type ApiReply } from "./handle.ts";
+import { handleMission } from "./missions.ts";
 import { REQUEST_MAX } from "./protocol.ts";
 
 // Une socket Unix tient en 107 octets (sun_path de Linux, moins le zéro final).
@@ -35,8 +39,19 @@ export function hostSocketPath(container: string): string {
 
 const reply = (socket: Socket, r: unknown) => socket.end(`${JSON.stringify(r)}\n`);
 
+// Ce qu'une socket sert : le nom du container appelant et le traitement d'une ligne.
+type Listener = { name: string; handle: (line: string) => Promise<ApiReply> };
+
+// Les sockets à ouvrir : celles du projet s'il y en a un, sinon celles des équipes.
+export function listeners(d: ApiDeps): Listener[] {
+  if (d.cfg.project !== null) {
+    return projectMembers(d.cfg.project).map((m) => ({ name: m.name, handle: (line: string) => handleMission(d, m, line) }));
+  }
+  return members(d.cfg).filter(needsApi).map((m) => ({ name: m.name, handle: (line: string) => handleRequest(d, m, line) }));
+}
+
 // Une requête par connexion : la première ligne, la réponse, puis la fermeture.
-function onConnection(d: ServeDeps, caller: Member, socket: Socket): void {
+function onConnection(d: ServeDeps, caller: Listener, socket: Socket): void {
   const chunks: Buffer[] = [];
   let size = 0;
   socket.setTimeout(d.lineTimeoutMs ?? LINE_TIMEOUT_MS, () => socket.destroy());
@@ -54,7 +69,7 @@ function onConnection(d: ServeDeps, caller: Member, socket: Socket): void {
     // même, sa réponse perdue : l'agent la croirait échouée et la referait.
     socket.setTimeout(0);
     if (eol < 0 || eol > REQUEST_MAX) return reply(socket, { ok: false, error: "request too long" });
-    handleRequest(d, caller, all.subarray(0, eol).toString("utf8")).then(
+    caller.handle(all.subarray(0, eol).toString("utf8")).then(
       (r) => reply(socket, r),
       (e) => {
         d.ctx.err(`forge api: ${caller.name}: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
@@ -77,7 +92,7 @@ export async function serveApi(d: ServeDeps, signal: AbortSignal): Promise<void>
     rmSync(path, { force: true });
   })));
   try {
-    for (const m of members(d.cfg).filter(needsApi)) {
+    for (const m of listeners(d)) {
       const path = hostSocketPath(m.name);
       // Une socket d'un arrêt brutal : listen refuserait l'adresse.
       rmSync(path, { force: true });
@@ -100,7 +115,7 @@ export async function serveApi(d: ServeDeps, signal: AbortSignal): Promise<void>
     await close();
     throw e;
   }
-  // Sans membre qui ait besoin d'une socket (un hôte sans équipe), rien ne
+  // Sans membre qui ait besoin d'une socket (un hôte sans équipe ni projet), rien ne
   // retiendrait le process : un minuteur le garde en vie jusqu'au signal.
   const alive = setInterval(() => {}, 2 ** 30);
   if (!signal.aborted) await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));

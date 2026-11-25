@@ -79,3 +79,22 @@ test("no host git runs", async () => {
   assertNoHostGitIn(c.calls, workspacesDir());
   assert.ok(!c.calls.some((a) => a[0] === "git"));
 });
+
+// Un exécuteur de projet (sans user.forge.repo) : le chemin que git ajoute nomme
+// le clone servi, /workspace/<dépôt>, et rien d'autre.
+const executor = [
+  { match: "agent-x user.forge.repo", stdout: "" },
+  { match: "agent-x user.forge.role", stdout: "executor\n" },
+  { match: "incus --project agent-forge list", stdout: JSON.stringify([{ name: "agent-x", status: "Running" }]) },
+];
+
+test("an executor serves the clone named by the path, /workspace/<repository> only", async () => {
+  const c = fakeContext({ rules: executor });
+  assert.equal(await cmdUploadPack(c, "agent-x", undefined, "/workspace/web"), 0);
+  const attach = c.calls.find((a) => a.includes("git-upload-pack"))!;
+  assert.deepEqual(attach.slice(attach.indexOf("--cwd"), attach.indexOf("--cwd") + 2), ["--cwd", "/workspace/web"]);
+  assert.deepEqual(attach.slice(-2), ["git-upload-pack", "/workspace/web"]);
+  for (const bad of [undefined, "/workspace", "/workspace/../etc", "/workspace/web/x", "/home/aiuser"]) {
+    await assert.rejects(() => cmdUploadPack(fakeContext({ rules: executor }), "agent-x", undefined, bad), /\/workspace\/<repository>/, String(bad));
+  }
+});

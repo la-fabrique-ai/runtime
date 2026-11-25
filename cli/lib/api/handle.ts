@@ -17,9 +17,10 @@ export type ApiReply = { ok: true; [k: string]: unknown } | { ok: false; error: 
 
 // `assign` et `release` passent un à la fois, tous appelants confondus : deux
 // Leads qui confient le même développeur libre au même instant ne le voient pas
-// libre tous les deux. Les autres verbes n'attendent personne.
+// libre tous les deux. Les autres verbes n'attendent personne. Les verbes de
+// mission d'un projet (missions.ts) passent par la même file.
 let exclusiveChain: Promise<unknown> = Promise.resolve();
-function exclusive<T>(fn: () => Promise<T>): Promise<T> {
+export function exclusive<T>(fn: () => Promise<T>): Promise<T> {
   const run = exclusiveChain.then(fn, fn);
   exclusiveChain = run.catch(() => {});
   return run;

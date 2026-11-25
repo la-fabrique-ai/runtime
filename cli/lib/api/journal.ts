@@ -4,11 +4,14 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFi
 import { dirname, join } from "node:path";
 import { ForgeError } from "../context.ts";
 import { apiDataDir } from "../paths.ts";
+import type { HeldMission } from "../orchestrator/host.ts";
+import type { MissionOp } from "./missions.ts";
 import type { Op } from "./protocol.ts";
 
 // `answer` est la réponse de l'humain à une question (`forge team answer`) : il
-// n'est jamais écrit par l'API, aucun agent ne peut l'appeler.
-export type JournalOp = Op | "answer";
+// n'est jamais écrit par l'API, aucun agent ne peut l'appeler. Les verbes de
+// mission (`events`, `done`) sont ceux d'un projet (api/missions.ts).
+export type JournalOp = Op | MissionOp | "answer";
 
 // `op` est null pour une ligne que le protocole n'a pas pu lire : elle n'a pas de verbe.
 // `notify` n'est pas un verbe : c'est un avis que forge a écrit de lui-même
@@ -22,6 +25,9 @@ export type Entry = {
   summary: string | null; // message, ask-human
   text: string | null; // le corps d'un message ou d'une question, la consigne d'un assign
   question: number | null; // pour une réponse : l'identifiant de la question qu'elle ferme
+  // La mission d'un `assign` ou d'un `done` de projet, sans sa consigne : un
+  // `done` accepté devient un évènement (`events`). Absente des autres lignes.
+  mission?: HeldMission;
 };
 
 // Ce que `Journal.append` demande : `question` est facultatif, il vaut null.

@@ -112,7 +112,7 @@ function dispatch(
     case "delete": return cmdDelete(ctx, a, force);
     case "list": return cmdList(ctx);
     case "egress": return cmdEgress(ctx, a, b);
-    case "upload-pack": return cmdUploadPack(ctx, a);
+    case "upload-pack": return cmdUploadPack(ctx, a, undefined, b);
     case "task-base": return cmdTaskBase(ctx, a, b);
     case "relay": return cmdRelay(ctx, a, positionals.slice(2), relay);
     case "team": return currentSide() === "laptop"

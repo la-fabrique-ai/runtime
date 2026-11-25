@@ -323,17 +323,18 @@ export function execArgv(ctx: Context, name: string, argv: string[], env: Record
 // Récupération du travail de l'agent : `git-upload-pack` tourne dans le
 // container en tant qu'aiuser, pas sur l'hôte. --force-noninteractive (forme
 // longue de -T) : pas de pty, stdout porte le protocole git. GIT_PROTOCOL
-// n'est transmis que s'il a la forme `version=N`.
-export function uploadPackArgv(container: string, gitProtocol: string | undefined): string[] {
+// n'est transmis que s'il a la forme `version=N`. `dir` : le dépôt servi,
+// /workspace, ou le clone d'un dépôt chez un exécuteur de projet.
+export function uploadPackArgv(container: string, gitProtocol: string | undefined, dir = "/workspace"): string[] {
   const protocol = gitProtocol !== undefined && /^version=[0-9]$/.test(gitProtocol)
     ? ["--env", `GIT_PROTOCOL=${gitProtocol}`]
     : [];
   return [
     ...incus("exec", container, "--force-noninteractive"),
     "--user", "1001", "--group", "1001",
-    "--cwd", "/workspace",
+    "--cwd", dir,
     "--env", "HOME=/home/aiuser",
     ...protocol,
-    "--", "git-upload-pack", "/workspace",
+    "--", "git-upload-pack", dir,
   ];
 }

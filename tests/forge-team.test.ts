@@ -108,3 +108,15 @@ test("assign without an instruction is a usage error, not a request", async () =
   assert.equal(r.code, 64);
   assert.equal(received.length, 0);
 });
+
+test("done sends the bare verb; status prints the mission when the reply has its shape", async () => {
+  const r = await run(["done"], "");
+  assert.deepEqual([r.code, r.stdout], [0, "ok 7\n"]);
+  assert.equal(received[0], '{"op":"done"}');
+  answer = '{"ok":true,"mission":{"kind":"dev","ticket":"T-1","subtask":"T-1.1","repository":"web","branch":"agent/T-1.1","base":"origin/main"}}';
+  const held = await run(["status"], "");
+  assert.deepEqual([held.code, held.stdout],
+    [0, "ok\nmission: T-1.1 ticket=T-1 repository=web branch=agent/T-1.1 base=origin/main\n"]);
+  answer = '{"ok":true,"mission":null}';
+  assert.equal((await run(["status"], "")).stdout, "ok\nmission: none\n");
+});
