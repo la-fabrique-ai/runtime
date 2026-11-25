@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
 import { ConnectorError } from "../cli/lib/tickets/model.ts";
+import { conformance } from "./lib/connector-conformance.ts";
 
 function put(base: string, rel: string, text: string): void {
   const path = join(base, rel);
@@ -246,3 +247,5 @@ test("une priorité hors bornes est refusée sans dossier créé", async () => {
   await assert.rejects(c.createTicket({ title: "t", priority: 9 as 1, ...NEW }), ConnectorError);
   assert.deepEqual(readdirSync(base), []);
 });
+
+conformance(() => openMarkdownBase(mkdtempSync(join(tmpdir(), "tickets-"))));

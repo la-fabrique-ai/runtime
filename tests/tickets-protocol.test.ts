@@ -6,6 +6,7 @@ import { test } from "node:test";
 import type { ExecOptions, ExecResult } from "../cli/lib/context.ts";
 import { execAdapter, OPS, serveLine } from "../cli/lib/tickets/protocol.ts";
 import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
+import { conformance } from "./lib/connector-conformance.ts";
 import { fakeContext } from "./lib/fake-context.ts";
 
 type Exec = (argv: string[], o?: ExecOptions) => Promise<ExecResult>;
@@ -67,4 +68,15 @@ test("le fichier d'identifiants passe par l'environnement, pas par la requête",
   assert.equal(seen!.env!.FORGE_ADAPTER_CREDENTIAL_FILE, "/run/cred");
   assert.ok(!seen!.input!.includes("/run/cred"));
   assert.equal(seen!.timeoutMs, 30_000);
+});
+
+test("une liste dont un ticket est invalide est refusée", async () => {
+  const line = '{"ok":true,"result":{"tickets":[{}],"problems":[]}}';
+  await assert.rejects(client(fixed(line)).listTickets({}), (e: Error) => e.message.startsWith("adapter "));
+});
+
+// Même flux, à travers l'adaptateur : une base neuve servie par serveLine.
+conformance(() => {
+  const base = openMarkdownBase(mkdtempSync(join(tmpdir(), "proto-")));
+  return client(async (_a, o) => ({ code: 0, stdout: (await serveLine(base, o!.input!)) + "\n", stderr: "" }));
 });
