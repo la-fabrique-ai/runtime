@@ -1,7 +1,7 @@
 // Les enregistrements de branches de l'hôte (§6.7) : pour chaque branche d'un
 // projet, son ticket, sa sous-tâche, sa base et son exécuteur. Ils remplacent
 // les clés `user.forge.base.<tâche>` du modèle à un seul dépôt.
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { ForgeError } from "./context.ts";
@@ -46,7 +46,7 @@ export function branchRecord(repository: string, branch: string, path: string = 
 }
 
 // Une seule fiche par `repository` + `branch`. Pas de verrou de fichier :
-// l'API sérialise assign et done avec `exclusive()`, il n'y a qu'un écrivain à la fois.
+// assign, release et done (plan 1c Task 5) sont sérialisés par `exclusive()`.
 // L'écriture passe par un fichier temporaire du même dossier puis un rename,
 // pour qu'un lecteur ne voie jamais un fichier à moitié écrit.
 export function recordBranch(r: BranchRecord, path: string = branchRecordsPath()): void {
@@ -54,8 +54,15 @@ export function recordBranch(r: BranchRecord, path: string = branchRecordsPath()
   records.push(r);
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700); // un dossier déjà là est resserré aussi
   const tmp = join(dir, `.branches-${randomBytes(6).toString("hex")}.tmp`);
-  writeFileSync(tmp, JSON.stringify({ version: 1, records }, null, 2) + "\n", { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
+  try {
+    writeFileSync(tmp, JSON.stringify({ version: 1, records }, null, 2) + "\n", { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  } catch (e) {
+    // Un échec ne laisse pas de fichier temporaire (il contient les fiches).
+    rmSync(tmp, { force: true });
+    throw e;
+  }
 }

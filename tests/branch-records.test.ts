@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { branchRecord, readBranchRecords, recordBranch, type BranchRecord } from "../cli/lib/branch-records.ts";
@@ -47,4 +47,11 @@ test("un fichier corrompu lève une erreur qui nomme le chemin", () => {
     writeFileSync(p, bad);
     assert.throws(() => readBranchRecords(p), (e: Error) => e.message.includes(p));
   }
+});
+
+test("un rename qui échoue ne laisse aucun fichier temporaire", () => {
+  const p = tmpFile();
+  mkdirSync(p, { recursive: true }); // un dossier à l'emplacement du fichier
+  assert.throws(() => recordBranch(rec(), p));
+  assert.deepEqual(readdirSync(join(p, "..")), ["branches.json"]);
 });
