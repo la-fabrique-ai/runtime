@@ -190,8 +190,13 @@ export function teamMirrorPath(team: string): string {
 
 // The hooks are off and received objects are checked: what an agent pushes
 // into this repository is data, and nothing in it may run on the host.
-export async function ensureTeamMirror(ctx: Context, team: string): Promise<"created" | "kept"> {
-  const mirror = teamMirrorPath(team);
+export function ensureTeamMirror(ctx: Context, team: string): Promise<"created" | "kept"> {
+  return ensureBareTeamMirror(ctx, teamMirrorPath(team));
+}
+
+// Le même miroir, à un chemin donné : celui d'une équipe, ou celui d'un dépôt
+// d'un projet (forge à tickets).
+export async function ensureBareTeamMirror(ctx: Context, mirror: string): Promise<"created" | "kept"> {
   if (existsSync(mirror)) return "kept";
   mkdirSync(dirname(mirror), { recursive: true });
   const init = await ctx.exec(["git", "init", "--bare", "--quiet", mirror], GIT_OPTS);
