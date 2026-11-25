@@ -2,7 +2,6 @@
 // `{"op", "args"}` sur stdin, une réponse par ligne `{"ok", …}` sur stdout.
 // Un seul tableau relie chaque opération à son validateur de résultat : OPS et
 // le client en dérivent, une opération ne peut pas exister d'un côté seulement.
-import type { Context } from "../context.ts";
 import type { Connector } from "./connector.ts";
 import {
   ConnectorError,
@@ -80,10 +79,20 @@ export async function serveLine(connector: Connector, line: string): Promise<str
 // Le message d'un adaptateur est une donnée externe : borné, sans caractère de contrôle.
 const clean = (s: string): string => s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").slice(0, 500);
 
+// Le seul morceau du contexte de la CLI dont le client a besoin : ce dossier
+// est copié seul dans un container, il ne peut pas importer ../context.ts.
+// Le Context de la CLI s'y substitue structurellement.
+export type ExecContext = {
+  exec(
+    argv: string[],
+    opts?: { input?: string; env?: Record<string, string>; cwd?: string; timeoutMs?: number },
+  ): Promise<{ code: number; stdout: string; stderr: string; timedOut?: boolean }>;
+};
+
 // Côté client : chaque appel lance l'adaptateur une fois. Le fichier
 // d'identifiants passe par l'environnement, jamais par la requête.
 export function execAdapter(
-  ctx: Context,
+  ctx: ExecContext,
   opts: { argv: string[]; credentialFile?: string; timeoutMs?: number },
 ): Connector {
   const name = opts.argv[0];
