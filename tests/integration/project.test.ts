@@ -15,7 +15,7 @@
 import { test, before, after, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Journal } from "../../cli/lib/api/journal.ts";
@@ -220,6 +220,11 @@ test("a project: the control's socket and home, assign, done, a stacked sub-task
   // La base des tickets : écrite par forge-orch, lisible et inscriptible par l'humain sur l'hôte.
   must("forge-orch writes a ticket", await asOrch(["sh", "-c", "echo t > /var/lib/forge-orch/tickets/T-1.md"]));
   writeFileSync(join(root, "tickets", "T-1.md"), "edited by the human\n");
+  // Après l'humain, forge-orch réécrit le fichier (l'ACL par défaut) ; aiuser, lui, ne le lit pas.
+  must("forge-orch rewrites the human's ticket", await asOrch(["sh", "-c", "echo again > /var/lib/forge-orch/tickets/T-1.md"]));
+  assert.equal(readFileSync(join(root, "tickets", "T-1.md"), "utf8"), "again\n");
+  const aiuserCat = await asAiuser(CONTROL, ["cat", "/var/lib/forge-orch/tickets/T-1.md"]);
+  assert.notEqual(aiuserCat.status, 0, raw("aiuser read a ticket", aiuserCat));
 
   // Un exécuteur démarré, hc qui répond, sans terminal ni mission : `none`.
   let rows = await statusRows();
@@ -268,4 +273,20 @@ test("a project: the control's socket and home, assign, done, a stacked sub-task
   rows = await statusRows();
   assert.deepEqual([rows[EX2].mission?.subtask, rows[EX2].session], ["T-1.1", "lost"], JSON.stringify(rows));
   assert.equal(rows[EX1].session, "unknown", JSON.stringify(rows));
+
+  // La reprise, comme l'orchestrateur la fait : release puis assign de la même
+  // mission. Le travail non commité de la session perdue reste tel quel.
+  must("uncommitted work in ex-2", await asAiuser(EX2, ["sh", "-c", `cd /workspace/${REPO} && echo wip >> README.md`]));
+  assert.equal((await orch({ op: "release", to: EX2 })).ok, true);
+  r = await orch({ op: "assign", to: EX2, mission: mission("T-1.1", "origin/main") });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(must("branch of ex-2", await gitIn(EX2, ["rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim(), "agent/T-1.1");
+  assert.equal(must("status of ex-2", await gitIn(EX2, ["status", "--porcelain", "--untracked-files=no"])).stdout.trim(), "M README.md");
+  rows = await statusRows();
+  assert.deepEqual([rows[EX2].mission?.subtask, rows[EX2].session], ["T-1.1", "idle"], JSON.stringify(rows));
+
+  // Libre mais sale, ex-2 refuserait toute mission : `unknown`, jamais donné.
+  assert.equal((await orch({ op: "release", to: EX2 })).ok, true);
+  rows = await statusRows();
+  assert.deepEqual([rows[EX2].mission, rows[EX2].session], [null, "unknown"], JSON.stringify(rows));
 });

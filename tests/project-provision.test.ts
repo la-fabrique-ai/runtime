@@ -79,7 +79,7 @@ test("an executor of a two-repository project: both device pairs, both clones as
     const remote = calls.findIndex((c) => c.includes(`git -C /workspace/${repo} remote add team /forge/teams/${repo}.git`));
     assert.ok(remote > clone, calls.join("\n"));
     assert.ok(calls.some((c) => c.includes(`cd /workspace/${repo} && `) && c.includes(".git/info/exclude") &&
-      c.includes("/.claude/bash-audit.log")), calls.join("\n"));
+      c.includes("/.claude/bash-audit.log") && c.includes("/.claude/settings.local.json")), calls.join("\n"));
   }
   assert.equal(devices.workspace.path, "/workspace");
 
@@ -121,7 +121,8 @@ test("converging an executor adds the devices and the clone of a repository adde
   assert.ok(!calls.some((c) => c.includes(" launch ")));
   // Le remote team d'un clone déjà là n'est pas rajouté ; l'exclusion du journal se repose.
   assert.ok(!calls.some((c) => c.includes("-C /workspace/web remote add team")));
-  assert.ok(calls.some((c) => c.includes("cd /workspace/web && ") && c.includes(".git/info/exclude")));
+  assert.ok(calls.some((c) => c.includes("cd /workspace/web && ") && c.includes(".git/info/exclude") &&
+    c.includes("/.claude/settings.local.json")));
 });
 
 test("a clone whose team remote is missing (an interrupted provisioning) gets it at the next converge", async () => {

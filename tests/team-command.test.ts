@@ -544,6 +544,19 @@ test("status --json of a project prints its members: kind, presence, the mission
   ]);
 });
 
+test("status warns of a free executor whose clone has tracked changes, naming it and the clone; a busy one is not looked at", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-executor-1", { status: "Running" });
+  fake.addInstance("agent-forge", "agent-executor-2", { status: "Running", config: { "user.forge.mission": JSON.stringify(HELD) } });
+  const { ctx } = project(fake, [{ match: "/workspace/api -c core.fsmonitor=false", stdout: " M a.ts\n" }]);
+  assert.equal(await cmdTeam(ctx, ["status"]), 0);
+  const status = ctx.calls.map((c) => c.join(" ")).filter((c) => c.includes("status --porcelain --untracked-files=no"));
+  assert.ok(status.every((c) => c.includes("exec agent-executor-1 ")) && status.length === 2, status.join("\n"));
+  assert.deepEqual(ctx.err_lines.filter((l) => l.startsWith("WARNING")), [
+    "WARNING: agent-executor-1 is free but /workspace/api has uncommitted changes: it gets no mission until they are committed or discarded.",
+  ]);
+});
+
 test("for-repo of a project prints the repository's name; task-base its branches' sub-tasks and bases; upload-pack serves its team mirror", async () => {
   const { ctx } = project();
   assert.equal(await cmdTeam(ctx, ["for-repo", "o/api"]), 0);

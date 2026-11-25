@@ -17,10 +17,11 @@ import { loadConfig } from "../config.ts";
 import { containerRepo, isRunning } from "../containers.ts";
 import { configGet, startInstance, uploadPackArgv } from "../incus.ts";
 import { configPath } from "../paths.ts";
+import { REPO_NAME } from "../project-config.ts";
 import { validateContainerName } from "../validate.ts";
 
 // Le clone d'un dépôt chez un exécuteur : un nom de dépôt de projet, rien d'autre.
-const EXECUTOR_CLONE = /^\/workspace\/[a-z][a-z0-9-]*$/;
+const EXECUTOR_CLONE = new RegExp(`^/workspace/${REPO_NAME.source.slice(1)}`);
 
 // Les dépôts que déclare le projet de la config, quand elle se lit et en a un ;
 // sinon null, et seule la forme du chemin compte.

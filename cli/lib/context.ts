@@ -55,6 +55,14 @@ export async function mustSucceed(step: string, result: Promise<ExecResult>): Pr
   return r;
 }
 
+// Un appel lancé avec `timeoutMs` : un délai dépassé devient un refus qui
+// nomme l'étape ; sinon le résultat, tel quel, que l'appelant tranche.
+export async function inTime(step: string, timeoutMs: number | undefined, result: Promise<ExecResult>): Promise<ExecResult> {
+  const r = await result;
+  if (r.timedOut) throw new ForgeError(`${step} timed out after ${(timeoutMs ?? 0) / 1000} s`);
+  return r;
+}
+
 // Le code de sortie d'un enfant, à la manière du shell : tué par un signal, il
 // vaut 128 + le numéro du signal. Jamais 0 : git (upload-pack) croirait à un
 // succès.

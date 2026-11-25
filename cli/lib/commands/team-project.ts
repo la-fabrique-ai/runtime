@@ -5,7 +5,7 @@
 import type { Context } from "../context.ts";
 import { ForgeError } from "../context.ts";
 import { restartApiService } from "../api/access.ts";
-import { MISSION_KEY } from "../api/missions.ts";
+import { cloneStates, MISSION_KEY, readHeld } from "../api/missions.ts";
 import { readBranchRecords } from "../branch-records.ts";
 import type { ForgeConfig } from "../config.ts";
 import { provisioningMarker } from "../containers.ts";
@@ -57,22 +57,9 @@ function requireRepository(p: ProjectConfig, name: string | undefined): string {
   return name;
 }
 
-// La mission que tient un exécuteur (MISSION_KEY) ; "unreadable" pour une
-// valeur abîmée, qui n'est ni libre ni lisible.
-function heldMission(i: Instance | undefined): HeldMission | null | "unreadable" {
-  const value = i?.config[MISSION_KEY];
-  if (value === undefined || value.trim() === "") return null;
-  const keys = ["base", "branch", "kind", "repository", "subtask", "ticket"];
-  try {
-    const v = JSON.parse(value) as Record<string, unknown>;
-    if (typeof v !== "object" || v === null || Array.isArray(v) || Object.keys(v).sort().join() !== keys.join() ||
-      !keys.every((k) => typeof v[k] === "string") || v.kind !== "dev") return "unreadable";
-    return { kind: "dev", ticket: v.ticket as string, subtask: v.subtask as string, repository: v.repository as string,
-      branch: v.branch as string, base: v.base as string };
-  } catch {
-    return "unreadable";
-  }
-}
+// La mission que tient un exécuteur (MISSION_KEY), lue comme l'API la lit ;
+// "unreadable" pour une valeur abîmée, qui n'est ni libre ni lisible.
+const heldMission = (i: Instance | undefined) => readHeld(i?.config[MISSION_KEY]);
 
 function missionLabel(m: ProjectMember, held: HeldMission | null | "unreadable"): string {
   if (m.kind === "control") return "-";
@@ -140,6 +127,17 @@ async function status(ctx: Context, p: ProjectConfig, json: boolean): Promise<nu
     const held = m.kind === "executor" ? heldMission(inst) : null;
     if (held === "unreadable") ctx.err(`WARNING: ${m.name} has an unreadable ${MISSION_KEY}: release it.`);
     const session = inst?.status === "Running" ? await sessionState(ctx, m.name) : "none";
+    // Un exécuteur libre dont un clone a des changements suivis refuserait
+    // toute mission : l'API le dit `unknown` à l'orchestrateur, qui ne lui en
+    // donne plus ; l'humain, lui, l'apprend ici.
+    if (m.kind === "executor" && held === null && inst?.status === "Running") {
+      for (const c of await cloneStates(ctx, m.name, p)) {
+        if (c.state === "clean") continue;
+        ctx.err(c.state === "dirty"
+          ? `WARNING: ${m.name} is free but /workspace/${c.repository} has uncommitted changes: it gets no mission until they are committed or discarded.`
+          : `WARNING: ${m.name} is free but git status in /workspace/${c.repository} failed or did not answer: it gets no mission until it does.`);
+      }
+    }
     members.push({ name: m.name, kind: m.kind, present: inst !== undefined, mission: held === "unreadable" ? null : held, session });
     rows.push([m.name, m.kind, inst?.status ?? "Missing", missionLabel(m, held)]);
   }

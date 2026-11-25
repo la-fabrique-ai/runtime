@@ -111,11 +111,17 @@ export async function deviceNames(ctx: Context, name: string): Promise<string[]>
 // Les mutateurs ci-dessous rendent leur ExecResult au lieu de le jeter :
 // c'est l'appelant qui décide (via mustSucceed) d'échouer bruyamment. Renvoyer
 // void revenait à avaler le code de sortie ET le stderr capturé.
-export function configSet(ctx: Context, name: string, key: string, value: string): Promise<ExecResult> {
+// `timeoutMs` (facultatif, ici et pour startInstance, configUnset, pushText) :
+// un appel fait dans la file d'`exclusive()` de l'API, qu'un incus muet ne doit
+// pas bloquer ; le résultat porte alors `timedOut`, que l'appelant tranche.
+const withTimeout = (opts: { timeoutMs?: number }) => (opts.timeoutMs === undefined ? undefined : { timeoutMs: opts.timeoutMs });
+
+export function configSet(ctx: Context, name: string, key: string, value: string, opts: { timeoutMs?: number } = {}): Promise<ExecResult> {
   // Le client incus lit la valeur sur stdin quand elle vaut `-` (aussi dans
   // `clé=-`) : stdin vide, valeur vide, clé retirée.
   if (value === "-") throw new Error(`incus config set ${key}: a value of "-" is read from stdin`);
-  return ctx.exec(incus("config", "set", name, key, value));
+  const o = withTimeout(opts);
+  return o ? ctx.exec(incus("config", "set", name, key, value), o) : ctx.exec(incus("config", "set", name, key, value));
 }
 
 export async function imageProperty(ctx: Context, alias: string, key: string): Promise<string> {
@@ -130,8 +136,9 @@ export function execAsAgent(ctx: Context, name: string, script: string): Promise
   return ctx.exec(incus("exec", name, "--", "su", "-", "aiuser", "-c", script));
 }
 
-export function startInstance(ctx: Context, name: string): Promise<ExecResult> {
-  return ctx.exec(incus("start", name));
+export function startInstance(ctx: Context, name: string, opts: { timeoutMs?: number } = {}): Promise<ExecResult> {
+  const o = withTimeout(opts);
+  return o ? ctx.exec(incus("start", name), o) : ctx.exec(incus("start", name));
 }
 
 export function stopInstance(ctx: Context, name: string): Promise<ExecResult> {
@@ -267,15 +274,17 @@ export async function imageExists(ctx: Context, alias: string): Promise<boolean>
 // tous les cas) puis le pousse avec son propriétaire et son mode.
 export async function pushText(
   ctx: Context, instance: string, dest: string, content: string,
-  owner: { uid: number; gid: number; mode: string },
+  owner: { uid: number; gid: number; mode: string }, opts: { timeoutMs?: number } = {},
 ): Promise<ExecResult> {
   const dir = mkdtempSync(join(tmpdir(), "forge-push-"));
   try {
     const src = join(dir, "content");
     writeFileSync(src, content);
-    return await ctx.exec(incus(
+    const argv = incus(
       "file", "push", src, `${instance}${dest}`,
-      "--uid", String(owner.uid), "--gid", String(owner.gid), "--mode", owner.mode, "--create-dirs"));
+      "--uid", String(owner.uid), "--gid", String(owner.gid), "--mode", owner.mode, "--create-dirs");
+    const o = withTimeout(opts);
+    return await (o ? ctx.exec(argv, o) : ctx.exec(argv));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -295,8 +304,9 @@ export function configSetMany(ctx: Context, instance: string, pairs: Record<stri
   return ctx.exec(incus("config", "set", instance, ...kv(pairs)));
 }
 
-export function configUnset(ctx: Context, instance: string, key: string): Promise<ExecResult> {
-  return ctx.exec(incus("config", "unset", instance, key));
+export function configUnset(ctx: Context, instance: string, key: string, opts: { timeoutMs?: number } = {}): Promise<ExecResult> {
+  const o = withTimeout(opts);
+  return o ? ctx.exec(incus("config", "unset", instance, key), o) : ctx.exec(incus("config", "unset", instance, key));
 }
 
 // override : crée un device local qui masque celui du profil ; set : modifie

@@ -15,11 +15,11 @@ import type { ForgeConfig } from "./config.ts";
 import { listInstances } from "./incus.ts";
 import { ensureTeamMirror, HOST_GIT_CWD, teamMirrorPath } from "./mirror.ts";
 import { forgeCommand } from "./paths.ts";
+import { shellQuote } from "./shell.ts";
 import { members } from "./team.ts";
 import { isTaskName } from "./validate.ts";
 
 const BASE_PREFIX = "user.forge.base.";
-const shellQuote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 
 // `fetched` et `failed` sont des noms de containers : un membre dont la
 // récupération échoue (container arrêté, dépôt illisible) est signalé sans

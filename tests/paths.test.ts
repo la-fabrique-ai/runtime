@@ -78,7 +78,7 @@ test("forgeCommand is the invoked path, made absolute but not resolved", () => {
   assert.equal(forgeCommand(), resolve("./cli/forge"));
 });
 
-test("forgeCommand falls back to forge", () => {
+test("forgeCommand falls back to the shim of this checkout, never a bare forge", () => {
   delete process.env.FORGE_INVOKED_AS;
-  assert.equal(forgeCommand(), "forge");
+  assert.equal(forgeCommand(), resolve(repoRoot(), "cli", "forge"));
 });

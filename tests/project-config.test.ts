@@ -45,6 +45,9 @@ test("each rule is refused naming its key", () => {
   rejects({ project: { executors: { count: 1 } } }, /project\.repositories/);
   rejects(proj({ repositories: {} }), /project\.repositories/);
   rejects(proj({ repositories: { Web: { repo: "o/web" } } }), /project\.repositories\.Web/);
+  // Ni tiret final ni double tiret : un seul motif de nom pour la config, l'API et upload-pack.
+  rejects(proj({ repositories: { "web-": { repo: "o/web" } } }), /project\.repositories\.web-/);
+  rejects(proj({ repositories: { "a--b": { repo: "o/web" } } }), /project\.repositories\.a--b/);
   rejects(proj({ repositories: { web: { repo: "nope" } } }), /project\.repositories\.web\.repo/);
   rejects(proj({ repositories: { web: { repo: "o/w", lfs: 1 } } }), /project\.repositories\.web\.lfs/);
   rejects(proj({ executors: {} }), /project\.executors\.count/);

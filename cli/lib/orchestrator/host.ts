@@ -17,10 +17,19 @@ import { connect } from "node:net";
 //
 // `assign` refuse une sous-tâche déjà tenue par un autre exécuteur
 // (`"<sous-tâche> is held by <exécuteur>"`). Il peut être long (préparer le
-// clone, lancer la session) : son délai est séparé, 120 s par défaut.
+// clone, lancer la session) : son délai est séparé, 120 s par défaut. Chaque
+// étape de l'hôte a son propre délai (git 20 à 60 s, incus et hc 30 s), dont la
+// somme dépasse 120 s : un assign très lent peut être accepté par l'hôte après
+// que ce client a abandonné. Le tour suivant le voit tenu et `ready`, et le
+// remet `in-dev` (la branche « tenue mais ready » de tick.ts) : rien ne se perd.
+//
+// La reprise d'une session perdue est `release` puis `assign` de la même
+// mission : l'hôte la reconnaît au clone, déjà sur `agent/<sous-tâche>`, dont
+// il garde le travail tel quel, même non commité.
 //
 // `session` : `none` = container démarré, hc joignable, aucun terminal ;
-// un container arrêté ou un exec en échec vaut `unknown`. Seuls `lost` et
+// un container arrêté, un exec en échec ou hors délai vaut `unknown`, comme un
+// exécuteur libre dont un clone a des changements suivis (il refuserait tout). Seuls `lost` et
 // `exited` déclenchent une reprise ; un exécuteur `unknown` n'est pas libre
 // (aucune mission ne lui est donnée) et la reprise ne le libère jamais.
 

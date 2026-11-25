@@ -112,7 +112,21 @@ async function executorServes(): Promise<void> {
   const attach = c.calls.find((a) => a.includes("git-upload-pack"))!;
   assert.deepEqual(attach.slice(attach.indexOf("--cwd"), attach.indexOf("--cwd") + 2), ["--cwd", "/workspace/web"]);
   assert.deepEqual(attach.slice(-2), ["git-upload-pack", "/workspace/web"]);
-  for (const bad of [undefined, "/workspace", "/workspace/../etc", "/workspace/web/x", "/home/aiuser", "/workspace/api"]) {
+  for (const bad of [undefined, "/workspace", "/workspace/../etc", "/workspace/web/x", "/home/aiuser", "/workspace/api", "/workspace/web-", "/workspace/a--b"]) {
     await assert.rejects(() => cmdUploadPack(fakeContext({ rules: executor }), "agent-x", undefined, bad), /\/workspace\/<repository>/, String(bad));
   }
 }
+
+test("without a readable project, only the path form counts: a trailing or double dash is refused", async () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-upload-pack-"));
+  process.env.FORGE_HOME = home;
+  try {
+    assert.equal(await cmdUploadPack(fakeContext({ rules: executor }), "agent-x", undefined, "/workspace/web-2"), 0);
+    for (const bad of ["/workspace/web-", "/workspace/a--b"]) {
+      await assert.rejects(() => cmdUploadPack(fakeContext({ rules: executor }), "agent-x", undefined, bad), /\/workspace\/<repository>/, bad);
+    }
+  } finally {
+    delete process.env.FORGE_HOME;
+    rmSync(home, { recursive: true, force: true });
+  }
+});

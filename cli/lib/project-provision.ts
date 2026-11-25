@@ -209,9 +209,12 @@ export async function convergeExecutor(ctx: Context, cfg: ForgeConfig, m: Projec
 // objets LFS (chaque clone règle ensuite le sien, `--local`).
 const lfsFilters = (p: ProjectConfig) => (Object.values(p.repositories).some((r) => r.lfs) ? LFS_FILTERS_READ : LFS_FILTERS_INSTALL);
 
+// Les fichiers que forge et Claude Code écrivent dans le clone, jamais du travail.
+const EXCLUDED = ["/.claude/bash-audit.log", "/.claude/settings.local.json"];
+
 // Idempotent : les filtres LFS globaux, puis par dépôt les deux devices s'ils
 // manquent, le clone s'il manque, et à chaque passage le remote `team` et
-// l'exclusion du journal d'audit, qu'un clone interrompu après coup n'aurait pas.
+// les exclusions (EXCLUDED), qu'un clone interrompu après coup n'aurait pas.
 // Git ne tourne que dans le container, en aiuser.
 async function ensureExecutorRepos(ctx: Context, p: ProjectConfig, name: string): Promise<void> {
   const present = new Set(await deviceNames(ctx, name));
@@ -235,10 +238,11 @@ async function ensureExecutorRepos(ctx: Context, p: ProjectConfig, name: string)
     if ((await execAsAgentArgv(ctx, name, ["git", "-C", dir, "remote", "get-url", "team"])).code !== 0) {
       await mustSucceed(`add the team remote of ${repo}`, execAsAgentArgv(ctx, name, ["git", "-C", dir, "remote", "add", "team", team]));
     }
-    // Le hook écrit son journal d'audit dans <cwd>/.claude : sans cette
-    // exclusion, un clone neuf paraîtrait sale. `repo` suit [a-z][a-z0-9-]*.
-    await mustSucceed("audit log exclude", execAsAgent(ctx, name,
-      `cd ${dir} && { grep -qxF '/.claude/bash-audit.log' .git/info/exclude || echo '/.claude/bash-audit.log' >> .git/info/exclude; }`));
+    // Le hook écrit son journal d'audit dans <cwd>/.claude, et Claude Code y
+    // range ses permissions locales (settings.local.json) : sans ces
+    // exclusions, un clone neuf paraîtrait sale. `repo` suit REPO_NAME.
+    const excludes = EXCLUDED.map((x) => `{ grep -qxF '${x}' .git/info/exclude || echo '${x}' >> .git/info/exclude; }`).join(" && ");
+    await mustSucceed("clone excludes", execAsAgent(ctx, name, `cd ${dir} && ${excludes}`));
   }
 }
 

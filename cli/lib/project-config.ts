@@ -13,7 +13,10 @@ export type ProjectConfig = {
   gitIdentity: { name: string; email: string } | null;
 };
 
-const REPO_NAME = /^[a-z][a-z0-9-]*$/;
+// Le nom d'un dépôt du projet : des mots [a-z0-9] séparés d'un tiret, le
+// premier commençant par une lettre ; ni tiret final ni double tiret. Le même
+// motif pour la config, l'API (missions.ts) et `forge upload-pack`.
+export const REPO_NAME = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 export const DEFAULT_TICKETS_BASE = "~/.local/share/agent-forge/tickets";
 
 export function parseProject(path: string, raw: unknown): ProjectConfig | null {

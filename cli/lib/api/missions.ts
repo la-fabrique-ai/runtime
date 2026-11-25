@@ -10,7 +10,7 @@
 // d'un `done` se prend en l'écrivant au journal, dans cette file : un
 // évènement d'id plus petit n'apparaît jamais après un plus grand.
 import type { Context, ExecResult } from "../context.ts";
-import { ForgeError, mustSucceed } from "../context.ts";
+import { ForgeError, inTime, mustSucceed } from "../context.ts";
 import { recordBranch } from "../branch-records.ts";
 import { clearMessages, hcArgv, sessionState, startSession, stopSession } from "../hc-session.ts";
 import { configGet, configSet, configUnset, execAsAgentArgv, listInstances } from "../incus.ts";
@@ -19,8 +19,9 @@ import type { ExecutorStatus, HeldMission, HostEvent, MissionSpec, SessionState 
 import { forgeCommand } from "../paths.ts";
 import { projectMembers, repoTeamMirror, type ProjectMember } from "../project.ts";
 import { cloneDir } from "../project-provision.ts";
-import type { ProjectConfig } from "../project-config.ts";
+import { REPO_NAME, type ProjectConfig } from "../project-config.ts";
 import { ensureRunning } from "../session.ts";
+import { shellQuote } from "../shell.ts";
 import { isGitRef, isSubtaskId, isTicketId } from "../tickets/model.ts";
 import { validateGitRef } from "../validate.ts";
 import { exclusive, type ApiDeps, type ApiReply } from "./handle.ts";
@@ -56,7 +57,6 @@ const MISSION_FIELDS = ["kind", "ticket", "subtask", "repository", "branch", "ba
 const HELD_FIELDS = MISSION_FIELDS.filter((k) => k !== "instruction");
 
 const EXECUTOR = /^agent-executor-[1-9][0-9]*$/;
-const REPOSITORY = /^[a-z][a-z0-9-]*$/;
 const PUT_IN_A_FILE = "put it in a file of your branch and send its path";
 
 const hasSecret = (text: string, secrets: readonly string[]) => secrets.some((s) => s !== "" && text.includes(s));
@@ -98,7 +98,7 @@ function parseMission(v: unknown, secrets: readonly string[]): MissionSpec {
   if (m.subtask.slice(0, m.subtask.indexOf(".")) !== m.ticket) {
     throw new ForgeError(`assign: subtask ${m.subtask} is not a sub-task of ${m.ticket}`);
   }
-  if (!REPOSITORY.test(m.repository)) throw new ForgeError("assign: mission.repository is not a repository name");
+  if (!REPO_NAME.test(m.repository)) throw new ForgeError("assign: mission.repository is not a repository name");
   if (m.branch !== `agent/${m.subtask}`) throw new ForgeError(`assign: branch must be agent/${m.subtask}`);
   checkBase(m.base, m.subtask);
   checkText(m.instruction, INSTRUCTION_MAX, "instruction", secrets);
@@ -157,7 +157,7 @@ const held = (m: MissionSpec): HeldMission => ({
 
 // La valeur de MISSION_KEY : null quand l'exécuteur est libre, "unreadable"
 // pour une valeur abîmée (éditée à la main) : il n'est alors pas libre.
-function readHeld(value: string | undefined): HeldMission | null | "unreadable" {
+export function readHeld(value: string | undefined): HeldMission | null | "unreadable" {
   if (value === undefined || value.trim() === "") return null;
   try {
     const v: unknown = JSON.parse(value);
@@ -280,15 +280,16 @@ async function assign(ctx: Context, p: ProjectConfig, to: string, m: MissionSpec
     }
   }
 
-  await ensureRunning(ctx, to);
-  await prepareBranch(ctx, to, m, mine !== null);
+  await ensureRunning(ctx, to, { timeoutMs: INCUS_MS });
+  await prepareBranch(ctx, to, m);
   recordBranch({ branch: m.branch, repository: m.repository, ticket: m.ticket, subtask: m.subtask, base: m.base, executor: to });
-  await mustSucceed("record the mission", configSet(ctx, to, MISSION_KEY, JSON.stringify(held(m))));
+  await mustSucceed("record the mission",
+    inTime(`recording the mission of ${to}`, INCUS_MS, configSet(ctx, to, MISSION_KEY, JSON.stringify(held(m)), { timeoutMs: INCUS_MS })));
   try {
-    await startSession(ctx, { name: to }, m.subtask, m.instruction, { cwd: cloneDir(m.repository) });
+    await startSession(ctx, { name: to }, m.subtask, m.instruction, { cwd: cloneDir(m.repository), timeoutMs: INCUS_MS });
   } catch (e) {
     // Une session qui ne démarre pas ne laisse pas l'exécuteur marqué occupé.
-    await configUnset(ctx, to, MISSION_KEY);
+    await configUnset(ctx, to, MISSION_KEY, { timeoutMs: INCUS_MS });
     throw e;
   }
 }
@@ -298,10 +299,16 @@ async function assign(ctx: Context, p: ProjectConfig, to: string, m: MissionSpec
 // git ne doit ni y lancer un programme qu'elle nomme (fsmonitor, hooks,
 // uploadpack des remotes) ni sortir des chemins locaux ; et chaque appel a un
 // délai, pour qu'un git qui attend ne bloque pas la file d'`exclusive()`, donc
-// tout le projet. Un délai dépassé est un refus qui nomme l'étape.
+// tout le projet. Un délai dépassé est un refus qui nomme l'étape. Les appels
+// incus et hc de la file (démarrer le container, la clé, la session) ont le
+// leur, INCUS_MS ; ceux de `status`, que l'orchestrateur lit toutes les
+// quelques secondes, un plus court, STATUS_MS.
 const FETCH_MS = 60_000;
+const SWITCH_MS = 60_000;
 const GIT_MS = 20_000;
 const MIRROR_MS = 120_000;
+const INCUS_MS = 30_000;
+const STATUS_MS = 8_000;
 const SAFE_GIT = [
   "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
   "-c", "remote.origin.uploadpack=git-upload-pack", "-c", "remote.team.uploadpack=git-upload-pack",
@@ -315,31 +322,48 @@ const gitIn = (ctx: Context, container: string, repository: string) =>
     return r;
   };
 
-// `recovering` : l'exécuteur tient déjà cette sous-tâche (la reprise d'une
-// session perdue). S'il est sur sa branche, son travail, même non commité, reste
-// tel quel : ni contrôle de propreté, ni changement de branche. Sinon, comme une
-// mission neuve ; jamais de `switch -C` sur un arbre sale.
-async function prepareBranch(ctx: Context, to: string, m: MissionSpec, recovering: boolean): Promise<void> {
+// Les changements suivis du clone (`--untracked-files=no`) : un fichier non
+// suivi reste où il est (un switch qui l'écraserait échoue, et le refus nomme
+// l'étape). Un clone illisible ou muet est `unreadable`.
+type CloneState = "clean" | "dirty" | "unreadable";
+const TRACKED_STATUS = ["status", "--porcelain", "--untracked-files=no"];
+const changeCount = (stdout: string) => stdout.split("\n").filter((l) => l.trim() !== "").length;
+
+// L'état de chaque clone d'un exécuteur, un `git status` par clone, en
+// parallèle, chacun avec son délai : ce que `status` (l'API) et `forge team
+// status` lisent d'un exécuteur libre.
+export async function cloneStates(
+  ctx: Context, container: string, p: ProjectConfig, timeoutMs = STATUS_MS,
+): Promise<{ repository: string; state: CloneState }[]> {
+  return Promise.all(Object.keys(p.repositories).map(async (repository) => {
+    const r = await execAsAgentArgv(ctx, container, ["git", "-C", cloneDir(repository), ...SAFE_GIT, ...TRACKED_STATUS], { timeoutMs });
+    if (r.timedOut || r.code !== 0) return { repository, state: "unreadable" };
+    return { repository, state: changeCount(r.stdout) > 0 ? "dirty" : "clean" };
+  }));
+}
+
+// La reprise se lit dans le clone : sur `agent/<sous-tâche>`, la branche de
+// cette sous-tâche, son travail (même non commité) est le sien et reste tel
+// quel : ni contrôle de propreté, ni changement de branche. C'est le cas d'une
+// session perdue que l'orchestrateur reprend par `release` puis `assign` : à
+// l'assign, la clé est déjà vide. Ailleurs, jamais de switch sur un arbre aux
+// changements suivis.
+async function prepareBranch(ctx: Context, to: string, m: MissionSpec): Promise<void> {
   const dir = cloneDir(m.repository);
   const git = gitIn(ctx, to, m.repository);
   const fetch = async () => {
     await mustSucceed("git fetch team", git(FETCH_MS, "fetch", "team"));
     await mustSucceed("git fetch origin", git(FETCH_MS, "fetch", "origin"));
   };
-  if (recovering) {
-    const head = await git(GIT_MS, "symbolic-ref", "--short", "HEAD");
-    if (head.code === 0 && head.stdout.trim() === m.branch) {
-      await fetch();
-      return;
-    }
+  const head = await git(GIT_MS, "symbolic-ref", "--short", "HEAD");
+  if (head.code === 0 && head.stdout.trim() === m.branch) {
+    await fetch();
+    return;
   }
-  const status = await mustSucceed("git status", git(GIT_MS, "status", "--porcelain"));
-  const dirty = status.stdout.split("\n").filter((l) => l.trim() !== "").length;
+  const dirty = changeCount((await mustSucceed("git status", git(GIT_MS, ...TRACKED_STATUS))).stdout);
   if (dirty > 0) {
-    const changes = `${dirty} uncommitted change${dirty === 1 ? "" : "s"}`;
-    throw new ForgeError(recovering
-      ? `${to}: ${dir} has ${changes} and is not on ${m.branch}: commit or discard them before resuming ${m.subtask}`
-      : `${to}: ${dir} has ${changes}: commit or discard them before assigning a mission`);
+    throw new ForgeError(`${to}: ${dir} has ${dirty} uncommitted change${dirty === 1 ? "" : "s"} and is not on ${m.branch}: ` +
+      "commit or discard them before assigning a mission");
   }
   await fetch();
   const has = async (ref: string) => (await git(GIT_MS, "rev-parse", "--verify", "--quiet", ref)).code === 0;
@@ -351,63 +375,77 @@ async function prepareBranch(ctx: Context, to: string, m: MissionSpec, recoverin
   if (await has(`refs/remotes/team/${m.branch}`)) {
     const ahead = local && (await git(GIT_MS, "merge-base", "--is-ancestor", `team/${m.branch}`, m.branch)).code === 0;
     await mustSucceed(`switch to ${m.branch}`,
-      ahead ? git(GIT_MS, "switch", m.branch) : git(GIT_MS, "switch", "-C", m.branch, `team/${m.branch}`));
+      ahead ? git(SWITCH_MS, "switch", m.branch) : git(SWITCH_MS, "switch", "-C", m.branch, `team/${m.branch}`));
     return;
   }
   // Jamais rendue, mais déjà commencée dans ce clone : on la reprend.
   if (local) {
-    await mustSucceed(`switch to ${m.branch}`, git(GIT_MS, "switch", m.branch));
+    await mustSucceed(`switch to ${m.branch}`, git(SWITCH_MS, "switch", m.branch));
     return;
   }
   if (m.base.startsWith("origin/")) {
-    await mustSucceed(`create ${m.branch}`, git(GIT_MS, "switch", "-c", m.branch, m.base));
+    await mustSucceed(`create ${m.branch}`, git(SWITCH_MS, "switch", "-c", m.branch, m.base));
     return;
   }
   // `agent/<sous-tâche>` : la branche d'une sous-tâche rendue, dans le miroir d'équipe.
   if (!(await has(`refs/remotes/team/${m.base}`))) throw new ForgeError(`base ${m.base} is not in the team mirror`);
-  await mustSucceed(`create ${m.branch}`, git(GIT_MS, "switch", "-c", m.branch, `team/${m.base}`));
+  await mustSucceed(`create ${m.branch}`, git(SWITCH_MS, "switch", "-c", m.branch, `team/${m.base}`));
 }
 
 // Libérer un exécuteur libre ne change rien et n'est pas un refus. Un échec de
 // l'arrêt de la session ne défait pas la libération.
 async function release(ctx: Context, to: string): Promise<void> {
   if ((await configGet(ctx, to, MISSION_KEY)) !== "") {
-    await mustSucceed("clear the mission", configUnset(ctx, to, MISSION_KEY));
+    await mustSucceed("clear the mission",
+      inTime(`clearing the mission of ${to}`, INCUS_MS, configUnset(ctx, to, MISSION_KEY, { timeoutMs: INCUS_MS })));
   }
-  if (!(await stopSession(ctx, to))) {
-    ctx.err(`WARNING: could not stop ${to}'s session: it stays as it is until the next assign.`);
+  let stopped: boolean;
+  try {
+    stopped = await stopSession(ctx, to, { timeoutMs: INCUS_MS });
+  } catch (e) {
+    if (!(e instanceof ForgeError)) throw e;
+    stopped = false;
   }
-  await clearMessages(ctx, to);
+  if (!stopped) ctx.err(`WARNING: could not stop ${to}'s session: it stays as it is until the next assign.`);
+  await clearMessages(ctx, to, { timeoutMs: INCUS_MS });
 }
 
 // Le contrat de `session` (orchestrator/host.ts) : `none` seulement pour un
 // container démarré dont hc répond, sans terminal ; arrêté, ou hc injoignable,
 // c'est `unknown`. sessionState rend `none` pour tout échec de `hc get` :
-// `hc ls` tranche ici entre « aucun terminal » et « hc ne répond pas ». Une
-// mission tenue sans terminal est `lost`, que l'orchestrateur reprend.
-async function executorSession(ctx: Context, name: string, running: boolean, holds: boolean): Promise<SessionState> {
+// seul un `hc ls` qui répond tranche « aucun terminal » ; sans lui, ou passé le
+// délai, `unknown`, jamais `lost` (une panne passagère ne déclenche pas de
+// reprise). Une mission tenue sans terminal est `lost`, que l'orchestrateur
+// reprend. Un exécuteur libre dont un clone a des changements suivis (ou ne
+// répond pas) est `unknown` : il refuserait toute mission, l'orchestrateur ne
+// lui en donne pas, et `forge team status` le dit à l'humain.
+async function executorSession(ctx: Context, p: ProjectConfig, name: string, running: boolean, holds: boolean): Promise<SessionState> {
   if (!running) return "unknown";
-  const state = await sessionState(ctx, name);
-  if (state !== "none") return state;
-  if ((await ctx.exec(hcArgv(name, ["ls"]))).code !== 0) return "unknown";
-  return holds ? "lost" : "none";
+  let state = await sessionState(ctx, name, { timeoutMs: STATUS_MS });
+  if (state === "none") {
+    const ls = await ctx.exec(hcArgv(name, ["ls"]), { timeoutMs: STATUS_MS });
+    if (ls.timedOut || ls.code !== 0) return "unknown";
+    state = holds ? "lost" : "none";
+  }
+  if (holds || state === "unknown") return state;
+  const clones = await cloneStates(ctx, name, p);
+  return clones.every((c) => c.state === "clean") ? state : "unknown";
 }
 
+// Les exécuteurs en parallèle : le délai de l'orchestrateur (30 s) borne la
+// réponse entière, pas celle d'un seul.
 async function status(ctx: Context, p: ProjectConfig): Promise<ExecutorStatus[]> {
   const instances = await listInstances(ctx);
-  const rows: ExecutorStatus[] = [];
-  for (const m of executors(p)) {
+  return Promise.all(executors(p).map(async (m): Promise<ExecutorStatus> => {
     const inst = instances.find((i) => i.name === m.name);
     const mission = readHeld(inst?.config[MISSION_KEY]);
     if (mission === "unreadable") {
       // Ni libre ni reprenable : `unknown`, et l'humain est prévenu.
       ctx.err(`WARNING: ${m.name} has an unreadable ${MISSION_KEY}: release it.`);
-      rows.push({ name: m.name, mission: null, session: "unknown" });
-      continue;
+      return { name: m.name, mission: null, session: "unknown" };
     }
-    rows.push({ name: m.name, mission, session: await executorSession(ctx, m.name, inst?.status === "Running", mission !== null) });
-  }
-  return rows;
+    return { name: m.name, mission, session: await executorSession(ctx, p, m.name, inst?.status === "Running", mission !== null) };
+  }));
 }
 
 // Les `done` acceptés d'id > after, par id croissant ; `last` est le plus
@@ -422,8 +460,6 @@ function events(d: ApiDeps, after: number): Outcome {
     .map((e) => ({ id: e.id, kind: "done", executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask, branch: e.mission!.branch }));
   return { reply: () => ({ ok: true, events: list, last }), quiet: true };
 }
-
-const shellQuote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 
 // Une mission tenue, au moins un commit au-delà de sa base, la branche copiée
 // dans le miroir d'équipe du dépôt ; puis la ligne du journal, dont l'id est

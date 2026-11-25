@@ -201,20 +201,35 @@ test("an executor that is not free: refused, unless it holds the same sub-task (
   assert.ok(joined().some((c) => c.includes("hc run")));
 });
 
-test("recovery on the branch with uncommitted work: no clean check, no switch, a new session", async () => {
+// La reprise de l'orchestrateur (tick.ts, recover) : `release` puis `assign` de
+// la même mission, par son client. À l'assign, la clé est vide : c'est le clone,
+// déjà sur agent/T-1.1, qui dit la reprise.
+test("recovery as the orchestrator does it, release then assign: on the branch with uncommitted work, no clean check, no switch, a new session", async () => {
   hold(E1, held());
+  sessions[E1] = "lost";
   setup([{ match: "symbolic-ref --short HEAD", stdout: "agent/T-1.1\n" }, { match: "status --porcelain", stdout: " M a.ts\n" }]);
-  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }), { ok: true });
-  assert.ok(!joined().some((c) => c.includes(" switch")), joined().join("\n"));
-  assert.ok(!joined().some((c) => c.includes("status --porcelain")));
-  assert.ok(joined().some((c) => c.includes("hc run")));
+  await withHost(async (host) => {
+    assert.deepEqual((await host.status()).find((e) => e.name === E1)?.session, "lost");
+    await host.release(E1);
+    assert.equal(keys(E1)[MISSION_KEY], undefined);
+    const before = ctx.calls.length;
+    await host.assign(E1, spec());
+    const after = ctx.calls.slice(before).map((c) => c.join(" "));
+    assert.ok(after.some((c) => c.includes("fetch team")), after.join("\n"));
+    assert.ok(!after.some((c) => c.includes(" switch")), after.join("\n"));
+    assert.ok(!after.some((c) => c.includes("status --porcelain")), after.join("\n"));
+    assert.ok(after.some((c) => c.includes("hc run")));
+  });
+  assert.equal(keys(E1)[MISSION_KEY], JSON.stringify(held()));
 });
 
-test("recovery off the branch with a dirty tree is refused; a recovery with another base is refused", async () => {
-  hold(E1, held());
-  setup([{ match: "symbolic-ref --short HEAD", stdout: "main\n" }, { match: "status --porcelain", stdout: " M a.ts\n" }]);
+test("a clone off the branch with tracked changes is refused, released or not; a held sub-task with another base is refused", async () => {
+  setup([{ match: "symbolic-ref --short HEAD", stdout: "main\n" }, { match: "status --porcelain --untracked-files=no", stdout: " M a.ts\n" }]);
   assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }),
-    { ok: false, error: `${E1}: /workspace/web has 1 uncommitted change and is not on agent/T-1.1: commit or discard them before resuming T-1.1` });
+    { ok: false, error: `${E1}: /workspace/web has 1 uncommitted change and is not on agent/T-1.1: commit or discard them before assigning a mission` });
+  hold(E1, held());
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }),
+    { ok: false, error: `${E1}: /workspace/web has 1 uncommitted change and is not on agent/T-1.1: commit or discard them before assigning a mission` });
   assert.ok(!joined().some((c) => c.includes(" switch")));
   assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec({ base: "origin/dev" }) }),
     { ok: false, error: "T-1.1 is held with another repository or base" });
@@ -240,10 +255,10 @@ test("a sub-task held by another executor is refused", async () => {
   assert.equal(keys(E2)[MISSION_KEY], undefined);
 });
 
-test("a dirty clone, an unknown executor and an undeclared repository are refused", async () => {
-  setup([{ match: `${GIT} status --porcelain`, stdout: " M a.ts\n" }]);
+test("a dirty clone (tracked changes only), an unknown executor and an undeclared repository are refused", async () => {
+  setup([{ match: `${GIT} status --porcelain --untracked-files=no`, stdout: " M a.ts\n" }]);
   assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }),
-    { ok: false, error: `${E1}: /workspace/web has 1 uncommitted change: commit or discard them before assigning a mission` });
+    { ok: false, error: `${E1}: /workspace/web has 1 uncommitted change and is not on agent/T-1.1: commit or discard them before assigning a mission` });
   assert.deepEqual(await call(CONTROL, { op: "assign", to: executorName(3), mission: spec() }),
     { ok: false, error: "agent-executor-3 is not an executor of this project" });
   assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec({ repository: "docs" }) }),
@@ -280,6 +295,71 @@ test("status: none only with hc up and no mission; held without terminal is lost
   hcDown.add(E1);
   r = await call(CONTROL, { op: "status" });
   assert.equal((r as unknown as { executors: { session: string }[] }).executors[0].session, "unknown");
+});
+
+test("status: a free executor whose clone has tracked changes, or whose git status hangs, is unknown; a busy one is not looked at", async () => {
+  hold(E2, held());
+  sessions[E2] = "working";
+  setup([{ match: "/workspace/api -c core.fsmonitor=false", stdout: " M a.ts\n" }]);
+  let r = await call(CONTROL, { op: "status" });
+  assert.deepEqual(r, { ok: true, executors: [
+    { name: E1, mission: null, session: "unknown" },
+    { name: E2, mission: held(), session: "working" },
+  ] });
+  const looked = joined().filter((c) => c.includes("status --porcelain --untracked-files=no"));
+  assert.ok(looked.length === 2 && looked.every((c) => c.includes(`exec ${E1} `)), looked.join("\n"));
+  setup();
+  hangs = ["/workspace/web -c core.fsmonitor=false"];
+  r = await call(CONTROL, { op: "status" });
+  assert.equal((r as unknown as { executors: { session: string }[] }).executors[0].session, "unknown");
+  hangs = [];
+  r = await call(CONTROL, { op: "status" });
+  assert.equal((r as unknown as { executors: { session: string }[] }).executors[0].session, "none");
+});
+
+test("status: a hc get or hc ls that hangs is unknown, never lost, for an executor that holds a mission", async () => {
+  hold(E1, held());
+  for (const h of [["hc get"], ["hc ls"]]) {
+    hangs = h.map((x) => `-- ${x}`);
+    const r = await call(CONTROL, { op: "status" });
+    assert.equal((r as unknown as { executors: { session: string }[] }).executors[0].session, "unknown", h[0]);
+  }
+  hangs = [];
+  const r = await call(CONTROL, { op: "status" });
+  assert.equal((r as unknown as { executors: { session: string }[] }).executors[0].session, "lost");
+});
+
+test("the incus and hc calls of assign and release have a timeout: a hang refuses naming the step, and the key is not left set", async () => {
+  const fresh = [absent("refs/remotes/team/agent/T-1.1"), absent("refs/heads/agent/T-1.1")];
+  fake.instances.get("agent-forge")!.get(E1)!.status = "Stopped";
+  hangs = [`start ${E1}`];
+  setup(fresh);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }),
+    { ok: false, error: `incus start ${E1} timed out after 30 s` });
+  fake.instances.get("agent-forge")!.get(E1)!.status = "Running";
+  hangs = [`set ${E1} ${MISSION_KEY}`];
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }),
+    { ok: false, error: `recording the mission of ${E1} timed out after 30 s` });
+  hangs = ["-- hc run"];
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }),
+    { ok: false, error: `hc run in ${E1} timed out after 30 s` });
+  assert.equal(keys(E1)[MISSION_KEY], undefined);
+  // Un `hc kill` muet ne refuse pas la libération : la clé est retirée, l'humain prévenu.
+  hold(E1, held());
+  hangs = ["-- hc kill"];
+  assert.deepEqual(await call(CONTROL, { op: "release", to: E1 }), { ok: true });
+  assert.equal(keys(E1)[MISSION_KEY], undefined);
+  assert.ok(ctx.err_lines.some((l) => l.includes(`could not stop ${E1}'s session`)), ctx.err_lines.join("\n"));
+  hangs = [`unset ${E1} ${MISSION_KEY}`];
+  hold(E1, held());
+  assert.deepEqual(await call(CONTROL, { op: "release", to: E1 }), { ok: false, error: `clearing the mission of ${E1} timed out after 30 s` });
+});
+
+test("a switch has 60 s", async () => {
+  hangs = ["switch -c agent/T-1.1"];
+  setup([absent("refs/remotes/team/agent/T-1.1"), absent("refs/heads/agent/T-1.1")]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }),
+    { ok: false, error: `git switch in ${E1}:/workspace/web timed out after 60 s` });
 });
 
 test("an executor's status is its mission", async () => {
@@ -341,6 +421,18 @@ test("status and events replies pass the orchestrator's client", async () => {
   hold(E1, held());
   setup([{ match: "rev-list --count", stdout: "1\n" }]);
   await call(E1, { op: "done" });
+  await withHost(async (host) => {
+    const status = await host.status();
+    assert.deepEqual(status.map((e) => [e.name, e.mission?.subtask ?? null]), [[E1, "T-1.1"], [E2, null]]);
+    const ev = await host.events(0);
+    assert.deepEqual(ev.events.map((e) => [e.executor, e.branch]), [[E1, "agent/T-1.1"]]);
+    await host.release(E1);
+  });
+});
+
+// Le client de l'orchestrateur (socketHost) sur une socket que sert handleMission
+// pour le contrôle, comme le service.
+async function withHost(fn: (host: ReturnType<typeof socketHost>) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "forge-mission-sock-"));
   const path = join(dir, "api.sock");
   const sockets: Socket[] = [];
@@ -356,18 +448,13 @@ test("status and events replies pass the orchestrator's client", async () => {
   });
   await new Promise<void>((r) => server.listen(path, r));
   try {
-    const host = socketHost(path);
-    const status = await host.status();
-    assert.deepEqual(status.map((e) => [e.name, e.mission?.subtask ?? null]), [[E1, "T-1.1"], [E2, null]]);
-    const ev = await host.events(0);
-    assert.deepEqual(ev.events.map((e) => [e.executor, e.branch]), [[E1, "agent/T-1.1"]]);
-    await host.release(E1);
+    await fn(socketHost(path));
   } finally {
     sockets.forEach((s) => s.destroy());
     await new Promise((r) => server.close(r));
     rmSync(dir, { recursive: true, force: true });
   }
-});
+}
 
 test("with a project, the server opens one socket per project container and answers with the mission verbs", async () => {
   process.env.FORGE_API_RUNTIME = join(home, "run");
