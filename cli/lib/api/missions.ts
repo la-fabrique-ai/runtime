@@ -5,7 +5,7 @@
 //
 // Comme handle.ts : l'appelant vient de la socket, jamais de la requête ; une
 // requête est validée à la main, champ par champ ; chaque appel laisse une
-// ligne au journal, sauf les lectures acceptées du contrôle (status, events).
+// ligne au journal, sauf les lectures acceptées (status, events, et le status d'un exécuteur, que forge-team sonde).
 // `assign`, `release` et `done` passent un à la fois (`exclusive()`), et l'id
 // d'un `done` se prend en l'écrivant au journal, dans cette file : un
 // évènement d'id plus petit n'apparaît jamais après un plus grand.
@@ -243,7 +243,7 @@ async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Prom
       if (caller.kind === "executor") {
         const mine = readHeld(await configGet(d.ctx, caller.name, MISSION_KEY));
         if (mine === "unreadable") throw new ForgeError(`${caller.name}'s mission key is unreadable: ask for it to be released`);
-        return { reply: () => ({ ok: true, mission: mine }) };
+        return { reply: () => ({ ok: true, mission: mine }), quiet: true };
       }
       {
         const rows = await status(d.ctx, p);
