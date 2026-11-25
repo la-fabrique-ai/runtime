@@ -103,14 +103,14 @@ pull requests, and merges it on GitHub.
             approved               stack done           OK
   (Pilot) ──> Spec ──────────> Dev ──────────> QA ──────────> Human review
                                 ^               │                 │   │
-                                │   KO: fixes   │                 │   │ autonomous:
-                                ├───────────────┘                 │   │ the human merges
-                                │   changes requested             │   v
-                                ├─────────────────────────────────┘  Done
-                                │                                     ^
-                                │   peer comments      forge ship     │ PRs merged
-                                └──────────────── PR review <─────────┤ by the human
-                                                   (supervised)
+                                │   KO: fixes   │                 │
+                                ├───────────────┘                 │
+                                │   changes requested             │ forge ship
+                                ├─────────────────────────────────┤
+                                │                                 v
+                                │   peer comments             PR review ──> Done
+                                └─────────────────────────────────┘   PRs merged
+                                                                      by the human
 ```
 
 | Status | Who works on it | Leaves when |
@@ -118,8 +118,8 @@ pull requests, and merges it on GitHub.
 | Spec | the Pilot, with the human | the human approves the spec and the split; the Pilot creates the stacks → Dev |
 | Dev | execution containers, one sub-task after another | every sub-task is Done → QA |
 | QA | one execution container on a QA mission, on the top of the stacks | OK → Human review; KO → fixes → Dev |
-| Human review | the human. Supervised: `forge fetch`, and the review written to the Pilot. Autonomous: on the pull requests | changes → fixes → Dev; validated → `forge ship` → PR review (supervised), or the human merges → Done (autonomous) |
-| PR review | peers, on GitHub (supervised) | comments imported by the human → fixes → Dev; the human merges the stack → Done |
+| Human review | the human: `forge fetch`, and the review written to the Pilot | changes → fixes → Dev; validated → `forge ship` → PR review |
+| PR review | peers, on GitHub | comments imported by the human → fixes → Dev; the human merges the stack → Done |
 | Done | — | — |
 
 Any fix sends the ticket back to Dev, then through QA and human review again:
@@ -309,13 +309,13 @@ Numbered as on the model page, so the team can refer to them by number.
     API socket**, under its own Unix user; the sessions go through it. A
     change of the security architecture, validated by the maintainer on
     2026-11-25.
-26. **In autonomous mode, the orchestrator also holds the GitHub
-    credential.**
+26. *Withdrawn by decision 33* (the orchestrator held the GitHub credential
+    in autonomous mode).
 27. **`forge ship <ticket>` opens or updates all the stacks of the ticket**,
     in order. After a cascade, it force-pushes with `--force-with-lease`, on
     the ticket's branches only.
 28. **A stack is merged through GitHub's stacked pull requests, and the human
-    always merges**, in autonomous mode too.
+    always merges**.
 
 **Later**: independent sub-tasks of one ticket developed in parallel, on the
 Pilot's decision. Building the final stack then gets harder; for now, one
@@ -354,6 +354,9 @@ Settled after the review and the reading of the console's last version:
     list of tickets with their statuses, a ticket's page (sub-tasks, QA
     report) and the answer to a request. They are the console's screens
     taken as a base and adapted (§6.12), not rewritten.
+33. **No autonomous mode.** forge runs supervised only: the human ships with
+    `forge ship` and merges on GitHub. Decision 26 is withdrawn, §6.13 says
+    what stays, and the delivery has four parts (§8).
 
 ## 4. Goals, non-goals, anti-goals
 
@@ -380,8 +383,8 @@ Settled after the review and the reading of the console's last version:
 - An origin mirror refreshed without the human; peer comments read without
   the human, in supervised mode.
 - Several humans per VM (la-fabrique-ai/runtime#135).
-- The autonomous mode beyond what decisions 26 and 28 fix: it is the last
-  part (§8), with its open questions (§10).
+- The autonomous mode (decision 33): forge runs supervised only, and GitHub
+  is reached only at the human's gestures.
 - Keeping the current team model (Lead agent, Reviewer container, Inbox,
   `forge answer`, `forge team watch`) alongside the new one.
 
@@ -461,8 +464,7 @@ Settled after the review and the reading of the console's last version:
   container), the origin mirror and the team mirror of each repository, the
   journal.
 - **The control container**: the orchestrator (its own user, the ticket
-  manager's credential, the API socket, in autonomous mode the GitHub
-  credential), the Pilot and the question sessions, read-only clones of every
+  manager's credential, the API socket), the Pilot and the question sessions, read-only clones of every
   repository.
 - **The execution containers** (N): one mission at a time, every clone, the
   project's Docker services. They see only the forge API: no ticket
@@ -497,8 +499,7 @@ format:
 - **the orchestrator's user** (name: the builder's): runs the orchestrator as
   a long-running service; owns the ticket manager's credential (a mode-600
   file), the container's forge API socket (`/run/forge/api.sock`, owned by
-  this user, mode 600, where today `aiuser` owns it), and in autonomous mode
-  the GitHub credential;
+  this user, mode 600, where today `aiuser` owns it);
 - **`aiuser`**: runs the hc core, the Pilot session and the question
   sessions, with read-only clones of every repository (today's `read-repos`).
   It cannot read the orchestrator's files nor connect to the API socket.
@@ -829,12 +830,13 @@ polls every three seconds. So the screens are taken and adapted:
   `reviewer` askers, no mission stage). It is defined with the engine, and
   the colleague's iterations follow it.
 
-### 6.13 The autonomous mode
+### 6.13 No autonomous mode
 
-What is decided: the orchestrator holds the GitHub credential (decision 26),
-opens and updates the pull requests and reads their comments; the human
-always merges (decision 28). The rest is open (§10) and designed in the last
-part.
+forge runs supervised only (decision 33). No GitHub credential enters the
+control container: the pull requests are opened by `forge ship` and their
+comments read by the import command, both on the Mac with the human's
+access. The marker `~/.claude/forge-mode` and the autonomous rules of
+`container/pre-bash.sh` are not touched by this design.
 
 ## 7. What changes from DX 5 and the reference team
 
@@ -855,7 +857,6 @@ part.
 | `forge ship <task>` | `forge ship <ticket>`, every stack of the ticket, as GitHub stacked pull requests |
 | Questions to the human in forge's Inbox | Questions in the ticket manager |
 | The state in the agents' notes | The state in the ticket manager; resuming re-reads the statuses (#186) |
-| The relay (contributor VM) holds the bot's GitHub credential | In autonomous mode, the orchestrator holds the GitHub credential |
 | The console, a separate repository, drives forge's Lead over SSH from the Mac | The console's repository is archived; its ticket management runs in the control container |
 
 The contributor VM and its relay are not touched by this design.
@@ -891,7 +892,6 @@ the old system kept on a LAN host.
    peer comments, Done on merge. *End state: the supervised flow of §2 runs
    end to end.*
 4. **Multi-repository tickets and tickets built on another's stack.**
-5. **The autonomous mode** (§6.13), after its open questions are settled.
 
 The Markdown base iterates alongside, with its author: part 1 gives it its
 structure (the ticket model, the adapter interface, files in the base's
@@ -913,8 +913,7 @@ folder), later parts add what the flow needs.
   What it does shows in the ticket manager. Accepted by the maintainer.
 - **A Unix user is a weaker boundary than a separate VM.** A session that
   gains the orchestrator's rights (a local privilege escalation in the
-  container) gets the manager's credential, and in autonomous mode the GitHub
-  credential too. The relay of the contributor VM, a separate machine, is the
+  container) gets the manager's credential. The relay of the contributor VM, a separate machine, is the
   stronger model; accepted for now.
 - **The ticket source is trusted by assumption** (decision 24): the connector
   guarantees who may write a sub-task or an answer. The orchestrator reads
@@ -925,7 +924,7 @@ folder), later parts add what the flow needs.
 - **The cloud ticket manager receives** the specs, the questions and the QA
   reports: excerpts of the client's code go there. That is for the client to
   know.
-- **GitHub** is reached only at the human's gesture in supervised mode. The
+- **GitHub** is reached only at the human's gesture. The
   force-push of `forge ship` is limited to the ticket's branches, with lease.
 - **The anti-goals of DX 5 stay**: no container reaches the host's hc core,
   `incus`, or another container's socket; no secret in an argv, hc's state or
@@ -933,12 +932,9 @@ folder), later parts add what the flow needs.
 
 ## 10. Open questions
 
-1. **Autonomous mode, peer comments**: the orchestrator reads them with its
-   GitHub credential. Are they trusted like the tickets, or filtered by
-   author as the relay does?
-2. **Autonomous mode, signatures**: in supervised mode, `forge ship` signs
-   with the human's key. Who signs the commits the orchestrator pushes, and
-   with which key?
+None. The two questions of the autonomous mode (trust in peer comments read
+by the orchestrator, the signature of the commits it pushes) go with it
+(decision 33).
 
 ## 11. Tests
 
