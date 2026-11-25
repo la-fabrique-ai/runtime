@@ -70,8 +70,8 @@ test("release et events", async () => {
     assert.equal(received[0], '{"op":"release","to":"e1"}');
   });
   const ev = { id: 3, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b" };
-  await withServer(JSON.stringify({ ok: true, events: [ev] }), async (path, received) => {
-    assert.deepEqual(await socketHost(path).events(2), [ev]);
+  await withServer(JSON.stringify({ ok: true, events: [ev], last: 5 }), async (path, received) => {
+    assert.deepEqual(await socketHost(path).events(2), { events: [ev], last: 5 });
     assert.equal(received[0], '{"op":"events","after":2}');
   });
 });
@@ -83,9 +83,23 @@ test("un refus de l'hôte devient une HostError", async () => {
 });
 
 test("une réponse mal formée est refusée", async () => {
-  await withServer('{"ok":true,"events":[{"id":"1"}]}', async (path) => {
+  await withServer('{"ok":true,"events":[{"id":"1"}],"last":1}', async (path) => {
     await assert.rejects(socketHost(path).events(0), HostError);
   });
+  // `last` absent, négatif ou non entier ; des évènements hors d'ordre ou au-delà de `last`.
+  const ev = (id: number) => ({ id, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b" });
+  for (const bad of [
+    { ok: true, events: [] },
+    { ok: true, events: [], last: -1 },
+    { ok: true, events: [], last: 1.5 },
+    { ok: true, events: [ev(2), ev(1)], last: 2 },
+    { ok: true, events: [ev(3)], last: 2 },
+    { ok: true, events: [], last: 0, extra: 1 },
+  ]) {
+    await withServer(JSON.stringify(bad), async (path) => {
+      await assert.rejects(socketHost(path).events(0), (e) => e instanceof HostError && /events/.test(e.message));
+    });
+  }
   await withServer('{"ok":true,"executors":[{"name":"a","mission":null,"session":"idle","extra":1}]}', async (path) => {
     await assert.rejects(socketHost(path).status(), HostError);
   });
@@ -100,6 +114,16 @@ test("une réponse mal formée est refusée", async () => {
 test("un hôte muet déclenche le délai", async () => {
   await withServer(null, async (path) => {
     await assert.rejects(socketHost(path, { timeoutMs: 200 }).status(), (e) => e instanceof HostError && /status/.test(e.message));
+  });
+});
+
+test("assign a son propre délai, séparé de celui des autres ops", async () => {
+  await withServer(null, async (path) => {
+    const host = socketHost(path, { timeoutMs: 100, assignTimeoutMs: 400 });
+    const t0 = Date.now();
+    await assert.rejects(host.assign("e", mission), (e) => e instanceof HostError && /assign : délai de 400 ms/.test(e.message));
+    assert.ok(Date.now() - t0 >= 350);
+    await assert.rejects(host.status(), /status : délai de 100 ms/);
   });
 });
 

@@ -1,7 +1,7 @@
 // Un tour de l'orchestrateur : lire les évènements de l'hôte, reprendre les
 // missions perdues, distribuer les sous-tâches prêtes aux exécuteurs libres.
 // Le tour ne journalise rien : il renvoie un compte rendu.
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import type { Connector } from "../tickets/connector.ts";
@@ -41,7 +41,15 @@ export function fileCursor(path: string): Cursor {
       // Temporaire du même dossier puis rename : jamais de curseur à moitié écrit.
       const tmp = join(dirname(path), `.${basename(path)}.tmp-${randomUUID()}`);
       writeFileSync(tmp, `${id}\n`, { flag: "wx" });
-      renameSync(tmp, path);
+      try {
+        renameSync(tmp, path);
+      } catch (e) {
+        // Le rename a échoué : on ne laisse pas le temporaire derrière soi.
+        try {
+          unlinkSync(tmp);
+        } catch {}
+        throw e;
+      }
     },
   };
 }
@@ -52,7 +60,9 @@ const local = (e: unknown): boolean => e instanceof ConnectorError || e instance
 // Une erreur hors du domaine (ni hôte, ni base, ni règle) est un bug : `internal: `
 // la distingue d'une panne.
 const describe = (e: unknown): string => (local(e) || e instanceof HostError ? message(e) : `internal: ${message(e)}`);
-const LOST: readonly string[] = ["exited", "lost", "none"];
+// Seules ces sessions déclenchent une reprise (spec §6.4). `none` (aucun
+// terminal) et `unknown` (container arrêté, exec en échec) ne la déclenchent pas.
+const LOST: readonly string[] = ["exited", "lost"];
 
 export async function tick(d: { tickets: Connector; host: HostApi; cursor: Cursor }): Promise<TickReport> {
   const report: TickReport = { completed: [], assigned: [], recovered: [], problems: [] };
@@ -70,7 +80,15 @@ async function run(d: { tickets: Connector; host: HostApi; cursor: Cursor }, rep
   const { tickets, host, cursor } = d;
 
   // 1. Évènements.
-  const events = await host.events(cursor.read());
+  const after = cursor.read();
+  let reply = await host.events(after);
+  if (reply.last < after) {
+    // Le journal de l'hôte est reparti de zéro : le curseur aussi, et on relit
+    // tout dans le même tour (relire un évènement déjà traité est sans effet).
+    cursor.write(0);
+    reply = await host.events(0);
+  }
+  const events = reply.events;
   // Le curseur n'avance que jusqu'au premier évènement en échec : celui-ci
   // sera relu au tour suivant. Les suivants sont traités quand même (un
   // ticket illisible ne bloque pas les autres) et relus sans effet.
@@ -157,13 +175,16 @@ async function run(d: { tickets: Connector; host: HostApi; cursor: Cursor }, rep
   // 4. Distribution.
   const found = candidates(picture, held);
   report.problems.push(...found.problems);
-  const free = executors.filter((e) => e.mission === null).map((e) => e.name).sort();
+  // Un exécuteur `unknown` (container arrêté, hôte sans réponse) n'est pas libre.
+  const free = executors.filter((e) => e.mission === null && e.session !== "unknown").map((e) => e.name).sort();
   for (const c of found.candidates) {
     if (failed.has(c.subtask.id)) continue;
     const to = free[0];
     if (to === undefined) break;
+    // Assigné ou non, l'exécuteur sort de `free` pour le tour : un exécuteur qui
+    // refuse tout ne bloque pas la distribution aux suivants.
+    free.shift();
     if (await launch(tickets, host, to, c, false, failed, report)) {
-      free.shift();
       report.assigned.push({ subtask: c.subtask.id, executor: to });
     }
   }

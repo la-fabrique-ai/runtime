@@ -7,8 +7,22 @@ import { connect } from "node:net";
 //   {"op":"status"}                                  -> {"ok":true,"executors":[ExecutorStatus…]}
 //   {"op":"assign","to":…,"mission":{MissionSpec}}   -> {"ok":true}
 //   {"op":"release","to":…}                          -> {"ok":true}
-//   {"op":"events","after":<n>}                      -> {"ok":true,"events":[HostEvent…]}
+//   {"op":"events","after":<n>}                      -> {"ok":true,"events":[HostEvent…],"last":<n>}
 //   tout refus                                       -> {"ok":false,"error":"…"}
+//
+// `events` : les évènements d'id > `after`, par id croissant ; `last` est le
+// plus grand id du journal de l'hôte (0 s'il est vide). L'id d'un `done` est
+// pris au moment où l'hôte l'ajoute au journal. Un `last` inférieur au curseur
+// de l'orchestrateur signale un journal reparti de zéro.
+//
+// `assign` refuse une sous-tâche déjà tenue par un autre exécuteur
+// (`"<sous-tâche> is held by <exécuteur>"`). Il peut être long (préparer le
+// clone, lancer la session) : son délai est séparé, 120 s par défaut.
+//
+// `session` : `none` = container démarré, hc joignable, aucun terminal ;
+// un container arrêté ou un exec en échec vaut `unknown`. Seuls `lost` et
+// `exited` déclenchent une reprise ; un exécuteur `unknown` n'est pas libre
+// (aucune mission ne lui est donnée) et la reprise ne le libère jamais.
 
 export type MissionKind = "dev";
 
@@ -34,7 +48,7 @@ export interface HostApi {
   status(): Promise<ExecutorStatus[]>;
   assign(to: string, mission: MissionSpec): Promise<void>;
   release(to: string): Promise<void>;
-  events(after: number): Promise<HostEvent[]>;
+  events(after: number): Promise<{ events: HostEvent[]; last: number }>;
 }
 
 export class HostError extends Error {}
@@ -72,9 +86,13 @@ function parseExecutors(v: unknown): ExecutorStatus[] {
   });
 }
 
-function parseEvents(v: unknown): HostEvent[] {
+// La réponse entière : ses clés sont exactement `ok`, `events` et `last`.
+function parseEvents(r: Obj): { events: HostEvent[]; last: number } {
+  if (!exact(r, ["ok", "events", "last"])) throw new Error("réponse events invalide");
+  const { events: v, last } = r;
+  if (!Number.isSafeInteger(last) || (last as number) < 0) throw new Error("last invalide");
   if (!Array.isArray(v)) throw new Error("events n'est pas un tableau");
-  return v.map((e) => {
+  const events = v.map((e): HostEvent => {
     if (
       !exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch"]) ||
       !Number.isInteger(e.id) || (e.id as number) < 0 || e.kind !== "done" ||
@@ -84,6 +102,11 @@ function parseEvents(v: unknown): HostEvent[] {
     }
     return { id: e.id as number, kind: "done", executor: e.executor, ticket: e.ticket, subtask: e.subtask, branch: e.branch };
   });
+  // Par id croissant, aucun au-delà de `last` : le curseur ne fait qu'avancer.
+  events.forEach((e, i) => {
+    if ((i > 0 && e.id <= events[i - 1]!.id) || e.id > (last as number)) throw new Error("évènements hors d'ordre");
+  });
+  return { events, last: last as number };
 }
 
 // Une connexion par appel : écrire la requête, lire une ligne, fermer.
@@ -127,11 +150,12 @@ function call(path: string, timeoutMs: number, request: Obj): Promise<Obj> {
   });
 }
 
-export function socketHost(path: string, opts: { timeoutMs?: number } = {}): HostApi {
+export function socketHost(path: string, opts: { timeoutMs?: number; assignTimeoutMs?: number } = {}): HostApi {
   const timeoutMs = opts.timeoutMs ?? 30_000;
+  const assignTimeoutMs = opts.assignTimeoutMs ?? 120_000;
   // Valide la réponse ; toute erreur de forme devient une HostError nommant l'op.
   const run = async <T>(request: Obj, pick: (r: Obj) => T): Promise<T> => {
-    const reply = await call(path, timeoutMs, request);
+    const reply = await call(path, request.op === "assign" ? assignTimeoutMs : timeoutMs, request);
     try {
       return pick(reply);
     } catch (e) {
@@ -142,6 +166,6 @@ export function socketHost(path: string, opts: { timeoutMs?: number } = {}): Hos
     status: () => run({ op: "status" }, (r) => parseExecutors(r.executors)),
     assign: (to, mission) => run({ op: "assign", to, mission }, () => undefined),
     release: (to) => run({ op: "release", to }, () => undefined),
-    events: (after) => run({ op: "events", after }, (r) => parseEvents(r.events)),
+    events: (after) => run({ op: "events", after }, parseEvents),
   };
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
@@ -16,11 +16,13 @@ class FakeHost implements HostApi {
   events_: HostEvent[] = [];
   calls: string[] = [];
   assigned: { to: string; mission: MissionSpec }[] = [];
-  failAssign: ((m: MissionSpec) => HostError | null) | null = null;
+  failAssign: ((m: MissionSpec, to: string) => HostError | null) | null = null;
   // L'hôte enregistre la mission puis sa réponse se perd (délai dépassé).
   loseReply: ((m: MissionSpec) => boolean) | null = null;
   failStatus: Error | null = null;
   failEvents = false;
+  // Le plus grand id du journal ; `null` : celui du dernier évènement.
+  last: number | null = null;
   constructor(names: string[]) {
     this.executors = names.map((name) => ({ name, mission: null, session: "none" as SessionState }));
   }
@@ -31,7 +33,7 @@ class FakeHost implements HostApi {
   }
   async assign(to: string, mission: MissionSpec): Promise<void> {
     this.calls.push(`assign ${to} ${mission.subtask}`);
-    const err = this.failAssign?.(mission);
+    const err = this.failAssign?.(mission, to);
     if (err) throw err;
     const e = this.executors.find((x) => x.name === to)!;
     if (e.mission) throw new HostError(`${to} is busy`);
@@ -47,10 +49,10 @@ class FakeHost implements HostApi {
     e.mission = null;
     e.session = "idle";
   }
-  async events(after: number): Promise<HostEvent[]> {
+  async events(after: number): Promise<{ events: HostEvent[]; last: number }> {
     this.calls.push(`events ${after}`);
     if (this.failEvents) throw new HostError("hôte, events : connexion refusée");
-    return this.events_.filter((e) => e.id > after);
+    return { events: this.events_.filter((e) => e.id > after), last: this.last ?? this.events_.at(-1)?.id ?? 0 };
   }
   // Ce que fait l'agent : il finit sa mission, l'hôte émet `done`.
   finish(name: string): void {
@@ -179,6 +181,50 @@ test("une reprise dont l'assign échoue n'est pas retentée dans le même tour",
   assert.equal(await status(tickets, "T-1.1"), "ready");
 });
 
+test("un exécuteur qui refuse tout assign ne bloque pas la distribution aux suivants", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a", "b"]);
+  host.failAssign = (m, to) => (to === "a" ? new HostError(`refus ${m.subtask}`) : null);
+  const r = await tick({ tickets, host, cursor: memCursor() });
+  // a refuse T-2.1 ; T-1.1 va à b dans le même tour, a n'est pas retenté.
+  assert.deepEqual(r.assigned, [{ subtask: "T-1.1", executor: "b" }]);
+  assert.deepEqual(host.calls.filter((c) => c.startsWith("assign")), ["assign a T-2.1", "assign b T-1.1"]);
+});
+
+test("une session none ne déclenche pas de reprise ; un exécuteur unknown n'est ni libre ni libéré", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a", "b", "c"]);
+  host.executors[0].mission = { kind: "dev", ticket: "T-2", subtask: "T-2.1", repository: "web", branch: "agent/T-2.1", base: "origin/main" };
+  host.executors[0].session = "none";
+  await tickets.setSubtaskStatus({ id: "T-2.1", status: "in-dev" });
+  host.executors[1].mission = { kind: "dev", ticket: "T-1", subtask: "T-1.1", repository: "web", branch: "agent/T-1.1", base: "origin/main" };
+  host.executors[1].session = "unknown";
+  await tickets.setSubtaskStatus({ id: "T-1.1", status: "in-dev" });
+  host.executors[2].session = "unknown"; // c : sans mission, mais injoignable
+  // T-3.1 est prête : seul c pourrait la prendre.
+  const t3 = await tickets.createTicket({ title: "t3", description: "d", priority: 3, repositories: [{ name: "web", base: "main" }] });
+  await tickets.setTicketStatus({ id: t3.id, status: "dev" });
+  await tickets.createSubtask({ ticket: t3.id, repository: "web", position: 1, rank: 1, kind: "implementation", text: "s" });
+  const r = await tick({ tickets, host, cursor: memCursor() });
+  assert.deepEqual(r.recovered, []);
+  assert.deepEqual(r.assigned, []);
+  assert.ok(!host.calls.some((c) => c.startsWith("release") || c.startsWith("assign")));
+});
+
+test("un journal reparti de zéro (last < curseur) : curseur remis à 0 et relu dans le même tour", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a", "b", "c"]);
+  const cursor = memCursor();
+  await tick({ tickets, host, cursor });
+  host.finish("a"); // T-2.1, id 1 dans le nouveau journal
+  cursor.value = 7; // le curseur de l'ancien journal
+  host.calls = [];
+  const r = await tick({ tickets, host, cursor });
+  assert.deepEqual(host.calls.filter((c) => c.startsWith("events")), ["events 7", "events 0"]);
+  assert.deepEqual(r.completed, ["T-2.1"]);
+  assert.equal(cursor.value, 1);
+});
+
 test("une erreur hors domaine est préfixée internal:", async () => {
   const { tickets } = await setup();
   const host = new FakeHost(["a"]);
@@ -263,4 +309,13 @@ test("fileCursor : absent ou illisible vaut 0, écrit puis relu", () => {
   assert.equal(fileCursor(path).read(), 42);
   writeFileSync(path, "abc");
   assert.equal(c.read(), 0);
+});
+
+test("fileCursor : un rename en échec ne laisse pas de temporaire", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-cursor-"));
+  const path = join(dir, "cursor");
+  mkdirSync(path); // un dossier non vide à la place du fichier : le rename échoue
+  writeFileSync(join(path, "x"), "");
+  assert.throws(() => fileCursor(path).write(3));
+  assert.deepEqual(readdirSync(dir), ["cursor"]);
 });
