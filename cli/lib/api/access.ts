@@ -18,9 +18,20 @@ export const API_DEVICE = "forge-api";
 export const CONTAINER_SOCKET = "/var/lib/forge/api.sock";
 const API_SERVICE = "forge-api.service";
 
-export async function ensureApiAccess(ctx: Context, m: Member): Promise<void> {
+// Le propriétaire de la socket dans le container : aiuser (1001) chez un membre
+// d'équipe ou un exécuteur, l'utilisateur de l'orchestrateur (forge-orch, 1002)
+// dans le container de contrôle.
+export type SocketOwner = { uid: number; gid: number };
+export const AIUSER_SOCKET: SocketOwner = { uid: 1001, gid: 1001 };
+export const ORCH_SOCKET: SocketOwner = { uid: 1002, gid: 1002 };
+
+// Un membre d'équipe (needsApi tranche), ou un container de projet qui dit
+// lui-même s'il a le canal.
+export type ApiTarget = Member | { name: string; api: boolean };
+
+export async function ensureApiAccess(ctx: Context, m: ApiTarget, owner: SocketOwner = AIUSER_SOCKET): Promise<void> {
   const devices = await deviceNames(ctx, m.name);
-  if (!needsApi(m)) {
+  if (!("api" in m ? m.api : needsApi(m))) {
     if (devices.includes(API_DEVICE)) {
       await mustSucceed(`remove the API channel of ${m.name}`, ctx.exec(incus("config", "device", "remove", m.name, API_DEVICE)));
     }
@@ -29,10 +40,10 @@ export async function ensureApiAccess(ctx: Context, m: Member): Promise<void> {
   await mustSucceed(`create /var/lib/forge in ${m.name}`, ctx.exec(incus("exec", m.name, "--", "mkdir", "-p", "/var/lib/forge")));
   if (!devices.includes(API_DEVICE)) {
     // `bind=instance` : la socket d'écoute est dans le container, la connexion
-    // part vers la socket de l'hôte. uid, gid et mode : seul aiuser s'y connecte.
+    // part vers la socket de l'hôte. uid, gid et mode : seul `owner` s'y connecte.
     await mustSucceed(`add the API channel to ${m.name}`, ctx.exec(incus("config", "device", "add", m.name, API_DEVICE, "proxy",
       "bind=instance", `listen=unix:${CONTAINER_SOCKET}`, `connect=unix:${hostSocketPath(m.name)}`,
-      "uid=1001", "gid=1001", "mode=0600")));
+      `uid=${owner.uid}`, `gid=${owner.gid}`, "mode=0600")));
   }
   await pushFile(ctx, "push forge-team", join(repoRoot(), "container", "forge-team"), m.name, "/usr/local/bin/forge-team", 0, "755");
 }

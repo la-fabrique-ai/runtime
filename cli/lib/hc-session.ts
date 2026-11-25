@@ -5,7 +5,6 @@ import type { Context, ExecResult } from "./context.ts";
 import { ForgeError, mustSucceed } from "./context.ts";
 import { execAsAgentArgv, incus, pushText } from "./incus.ts";
 import { egressAfterStart, egressBeforeStart } from "./strict.ts";
-import type { Member } from "./team.ts";
 
 // Le nom du terminal hc de l'agent, le même dans chaque container.
 export const SESSION = "agent";
@@ -111,7 +110,11 @@ async function requireStarted(ctx: Context, container: string): Promise<void> {
 // lit et la donne à claude comme premier message. `task` est le nom de la
 // branche, ou null pour une tâche sans branche ; le marqueur `--forge-task` suit
 // la forme `<container>-<tâche>` que `forge list` et `forge stop` lisent.
-export async function startSession(ctx: Context, m: Member, task: string | null, instruction: string): Promise<void> {
+// `cwd` : le dossier où l'agent travaille, /workspace pour un membre d'équipe,
+// le clone d'un dépôt (/workspace/<nom>) pour un exécuteur.
+export async function startSession(
+  ctx: Context, m: { name: string }, task: string | null, instruction: string, opts: { cwd?: string } = {},
+): Promise<void> {
   const mode = await egressBeforeStart(ctx, m.name);
   await egressAfterStart(ctx, m.name, mode);
   // Leur échec est sans importance : il n'y avait peut-être pas de session.
@@ -122,7 +125,7 @@ export async function startSession(ctx: Context, m: Member, task: string | null,
     pushText(ctx, m.name, INSTRUCTION_PATH, instruction, { uid: 1001, gid: 1001, mode: "600" }));
   const marker = `${m.name}-${task ?? "session"}`;
   await mustSucceed("hc run", ctx.exec(hcArgv(m.name, [
-    "run", "--bg", "--name", SESSION, "--cwd", "/workspace",
+    "run", "--bg", "--name", SESSION, "--cwd", opts.cwd ?? "/workspace",
     // Herdr App ne montre que les terminaux étiquetés par un espace et un
     // onglet ; des ids qu'il ne connaît pas deviennent un espace et un onglet
     // neufs. Les mêmes ids à chaque tâche : la session suivante retombe au

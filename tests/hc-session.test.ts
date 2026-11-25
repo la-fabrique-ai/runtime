@@ -87,6 +87,13 @@ test("startSession: a task without a branch is marked <container>-session; a fai
   assert.ok(ctx.calls.some((c) => c.join(" ").includes(`--forge-task ${DEV}-session `)));
 });
 
+test("startSession runs the agent in the given folder (an executor's clone), /workspace by default", async () => {
+  const { ctx } = setup();
+  await startSession(ctx, { name: DEV }, "T-1-1", "Fais", { cwd: "/workspace/web" });
+  const run = ctx.calls.map((c) => c.join(" ")).find((c) => c.includes("-- hc run "))!;
+  assert.ok(run.includes("hc run --bg --name agent --cwd /workspace/web "), run);
+});
+
 test("sessionState maps hc get to a state", async () => {
   const get = (rule: ExecRule) => sessionState(setup([rule]).ctx, DEV);
   assert.equal(await get({ match: "hc get agent", stdout: '{"argv":["/usr/local/bin/forge-agent"],"status":{"app":"claude-code","state":"working"}}' }), "working");

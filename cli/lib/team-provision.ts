@@ -26,7 +26,7 @@ import { memoriesDir, repoRoot, workspacesDir } from "./paths.ts";
 import { applyStrictSettings, requireStrictRuntime, strictLaunchArgs } from "./strict.ts";
 import type { Member } from "./team.ts";
 import { CONTAINER_ENV_PATH, readEnvFile } from "./dotenv.ts";
-import { ensureApiAccess } from "./api/access.ts";
+import { ensureApiAccess, type SocketOwner } from "./api/access.ts";
 import { ensurePilotRepos } from "./pilot-repos.ts";
 import { installReferenceKit } from "./reference-kit.ts";
 
@@ -222,7 +222,11 @@ async function ensureMemory(ctx: Context, m: Member): Promise<void> {
 // canal d'API et forge-team, le hook et les réglages. `provisionMember` l'appelle
 // pour un container neuf, `converge` pour un container déjà là. Rend vrai quand
 // les instructions ont changé : une session déjà lancée ne les relit pas.
-export async function installMemberFiles(ctx: Context, m: Member): Promise<{ instructionsChanged: boolean }> {
+// `api` : le canal d'un container de projet (exécuteur ou contrôle), toujours
+// posé, avec le propriétaire de sa socket ; sans lui, needsApi tranche.
+export async function installMemberFiles(
+  ctx: Context, m: Member, api: { owner: SocketOwner } | null = null,
+): Promise<{ instructionsChanged: boolean }> {
   ctx.out("Installing Claude team instructions...");
   const rolePrompt = m.prompt === null ? "" : readPrompt(m);
   const instructions = readFileSync(join(repoRoot(), "container", "CLAUDE.md"), "utf8");
@@ -234,7 +238,8 @@ export async function installMemberFiles(ctx: Context, m: Member): Promise<{ ins
   const envChanged = await installEnv(ctx, m, env);
   await pushFile(ctx, "push forge-agent", join(repoRoot(), "container", "forge-agent"),
     m.name, "/usr/local/bin/forge-agent", 0, "755");
-  await ensureApiAccess(ctx, m);
+  if (api === null) await ensureApiAccess(ctx, m);
+  else await ensureApiAccess(ctx, { name: m.name, api: true }, api.owner);
 
   // Le hook et les réglages appartiennent à root : l'agent ne peut pas les
   // réécrire en place.
@@ -295,7 +300,7 @@ function marketplaceOf(plugin: string): string {
   return plugin.slice(plugin.indexOf("@") + 1);
 }
 
-function requirePlugins(m: Member): void {
+export function requirePlugins(m: Member): void {
   for (const plugin of m.plugins) {
     if (!plugin.includes("@") || !(marketplaceOf(plugin) in MARKETPLACES)) {
       throw new ForgeError(
@@ -314,7 +319,7 @@ function readPrompt(m: Member): string {
 
 // Comme Superpowers l'était avant la partie 1a : en strict, un échec est un
 // avertissement (GitHub n'est peut-être pas dans la liste blanche).
-async function installPlugins(ctx: Context, m: Member): Promise<void> {
+export async function installPlugins(ctx: Context, m: Member): Promise<void> {
   if (m.plugins.length === 0) return;
   ctx.out("Installing Claude plugins...");
   for (const market of new Set(m.plugins.map(marketplaceOf))) {
