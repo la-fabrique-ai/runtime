@@ -42,6 +42,15 @@ forge_contributor_betterleaks_url: "https://github.com/betterleaks/betterleaks/r
   betterleaks_{{ forge_contributor_betterleaks_version }}_linux_x64.tar.gz"
 forge_contributor_betterleaks_sha256: 9d9ad503cd5d80d18a939352266c3fcca52f10da9b83cd5cfe646989b13940fe
 
+# Claude Code plugins for the agent, user-level: Superpowers (brainstorming,
+# plans, TDD, reviews), as forge start installs it in a task container
+# (cli/lib/commands/provision.ts). Each is "<plugin>@<marketplace>"; the
+# marketplace is added from its git URL first.
+forge_contributor_plugin_marketplace: claude-plugins-official
+forge_contributor_plugin_marketplace_url: https://github.com/anthropics/claude-plugins-official.git
+forge_contributor_plugins:
+  - superpowers@claude-plugins-official
+
 # Inputs from the laptop (-e @relay-link.json), with no default:
 # forge_contributor_relay_address, forge_contributor_relay_host_key and
 # forge_contributor_relay_client_pub_dest (a path on the controller).

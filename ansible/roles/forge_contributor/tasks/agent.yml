@@ -66,6 +66,49 @@
     owner: "{{ forge_contributor_user }}"
     mode: "0644"
 
+# The plugins live in ~/.claude, on the VM's disk: a rebuild installs them
+# again. Only what is missing is added, so a re-run leaves an installed plugin
+# as it is (Claude Code updates it on its own). The listings need no Claude
+# login.
+- name: List Claude Code's plugin marketplaces
+  become: true
+  become_user: "{{ forge_contributor_user }}"
+  ansible.builtin.command: claude plugin marketplace list
+  environment:
+    HOME: "{{ forge_contributor_home }}"
+  register: forge_contributor_marketplaces
+  changed_when: false
+
+- name: Add the plugins' marketplace
+  become: true
+  become_user: "{{ forge_contributor_user }}"
+  ansible.builtin.command:
+    argv: [claude, plugin, marketplace, add, "{{ forge_contributor_plugin_marketplace_url }}"]
+  environment:
+    HOME: "{{ forge_contributor_home }}"
+  when: forge_contributor_plugin_marketplace not in forge_contributor_marketplaces.stdout
+  changed_when: true
+
+- name: List Claude Code's plugins
+  become: true
+  become_user: "{{ forge_contributor_user }}"
+  ansible.builtin.command: claude plugin list
+  environment:
+    HOME: "{{ forge_contributor_home }}"
+  register: forge_contributor_installed_plugins
+  changed_when: false
+
+- name: Install the agent's plugins
+  become: true
+  become_user: "{{ forge_contributor_user }}"
+  ansible.builtin.command:
+    argv: [claude, plugin, install, "{{ item }}"]
+  environment:
+    HOME: "{{ forge_contributor_home }}"
+  loop: "{{ forge_contributor_plugins }}"
+  when: item not in forge_contributor_installed_plugins.stdout
+  changed_when: true
+
 - name: Install the clone's Ansible collections
   become: true
   become_user: "{{ forge_contributor_user }}"

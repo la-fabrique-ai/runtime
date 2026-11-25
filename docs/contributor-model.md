@@ -317,7 +317,9 @@ public address changes from one connection to the next, SSH may never answer.
 Start the VM from a connection with a stable address.
 
 In herdr on the VM, run `forge-contributor` in a pane: it starts Claude Code
-in the clone, and continues the last conversation if there is one.
+in the clone, and continues the last conversation if there is one. Claude Code
+has the Superpowers plugin (brainstorming, plans, TDD, reviews), installed by
+the playbook (`forge_contributor_plugins`).
 
 Start and stop act on both instances, the dev VM and the relay; the relay has
 no idle alarm. They only start and stop the VMs and set the SSH address. When
