@@ -22,5 +22,6 @@
       - python3-pip
       - python3-debian  # needed by ansible.builtin.deb822_repository
       - ca-certificates
+      - acl  # setfacl: the ticket base's default ACL (the orchestrator's user and aiuser share it)
       - jq  # container/pre-bash.sh parses its input with it; without jq it refuses everything
     state: present

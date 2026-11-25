@@ -1,0 +1,31 @@
+---
+# The orchestrator (spec section 6.2) runs under its own user, which alone
+# owns the API socket and the ticket base: aiuser, the agent's account, can
+# read neither. forge-orch also belongs to aiuser's group, so the default ACL
+# set on the ticket base (setfacl, from the acl package) can give the agent
+# the access it needs without opening the rest. No login: nologin, no password.
+- name: Create the orchestrator's group
+  ansible.builtin.group:
+    name: "{{ forge_image_orch_user }}"
+    gid: "{{ forge_image_orch_uid }}"
+
+- name: Create the orchestrator's user (no login, no sudo)
+  ansible.builtin.user:
+    name: "{{ forge_image_orch_user }}"
+    uid: "{{ forge_image_orch_uid }}"
+    group: "{{ forge_image_orch_user }}"
+    groups: aiuser
+    append: true
+    shell: /usr/sbin/nologin
+    home: "/var/lib/{{ forge_image_orch_user }}"
+    create_home: true
+    password: "!"
+
+# useradd's umask may leave the home looser than the orchestrator needs.
+- name: Make the orchestrator's home private
+  ansible.builtin.file:
+    path: "/var/lib/{{ forge_image_orch_user }}"
+    state: directory
+    owner: "{{ forge_image_orch_user }}"
+    group: "{{ forge_image_orch_user }}"
+    mode: "0700"
