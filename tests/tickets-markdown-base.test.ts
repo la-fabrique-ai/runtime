@@ -97,3 +97,21 @@ test("readMission renvoie null pour un fichier absent", async () => {
   const m = await openMarkdownBase(base).readMission({ ticket: "T-1" });
   assert.deepEqual(m, { spec: "La spec\n", answers: null, split: null });
 });
+
+test("un id d'en-tête qui ne correspond pas à l'emplacement est refusé", async () => {
+  const base = fixture();
+  put(base, "T-6/ticket.md", "id: T-2\ntitle: x\nstatus: todo\npriority: 1\nrepositories: \n\nd\n");
+  put(base, "T-1/subtasks/3.md", "id: T-2.3\nrepository: api\nposition: 1\nrank: 1\nstatus: ready\nkind: implementation\nfixes:\nreason:\nbranch:\npr:\n\nt\n");
+  const c = openMarkdownBase(base);
+  const { tickets, problems } = await c.listTickets({});
+  assert.deepEqual(tickets.map((t) => t.id), ["T-2", "T-1", "T-3"]);
+  assert.deepEqual(problems.map((p) => p.id), ["T-6"]);
+  await assert.rejects(c.getTicket({ id: "T-6" }), ConnectorError);
+  await assert.rejects(c.listSubtasks({ ticket: "T-1" }), ConnectorError);
+});
+
+test("un fichier de mission trop gros est refusé", async () => {
+  const base = fixture();
+  put(base, "T-1/spec.md", "a".repeat(1024 * 1024 + 1));
+  await assert.rejects(openMarkdownBase(base).readMission({ ticket: "T-1" }), /1 MiB/);
+});

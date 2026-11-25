@@ -66,18 +66,26 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
     return join(dir, id);
   };
 
+  // L'id lu dans l'en-tête doit être celui de l'emplacement du fichier.
+  function same<T extends { id: string }>(record: T, expected: string, path: string): T {
+    if (record.id !== expected) {
+      throw new ConnectorError(`${path}: header id ${record.id} does not match its location (${expected})`);
+    }
+    return record;
+  }
+
   function loadTicket(id: string): Ticket {
     const path = join(ticketDir(id), "ticket.md");
     if (!existsSync(path)) throw new ConnectorError(`ticket not found: ${id}`);
     const { fields, body } = readDocument(path);
-    return parseTicket({
+    return same(parseTicket({
       id: fields.id,
       title: fields.title,
       description: body,
       status: fields.status,
       priority: num(fields.priority),
       repositories: parseRepositories(fields.repositories),
-    });
+    }), id, path);
   }
 
   const sortKey = (t: Ticket): number => (t.priority === 0 ? 5 : t.priority);
@@ -94,9 +102,9 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
 
   function loadSubtasks(ticket: string): Subtask[] {
     return numbered(join(ticketDir(ticket), "subtasks"), ".md")
-      .map(({ path }) => {
+      .map(({ n, path }) => {
         const { fields, body } = readDocument(path);
-        return parseSubtask({
+        return same(parseSubtask({
           id: fields.id,
           ticket,
           repository: fields.repository,
@@ -109,7 +117,7 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
           branch: orNull(fields.branch),
           pr: orNull(fields.pr),
           text: body,
-        });
+        }), `${ticket}.${n}`, path);
       })
       .sort((a, b) => a.rank - b.rank);
   }
@@ -119,14 +127,14 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
     return numbered(folder, ".md").map(({ n, path }) => {
       const { fields, body } = readDocument(path);
       const answerPath = join(folder, `${n}.answer.md`);
-      return parseRequest({
+      return same(parseRequest({
         id: fields.id,
         ticket,
         subtask: fields.subtask,
         text: body,
         recommended: orNull(fields.recommended),
         answer: existsSync(answerPath) ? readText(answerPath) : null,
-      });
+      }), n, path);
     });
   }
 
@@ -138,7 +146,11 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
       if (!name.endsWith(".md") || !isCommentId(id)) continue;
       const { fields, body } = readDocument(join(folder, name));
       out.push(
-        parseComment({ id: fields.id, ticket, author: fields.author, kind: fields.kind, at: fields.at, text: body }),
+        same(
+          parseComment({ id: fields.id, ticket, author: fields.author, kind: fields.kind, at: fields.at, text: body }),
+          id,
+          join(folder, name),
+        ),
       );
     }
     return out.sort((a, b) => (a.id < b.id ? -1 : 1));
