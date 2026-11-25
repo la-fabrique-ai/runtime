@@ -17,7 +17,9 @@ import type { HeldMission } from "../orchestrator/host.ts";
 import { printableText } from "../printable.ts";
 import { ensureRepoMirrors, projectMembers, repoOriginMirror, repoTeamMirror, type ProjectMember } from "../project.ts";
 import type { ProjectConfig } from "../project-config.ts";
-import { convergeControl, convergeExecutor, provisionControl, provisionExecutor } from "../project-provision.ts";
+import {
+  convergeControl, convergeExecutor, orchestratorState, provisionControl, provisionExecutor, type OrchestratorState,
+} from "../project-provision.ts";
 import { columnWidths, formatRow } from "../table.ts";
 import { requireHostLfs } from "./provision.ts";
 import { safeRef } from "./task-base.ts";
@@ -32,6 +34,9 @@ export type ProjectMemberStatus = {
   name: string; kind: ProjectMember["kind"]; present: boolean;
   mission: HeldMission | null; // celle d'un exécuteur ; toujours null pour le contrôle
   session: SessionState; // "none" quand il est absent ou arrêté
+  // Le contrôle seul : l'état du service forge-orchestrator ; "inactive"
+  // quand le container est absent ou arrêté.
+  orchestrator?: OrchestratorState;
 };
 export type ProjectStatus = { members: ProjectMemberStatus[] };
 
@@ -138,8 +143,14 @@ async function status(ctx: Context, p: ProjectConfig, json: boolean): Promise<nu
           : `WARNING: ${m.name} is free but git status in /workspace/${c.repository} failed or did not answer: it gets no mission until it does.`);
       }
     }
-    members.push({ name: m.name, kind: m.kind, present: inst !== undefined, mission: held === "unreadable" ? null : held, session });
-    rows.push([m.name, m.kind, inst?.status ?? "Missing", missionLabel(m, held)]);
+    const row: ProjectMemberStatus = { name: m.name, kind: m.kind, present: inst !== undefined, mission: held === "unreadable" ? null : held, session };
+    let label = missionLabel(m, held);
+    if (m.kind === "control") {
+      row.orchestrator = inst?.status === "Running" ? await orchestratorState(ctx, m.name) : "inactive";
+      label = `orchestrator ${row.orchestrator}`;
+    }
+    members.push(row);
+    rows.push([m.name, m.kind, inst?.status ?? "Missing", label]);
   }
   if (json) {
     ctx.out(JSON.stringify({ members } satisfies ProjectStatus));

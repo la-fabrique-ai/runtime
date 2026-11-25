@@ -197,6 +197,36 @@ test("a project: the control's socket and home, assign, done, a stacked sub-task
     assert.match(converged.stdout, new RegExp(`^${name}\\s+${kind}\\s+Running\\s+${kind === "control" ? "-" : "free"}`, "m"), raw("converge", converged));
   }
 
+  // L'orchestrateur tourne en service dans le contrôle, en forge-orch avec son
+  // groupe supplémentaire 1001 (systemd fait initgroups), et `forge team status`
+  // le dit. L'API ne tourne pas encore : ses tours échouent sans qu'il sorte.
+  const inControl = (argv: string[]) => incus(PROJECT, ["exec", CONTROL, "--", ...argv]);
+  let state = "";
+  for (let i = 0; i < 50 && state !== "active"; i++) {
+    state = inControl(["systemctl", "is-active", "forge-orchestrator"]).stdout.trim();
+    if (state !== "active") await new Promise((r) => setTimeout(r, 200));
+  }
+  assert.equal(state, "active", raw("the orchestrator's journal", inControl(["journalctl", "-u", "forge-orchestrator", "--no-pager", "-n", "30"])));
+  const mainPid = () => must("the orchestrator's MainPID",
+    inControl(["systemctl", "show", "-p", "MainPID", "--value", "forge-orchestrator"])).stdout.trim();
+  const pid = mainPid();
+  assert.match(pid, /^[1-9][0-9]*$/);
+  const proc = must("the orchestrator's /proc status", inControl(["cat", `/proc/${pid}/status`])).stdout;
+  assert.match(proc, /^Uid:\s+1002\s/m, proc);
+  const groups = (/^Groups:\s*(.*)$/m.exec(proc)?.[1] ?? "").trim().split(/\s+/);
+  assert.ok(groups.includes("1001"), `Groups: ${groups.join(" ")}`);
+  assert.equal(must("the orchestrator's command line", inControl(["cat", `/proc/${pid}/cmdline`])).stdout.split("\0").slice(0, 2).join(" "),
+    "/usr/bin/node /opt/forge/orchestrator.ts");
+  const statusJson = JSON.parse(must("team status --json", forge(["team", "status", "--json"])).stdout) as { members: { name: string; orchestrator?: string }[] };
+  assert.equal(statusJson.members.find((m) => m.name === CONTROL)?.orchestrator, "active");
+  // Un second converge sans changement ne le relance pas.
+  must("second team converge", forge(["team", "converge"]));
+  assert.equal(inControl(["systemctl", "is-active", "forge-orchestrator"]).stdout.trim(), "active");
+  assert.equal(mainPid(), pid, "the second converge restarted the orchestrator");
+  // La suite joue le rôle de l'orchestrateur sur la socket : le vrai, qui
+  // reprendrait les missions perdues, s'arrête.
+  must("stop the orchestrator", inControl(["systemctl", "stop", "forge-orchestrator"]));
+
   // Une session sans modèle : le forge-agent de chaque exécuteur se dit idle et dort.
   for (const name of [EX1, EX2]) {
     must(`a stub forge-agent in ${name}`, incus(PROJECT, ["file", "push", "-", `${name}/usr/local/bin/forge-agent`, "--uid", "0", "--gid", "0", "--mode", "755"],

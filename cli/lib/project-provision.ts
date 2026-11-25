@@ -5,14 +5,15 @@
 // change : les clés `user.forge.role=executor|control` sans équipe, un clone
 // par dépôt sous /workspace/<nom>, et le contrôle, qui n'a ni clone ni session
 // dans la partie 1.
-import { chmodSync, existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import type { Context } from "./context.ts";
 import { ForgeError, mustSucceed } from "./context.ts";
 import type { ForgeConfig } from "./config.ts";
 import { BASE_IMAGE, latestImageCommit, PROVISIONING_KEY, PROVISIONING_WORKSPACE_KEY } from "./containers.ts";
 import {
-  configSet, configUnset, deleteInstance, deviceNames, execArgv, execAsAgent, execAsAgentArgv, forgeProject, incus, waitReady,
+  configSet, configUnset, deleteInstance, deviceNames, execArgv, execAsAgent, execAsAgentArgv, forgeProject, incus, pullText, pushText, waitReady,
 } from "./incus.ts";
 import { lfsMirrorConfig } from "./mirror.ts";
 import {
@@ -25,7 +26,7 @@ import { ensureRepoMirrors, repoOriginMirror, repoTeamMirror, type ProjectMember
 import type { ProjectConfig } from "./project-config.ts";
 import { applyStrictSettings, requireStrictRuntime, strictLaunchArgs } from "./strict.ts";
 import { referenceKit, type Member, type ReferenceKit } from "./team.ts";
-import { AIUSER_SOCKET, ORCH_SOCKET } from "./api/access.ts";
+import { AIUSER_SOCKET, CONTAINER_SOCKET, ORCH_SOCKET } from "./api/access.ts";
 import { ensureRunning } from "./session.ts";
 import { installMemberFiles, installPlugins, requirePlugins } from "./team-provision.ts";
 
@@ -288,18 +289,21 @@ export async function provisionControl(ctx: Context, cfg: ForgeConfig, m: Projec
   await configureGit(ctx, m.name, identity);
   await pushAgentState(ctx, m.name);
   await installMemberFiles(ctx, member, { owner: ORCH_SOCKET });
+  await installOrchestrator(ctx, cfg, m);
   await finish(ctx, member, false);
 }
 
 // Le contrôle déjà là : l'image, la base des tickets (droits et ACL reposés à
-// chaque fois) et ses fichiers.
+// chaque fois), ses fichiers et l'orchestrateur.
 export async function convergeControl(ctx: Context, cfg: ForgeConfig, m: ProjectMember): Promise<{ instructionsChanged: boolean }> {
   const p = requireProject(cfg);
   ticketsBase(p);
   await ensureRunning(ctx, m.name);
   await requireOrchestratorImage(ctx, m.name);
   await ensureTicketBase(ctx, p, m.name);
-  return installMemberFiles(ctx, asMember(p, m), { owner: ORCH_SOCKET });
+  const files = await installMemberFiles(ctx, asMember(p, m), { owner: ORCH_SOCKET });
+  await installOrchestrator(ctx, cfg, m);
+  return files;
 }
 
 async function requireOrchestratorImage(ctx: Context, name: string): Promise<void> {
@@ -335,4 +339,108 @@ async function ensureTicketBase(ctx: Context, p: ProjectConfig, name: string): P
   ]) {
     await mustSucceed(`${argv[0]} the ticket base`, execArgv(ctx, name, argv));
   }
+}
+
+// ---------------------------------------------------------------- l'orchestrateur
+
+// Le code de l'orchestrateur dans le contrôle : orchestrator.ts et ses deux
+// dossiers, dans la même disposition que cli/, pour que ses imports relatifs
+// tiennent (il n'importe que node:* et ces dossiers, tests/orchestrator-imports.test.ts).
+export const ORCH_DIR = "/opt/forge";
+export const ORCH_UNIT = "/etc/systemd/system/forge-orchestrator.service";
+export const ORCH_SERVICE = "forge-orchestrator";
+const ORCH_MANIFEST = `${ORCH_DIR}/.manifest`;
+const ORCH_STATE = `${ORCH_HOME}/state`;
+const ORCH_LIBS = ["orchestrator", "tickets"];
+
+// L'unité : forge-orch, que systemd lance avec ses groupes supplémentaires
+// (initgroups), dont 1001, qui lui ouvre la base des tickets ; la ligne
+// SupplementaryGroups le redit. Jamais `incus exec --user`, qui les perd.
+// UMask 0007 : ce qu'il écrit dans la base reste inscriptible par le groupe.
+// Node vient de NodeSource (rôle forge_image), en /usr/bin/node.
+export function orchestratorUnit(prefix: string): string {
+  return [
+    "[Unit]",
+    "Description=forge orchestrator (ticket-driven project)",
+    "After=network.target",
+    "",
+    "[Service]",
+    `User=${ORCH_USER}`,
+    `Group=${ORCH_USER}`,
+    `SupplementaryGroups=${AIUSER_GROUP}`,
+    `ExecStart=/usr/bin/node ${ORCH_DIR}/orchestrator.ts --base ${TICKETS_MOUNT} --socket ${CONTAINER_SOCKET} --state ${ORCH_STATE} --prefix ${prefix}`,
+    "Restart=always",
+    "RestartSec=5",
+    "UMask=0007",
+    "",
+    "[Install]",
+    "WantedBy=multi-user.target",
+    "",
+  ].join("\n");
+}
+
+type OrchFile = { dest: string; content: string };
+
+function orchestratorFiles(prefix: string): OrchFile[] {
+  const cli = join(repoRoot(), "cli");
+  const read = (rel: string): OrchFile => {
+    try {
+      return { dest: `${ORCH_DIR}/${rel}`, content: readFileSync(join(cli, rel), "utf8") };
+    } catch (e) {
+      throw new ForgeError(`cannot read cli/${rel}: ${(e as Error).message}`);
+    }
+  };
+  const libs = ORCH_LIBS.flatMap((d) => readdirSync(join(cli, "lib", d)).filter((f) => f.endsWith(".ts")).sort()
+    .map((f) => read(`lib/${d}/${f}`)));
+  return [read("orchestrator.ts"), ...libs, { dest: ORCH_UNIT, content: orchestratorUnit(prefix) }];
+}
+
+// Pose l'orchestrateur et son unité quand le manifeste (sha256 des fichiers et
+// de l'unité, comme installReferenceKit) a changé : daemon-reload, enable,
+// restart, et rend vrai. Sinon rien n'est poussé : le service est seulement
+// démarré s'il n'est pas actif. Le code appartient à root (0644, dossiers
+// 0755) : forge-orch le lit sans pouvoir le changer.
+export async function installOrchestrator(ctx: Context, cfg: ForgeConfig, m: ProjectMember): Promise<boolean> {
+  const p = requireProject(cfg);
+  // Tout est lu avant le moindre appel : un fichier manquant ne casse rien.
+  const files = orchestratorFiles(p.tickets.prefix);
+  const hash = createHash("sha256");
+  for (const f of files) hash.update(`${f.dest}\0${f.content}\0`);
+  const manifest = `${hash.digest("hex")}\n`;
+  await mustSucceed(`prepare ${ORCH_STATE}`, execArgv(ctx, m.name,
+    ["install", "-d", "-o", ORCH_USER, "-g", ORCH_USER, "-m", "0700", ORCH_STATE]));
+  const svc = (...argv: string[]) => mustSucceed(`systemctl ${argv[0]} ${ORCH_SERVICE}`, execArgv(ctx, m.name, ["systemctl", ...argv]));
+
+  if ((await pullText(ctx, m.name, ORCH_MANIFEST)) === manifest) {
+    if ((await orchestratorState(ctx, m.name)) !== "active") await svc("start", ORCH_SERVICE);
+    return false;
+  }
+  ctx.out("Installing the orchestrator...");
+  // Un fichier retiré du code doit disparaître du container ; les dossiers
+  // d'abord, en root 0755 (--create-dirs ne fixe pas leur mode).
+  await mustSucceed(`remove the old ${ORCH_DIR}`, execArgv(ctx, m.name, ["rm", "-rf", ORCH_DIR]));
+  await mustSucceed(`create ${ORCH_DIR}`, execArgv(ctx, m.name,
+    ["install", "-d", "-o", "root", "-g", "root", "-m", "0755", ...ORCH_LIBS.map((d) => `${ORCH_DIR}/lib/${d}`)]));
+  for (const f of files) {
+    await mustSucceed(`push ${f.dest}`, pushText(ctx, m.name, f.dest, f.content, { uid: 0, gid: 0, mode: "644" }));
+  }
+  // Le manifeste en dernier : une pose interrompue se refait au prochain converge.
+  await mustSucceed("push the orchestrator manifest", pushText(ctx, m.name, ORCH_MANIFEST, manifest, { uid: 0, gid: 0, mode: "644" }));
+  await svc("daemon-reload");
+  await svc("enable", ORCH_SERVICE);
+  await svc("restart", ORCH_SERVICE);
+  return true;
+}
+
+export type OrchestratorState = "active" | "failed" | "inactive" | "unknown";
+const ORCH_STATES: readonly string[] = ["active", "failed", "inactive"];
+
+// `systemctl is-active` dans le contrôle, avec un délai. Il sort en erreur pour
+// un service inactif ou en échec mais en écrit l'état : seul stdout compte ;
+// un délai dépassé, un container injoignable ou un autre état valent `unknown`.
+export async function orchestratorState(ctx: Context, name: string, timeoutMs = 10_000): Promise<OrchestratorState> {
+  const r = await ctx.exec(incus("exec", name, "--", "systemctl", "is-active", ORCH_SERVICE), { timeoutMs });
+  if (r.timedOut) return "unknown";
+  const state = r.stdout.trim();
+  return ORCH_STATES.includes(state) ? state as OrchestratorState : "unknown";
 }

@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
@@ -228,4 +228,91 @@ test("a refused ticket base stops the control before anything is launched", asyn
   await assert.rejects(provisionControl(ctx, cfg, member(cfg, CONTROL)), /project\.tickets\.base/);
   assert.ok(!flat(ctx).some((c) => c.includes(" launch ")));
   assert.equal(fake.instances.get("agent-forge")!.get(CONTROL), undefined);
+});
+
+// ---------------------------------------------------------------- l'orchestrateur en service
+
+const UNIT = "/etc/systemd/system/forge-orchestrator.service";
+const MANIFEST = "/opt/forge/.manifest";
+const restarts = (ctx: ReturnType<typeof fakeContext>) =>
+  flat(ctx).filter((c) => c.endsWith("-- systemctl restart forge-orchestrator"));
+const controlConfig = (prefix: string) => parseConfig("/c.json", {
+  project: { repositories: { web: { repo: "o/web" } }, executors: { count: 1 }, tickets: { base: "~/tickets", prefix } },
+});
+const sources = (dir: string) => readdirSync(join(process.cwd(), "cli", "lib", dir)).filter((f) => f.endsWith(".ts"));
+const ACTIVE: ExecRule[] = [{ match: "systemctl is-active forge-orchestrator", stdout: "active\n" }];
+
+test("the control's first provisioning pushes the orchestrator (root, 0644), its unit and manifest, then enables and restarts it", async () => {
+  const cfg = controlConfig("Q");
+  const { fake, ctx } = setup();
+  await provisionControl(ctx, cfg, member(cfg, CONTROL));
+
+  const file = (p: string) => fake.files.get(`agent-forge/${CONTROL}${p}`);
+  const pushed = ["/opt/forge/orchestrator.ts",
+    ...sources("orchestrator").map((f) => `/opt/forge/lib/orchestrator/${f}`),
+    ...sources("tickets").map((f) => `/opt/forge/lib/tickets/${f}`)];
+  assert.ok(pushed.includes("/opt/forge/lib/orchestrator/tick.ts") && pushed.includes("/opt/forge/lib/tickets/markdown-base.ts"));
+  for (const p of [...pushed, UNIT, MANIFEST]) {
+    const f = file(p);
+    assert.ok(f, `${p} pushed`);
+    assert.deepEqual([f.uid, f.gid, f.mode], ["0", "0", "644"], p);
+  }
+  const unit = file(UNIT)!.content;
+  for (const line of ["User=forge-orch", "SupplementaryGroups=1001", "Restart=always", "RestartSec=5", "UMask=0007",
+    "ExecStart=/usr/bin/node /opt/forge/orchestrator.ts --base /var/lib/forge-orch/tickets --socket /var/lib/forge/api.sock --state /var/lib/forge-orch/state --prefix Q"]) {
+    assert.ok(unit.split("\n").includes(line), `${line}\n${unit}`);
+  }
+  const calls = flat(ctx);
+  const at = (s: string) => calls.findIndex((c) => c.endsWith(`-- ${s}`));
+  assert.ok(at("install -d -o forge-orch -g forge-orch -m 0700 /var/lib/forge-orch/state") >= 0, calls.join("\n"));
+  const reload = at("systemctl daemon-reload");
+  const enable = at("systemctl enable forge-orchestrator");
+  const restart = at("systemctl restart forge-orchestrator");
+  assert.ok(reload >= 0 && reload < enable && enable < restart, calls.join("\n"));
+  // Le socket de l'API existe avant que le service ne démarre.
+  assert.ok(calls.findIndex((c) => c.includes("config device add agent-control forge-api")) < restart, calls.join("\n"));
+});
+
+test("converging an unchanged control restarts nothing; a stopped service is only started", async () => {
+  const cfg = controlConfig("T");
+  const { fake, ctx } = setup();
+  await provisionControl(ctx, cfg, member(cfg, CONTROL));
+
+  const again = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY, ...HOOK_BLOCKS] });
+  await convergeControl(again, cfg, member(cfg, CONTROL));
+  assert.deepEqual(restarts(again), []);
+  assert.ok(!flat(again).some((c) => c.includes("forge-orchestrator.service") || c.endsWith("systemctl start forge-orchestrator")),
+    flat(again).join("\n"));
+
+  const stopped = fakeContext({ incus: fake, rules: [{ match: "systemctl is-active forge-orchestrator", code: 3, stdout: "inactive\n" },
+    ...IDENTITY, ...HOOK_BLOCKS] });
+  await convergeControl(stopped, cfg, member(cfg, CONTROL));
+  assert.deepEqual(restarts(stopped), []);
+  assert.ok(flat(stopped).some((c) => c.endsWith("-- systemctl start forge-orchestrator")), flat(stopped).join("\n"));
+});
+
+test("a changed orchestrator source, or a changed prefix, restarts the service at the next converge", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "forge-repo-copy-"));
+  try {
+    for (const d of ["cli", "container", "teams"]) cpSync(join(process.cwd(), d), join(repo, d), { recursive: true });
+    process.env.FORGE_REPO_DIR = repo;
+    const cfg = controlConfig("T");
+    const { fake, ctx } = setup();
+    await provisionControl(ctx, cfg, member(cfg, CONTROL));
+    assert.equal(restarts(ctx).length, 1);
+
+    appendFileSync(join(repo, "cli", "lib", "orchestrator", "tick.ts"), "\n// changé\n");
+    const changed = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY, ...HOOK_BLOCKS] });
+    await convergeControl(changed, cfg, member(cfg, CONTROL));
+    assert.equal(restarts(changed).length, 1);
+    assert.ok(fake.files.get(`agent-forge/${CONTROL}/opt/forge/lib/orchestrator/tick.ts`)!.content.endsWith("// changé\n"));
+
+    const renamed = controlConfig("R");
+    const prefixed = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY, ...HOOK_BLOCKS] });
+    await convergeControl(prefixed, renamed, member(renamed, CONTROL));
+    assert.equal(restarts(prefixed).length, 1);
+    assert.ok(fake.files.get(`agent-forge/${CONTROL}${UNIT}`)!.content.includes("--prefix R\n"));
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

@@ -523,25 +523,42 @@ test("converge of a project converges the present members, never deletes a stray
   await assert.rejects(() => cmdTeam(project().ctx, ["converge", "web"]), /a project converges as a whole: forge team converge, without a team/);
 });
 
+// systemctl is-active sort en 3 pour un service en échec, et en écrit l'état.
+const ORCH_FAILED: ExecRule = { match: "systemctl is-active forge-orchestrator", code: 3, stdout: "failed\n" };
 const HELD = { kind: "dev", ticket: "T-1", subtask: "T-1.2", repository: "web", branch: "agent/T-1.2", base: "agent/T-1.1" };
 
 test("status --json of a project prints its members: kind, presence, the mission held and the session", async () => {
   const fake = FakeIncus.withRuntime();
   fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
   fake.addInstance("agent-forge", "agent-executor-1", { status: "Running", config: { "user.forge.mission": JSON.stringify(HELD) } });
-  const { ctx } = project(fake, [LIVE_IDLE]);
+  const { ctx } = project(fake, [LIVE_IDLE, ORCH_FAILED]);
   assert.equal(await cmdTeam(ctx, ["status"], { json: true }), 0);
   assert.equal(ctx.out_lines.length, 1);
   assert.deepEqual(JSON.parse(ctx.out_lines[0]), { members: [
-    { name: "agent-control", kind: "control", present: true, mission: null, session: "idle" },
+    { name: "agent-control", kind: "control", present: true, mission: null, session: "idle", orchestrator: "failed" },
     { name: "agent-executor-1", kind: "executor", present: true, mission: HELD, session: "idle" },
     { name: "agent-executor-2", kind: "executor", present: false, mission: null, session: "none" },
   ] });
-  const text = project(fake, [LIVE_IDLE]).ctx;
+  const text = project(fake, [LIVE_IDLE, ORCH_FAILED]).ctx;
   assert.equal(await cmdTeam(text, ["status"]), 0);
   assert.deepEqual(text.out_lines.map((l) => l.split(/\s+/).join(" ").trim()), [
-    "NAME KIND STATUS MISSION", "agent-control control Running -", "agent-executor-1 executor Running T-1.2 (web)", "agent-executor-2 executor Missing free",
+    "NAME KIND STATUS MISSION", "agent-control control Running orchestrator failed", "agent-executor-1 executor Running T-1.2 (web)", "agent-executor-2 executor Missing free",
   ]);
+});
+
+test("status: the orchestrator of a control that does not answer in time is unknown, with a deadline; a stopped control's is inactive", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  const { ctx } = project(fake, [{ match: "systemctl is-active forge-orchestrator", code: 124, timedOut: true }]);
+  assert.equal(await cmdTeam(ctx, ["status"], { json: true }), 0);
+  assert.equal(JSON.parse(ctx.out_lines[0]).members[0].orchestrator, "unknown");
+  const at = ctx.calls.findIndex((c) => c.join(" ").endsWith("systemctl is-active forge-orchestrator"));
+  assert.ok((ctx.execOptions[at]?.timeoutMs ?? 0) > 0);
+  fake.instances.get("agent-forge")!.get("agent-control")!.status = "Stopped";
+  const stopped = project(fake).ctx;
+  assert.equal(await cmdTeam(stopped, ["status"], { json: true }), 0);
+  assert.equal(JSON.parse(stopped.out_lines[0]).members[0].orchestrator, "inactive");
+  assert.equal(JSON.parse(stopped.out_lines[0]).members[1].orchestrator, undefined);
 });
 
 test("status warns of a free executor whose clone has tracked changes, naming it and the clone; a busy one is not looked at", async () => {
