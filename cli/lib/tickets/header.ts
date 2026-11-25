@@ -1,7 +1,7 @@
 import { ConnectorError } from "./model.ts";
 
 const KEY = /^[a-z][a-z-]*$/;
-const LINE = /^([a-z][a-z-]*): (.*)$|^([a-z][a-z-]*):$/;
+const LINE = /^([a-z][a-z-]*): ([^\n]*)$|^([a-z][a-z-]*):$/;
 
 // En-tête `clé: valeur`, une ligne vide, puis le corps tel quel.
 export function parseDocument(text: string): { fields: Record<string, string>; body: string } {

@@ -32,3 +32,8 @@ test("formatDocument refuse un saut de ligne dans une valeur", () => {
 test("formatDocument refuse une clé invalide", () => {
   assert.throws(() => formatDocument({ "Bad Key": "x" }, ""), /key/);
 });
+
+test("aller-retour avec un séparateur de ligne Unicode dans une valeur", () => {
+  const fields = { title: "a b c" };
+  assert.deepEqual(parseDocument(formatDocument(fields, "x")), { fields, body: "x" });
+});
