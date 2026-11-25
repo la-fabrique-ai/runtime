@@ -33,6 +33,8 @@ test("isBranchBase", () => {
   assert.ok(isBranchBase("stack:T-1"));
   assert.ok(!isBranchBase("--upload-pack=x"));
   assert.ok(!isBranchBase("stack:../x"));
+  for (const bad of ["a..b", "x.lock", "/x", "x/", "a//b", "x."]) assert.ok(!isBranchBase(bad), bad);
+  assert.ok(isBranchBase("release/1.2"));
 });
 
 test("parseTicket renvoie un ticket valide tel quel", () => {
@@ -50,4 +52,12 @@ test("parseTicket rejette les champs invalides", () => {
 
 test("parseSubtask rejette un id invalide", () => {
   assert.throws(() => parseSubtask({ id: "../x" }), (e) => e instanceof ConnectorError && /id/.test(e.message));
+});
+
+test("parseSubtask relit fixes et branch avec les mêmes règles", () => {
+  const ok = { id: "T-1.1", ticket: "T-1", repository: "api", position: 1, rank: 1, status: "ready", kind: "implementation", fixes: null, reason: null, branch: null, pr: "libre #1", text: "" };
+  assert.doesNotThrow(() => parseSubtask({ ...ok, fixes: "T-1.2", branch: "agent/x" }));
+  assert.throws(() => parseSubtask({ ...ok, fixes: "../x" }), ConnectorError);
+  assert.throws(() => parseSubtask({ ...ok, branch: "stack:T-2" }), ConnectorError);
+  assert.throws(() => parseSubtask({ ...ok, branch: "a..b" }), ConnectorError);
 });

@@ -76,8 +76,20 @@ export const isRepoName = (s: unknown): s is string =>
 export const isBranchBase = (s: unknown): s is string => {
   if (typeof s !== "string") return false;
   if (s.startsWith("stack:")) return isTicketId(s.slice("stack:".length));
-  return REF.test(s) && !s.startsWith("-");
+  return isGitRef(s);
 };
+// Un nom de branche que git accepte, sans la forme `stack:` ; ce qui ferait
+// passer la valeur pour un intervalle ou une réf invalide est refusé.
+export const isGitRef = (s: unknown): s is string =>
+  typeof s === "string" &&
+  REF.test(s) &&
+  !s.startsWith("-") &&
+  !s.includes("..") &&
+  !s.includes("//") &&
+  !s.startsWith("/") &&
+  !s.endsWith("/") &&
+  !s.endsWith(".") &&
+  !s.endsWith(".lock");
 
 // Lit `raw[name]` et vérifie qu'il passe `check` ; sinon « <type>: <champ> … ».
 function field<T>(raw: unknown, type: string, name: string, check: (v: unknown) => v is T): T {
@@ -127,9 +139,9 @@ export function parseSubtask(raw: unknown): Subtask {
     rank: field(raw, "subtask", "rank", isPosInt),
     status: field(raw, "subtask", "status", oneOf(SUBTASK_STATUSES)),
     kind: field(raw, "subtask", "kind", oneOf(["implementation", "fix"] as const)),
-    fixes: field(raw, "subtask", "fixes", isNullableString),
+    fixes: field(raw, "subtask", "fixes", (v): v is string | null => v === null || isSubtaskId(v)),
     reason: field(raw, "subtask", "reason", (v): v is "rebase" | null => v === null || v === "rebase"),
-    branch: field(raw, "subtask", "branch", isNullableString),
+    branch: field(raw, "subtask", "branch", (v): v is string | null => v === null || isGitRef(v)),
     pr: field(raw, "subtask", "pr", isNullableString),
     text: field(raw, "subtask", "text", isString),
   };

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -249,3 +249,41 @@ test("une priorité hors bornes est refusée sans dossier créé", async () => {
 });
 
 conformance(() => openMarkdownBase(mkdtempSync(join(tmpdir(), "tickets-"))));
+
+test("une ligne d'en-tête ajoutée à la main survit aux changements de statut et de liens", async () => {
+  const { base, c } = await withTicket();
+  const tPath = join(base, "T-1", "ticket.md");
+  writeFileSync(tPath, readFileSync(tPath, "utf8").replace("status: todo\n", "status: todo\nnotes: keep me\n"));
+  await c.setTicketStatus({ id: "T-1", status: "dev" });
+  const t = readFileSync(tPath, "utf8");
+  assert.match(t, /^id: T-1\ntitle: t\nstatus: dev\nnotes: keep me\n/);
+  const s = await c.createSubtask(SUB);
+  const sPath = join(base, "T-1", "subtasks", "1.md");
+  writeFileSync(sPath, readFileSync(sPath, "utf8").replace("status: ready\n", "status: ready\nsize: 3\n"));
+  await c.setSubtaskStatus({ id: s.id, status: "in-dev" });
+  assert.match(readFileSync(sPath, "utf8"), /status: in-dev\nsize: 3\n/);
+  await c.setSubtaskLinks({ id: s.id, branch: "agent/x", pr: "la-fabrique-ai/runtime#1" });
+  const after = readFileSync(sPath, "utf8");
+  assert.match(after, /size: 3\n/);
+  assert.match(after, /branch: agent\/x\n/);
+  assert.match(after, /\n\nFaire$/);
+});
+
+test("un contenu de plus de 1 MiB est refusé à l'écriture, sans rien casser", async () => {
+  const { base, c } = await withTicket();
+  await c.writeMission({ ticket: "T-1", file: "spec", text: "avant" });
+  const huge = "x".repeat(1024 * 1024 + 1);
+  await assert.rejects(c.writeMission({ ticket: "T-1", file: "spec", text: huge }), /1 MiB/);
+  assert.equal((await c.readMission({ ticket: "T-1" })).spec, "avant");
+  const before = readdirSync(base).sort();
+  await assert.rejects(c.createTicket({ title: "gros", description: huge, repositories: [{ name: "api", base: "main" }] }), /1 MiB/);
+  assert.deepEqual(readdirSync(base).sort(), before);
+  assert.deepEqual(readdirSync(join(base, "T-1")).filter((n) => n.startsWith(".tmp-")), []);
+});
+
+test("ouvrir une base absente ou qui n'est pas un dossier est refusé", () => {
+  const base = mkdtempSync(join(tmpdir(), "tickets-"));
+  assert.throws(() => openMarkdownBase(join(base, "absent")), ConnectorError);
+  writeFileSync(join(base, "f"), "x");
+  assert.throws(() => openMarkdownBase(join(base, "f")), /not a folder/);
+});

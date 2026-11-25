@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, linkSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { Connector } from "./connector.ts";
 import { formatDocument, parseDocument } from "./header.ts";
@@ -52,8 +53,10 @@ function parseRepositories(value: string | undefined): unknown {
 function entries(dir: string): string[] {
   try {
     return readdirSync(dir);
-  } catch {
-    return [];
+  } catch (e) {
+    // Un dossier absent est vide ; toute autre erreur (droits, E/S) se signale.
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw new ConnectorError(`cannot read ${dir}: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -66,9 +69,16 @@ const formatRepositories = (repos: Repo[]): string => repos.map((r) => `${r.name
 // système de fichiers, donc `renameSync` est atomique). Le nom commence par
 // `.tmp-` : il ne passe aucune garde d'id, un reste de crash n'est jamais un
 // enregistrement.
-let tmpCounter = 0;
+// Le suffixe est aléatoire : un pid se répète après un redémarrage (container).
+// Le contenu est refusé au-delà de MAX_BYTES, la taille que `readText` accepte :
+// un fichier plus gros serait écrit puis illisible.
+function checkSize(path: string, content: string): void {
+  if (Buffer.byteLength(content, "utf8") > MAX_BYTES) throw new ConnectorError(`${path}: content is over 1 MiB`);
+}
+
 function replaceFile(path: string, content: string): void {
-  const tmp = join(path, "..", `.tmp-${process.pid}-${tmpCounter++}`);
+  checkSize(path, content);
+  const tmp = join(path, "..", `.tmp-${randomUUID()}`);
   writeFileSync(tmp, content, { flag: "wx" });
   renameSync(tmp, path);
 }
@@ -79,7 +89,8 @@ function replaceFile(path: string, content: string): void {
 // Le temporaire créé par cet appel est retiré ensuite : la règle « rien n'est
 // supprimé » vaut pour les enregistrements.
 function claimFile(path: string, content: string): void {
-  const tmp = join(path, "..", `.tmp-${process.pid}-${tmpCounter++}`);
+  checkSize(path, content);
+  const tmp = join(path, "..", `.tmp-${randomUUID()}`);
   writeFileSync(tmp, content, { flag: "wx" });
   try {
     linkSync(tmp, path);
@@ -107,6 +118,7 @@ function claimNext(highest: () => number, attempt: (n: number) => void): number 
 }
 
 export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () => Date } = {}): Connector {
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new ConnectorError(`ticket base ${dir} is not a folder`);
   const prefix = opts.prefix ?? "T";
   if (!isTicketId(`${prefix}-1`)) throw new ConnectorError(`invalid ticket prefix: ${JSON.stringify(prefix)}`);
   const now = opts.now ?? (() => new Date());
@@ -171,20 +183,40 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
       .sort((a, b) => a.rank - b.rank);
   }
 
-  function loadRequests(ticket: string): Request[] {
+  function loadRequestFile(ticket: string, n: string): Request {
     const folder = join(ticketDir(ticket), "requests");
-    return numbered(folder, ".md").map(({ n, path }) => {
-      const { fields, body } = readDocument(path);
-      const answerPath = join(folder, `${n}.answer.md`);
-      return same(parseRequest({
-        id: fields.id,
-        ticket,
-        subtask: fields.subtask,
-        text: body,
-        recommended: orNull(fields.recommended),
-        answer: existsSync(answerPath) ? readText(answerPath) : null,
-      }), n, path);
-    });
+    const path = join(folder, `${n}.md`);
+    const { fields, body } = readDocument(path);
+    const answerPath = join(folder, `${n}.answer.md`);
+    return same(parseRequest({
+      id: fields.id,
+      ticket,
+      subtask: fields.subtask,
+      text: body,
+      recommended: orNull(fields.recommended),
+      answer: existsSync(answerPath) ? readText(answerPath) : null,
+    }), n, path);
+  }
+
+  function loadRequests(ticket: string): Request[] {
+    return numbered(join(ticketDir(ticket), "requests"), ".md").map(({ n }) => loadRequestFile(ticket, n));
+  }
+
+  // Relit seulement le fichier qu'on vient d'écrire.
+  function loadRequest(ticket: string, n: string): Request {
+    if (!existsSync(join(ticketDir(ticket), "requests", `${n}.md`))) throw new ConnectorError(`request not found: ${n}`);
+    return loadRequestFile(ticket, n);
+  }
+
+  function loadComment(ticket: string, id: string): Comment {
+    const path = join(ticketDir(ticket), "comments", `${id}.md`);
+    if (!existsSync(path)) throw new ConnectorError(`comment not found: ${id}`);
+    const { fields, body } = readDocument(path);
+    return same(
+      parseComment({ id: fields.id, ticket, author: fields.author, kind: fields.kind, at: fields.at, text: body }),
+      id,
+      path,
+    );
   }
 
   function loadComments(ticket: string): Comment[] {
@@ -193,14 +225,7 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
     for (const name of entries(folder)) {
       const id = name.slice(0, -".md".length);
       if (!name.endsWith(".md") || !isCommentId(id)) continue;
-      const { fields, body } = readDocument(join(folder, name));
-      out.push(
-        same(
-          parseComment({ id: fields.id, ticket, author: fields.author, kind: fields.kind, at: fields.at, text: body }),
-          id,
-          join(folder, name),
-        ),
-      );
+      out.push(loadComment(ticket, id));
     }
     return out.sort((a, b) => (a.id < b.id ? -1 : 1));
   }
@@ -221,19 +246,11 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
   function rewriteSubtask(id: string, change: Partial<Subtask>): Subtask {
     const s = parseSubtask({ ...subtaskById(id), ...change });
     const path = join(ticketDir(s.ticket), "subtasks", `${id.slice(id.indexOf(".") + 1)}.md`);
-    const fields: Record<string, string> = {
-      id,
-      repository: s.repository,
-      position: str(s.position),
-      rank: str(s.rank),
-      status: s.status,
-      kind: s.kind,
-      fixes: str(s.fixes),
-      reason: str(s.reason),
-      branch: str(s.branch),
-      pr: str(s.pr),
-    };
-    replaceFile(path, formatDocument(fields, s.text));
+    // On part des lignes existantes : une ligne ajoutée à la main survit, l'ordre est gardé.
+    const current = readDocument(path);
+    const fields: Record<string, string> = { ...current.fields };
+    for (const key of Object.keys(change) as (keyof Subtask)[]) fields[key] = str(s[key] as number | string | null);
+    replaceFile(path, formatDocument(fields, current.body));
     return subtaskById(id);
   }
 
@@ -282,36 +299,27 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
       }
       // Le ticket complet passe par le parseur avant tout fichier.
       parseTicket({ id: `${prefix}-1`, title, description, status: "todo", priority: priority ?? 0, repositories });
+      // Le document se construit (et sa taille se vérifie) avant tout dossier.
+      const doc = (id: string): string =>
+        formatDocument(
+          { id, title, status: "todo", priority: str(priority ?? 0), repositories: formatRepositories(repositories) },
+          description,
+        );
+      checkSize(dir, doc(`${prefix}-1`));
       const highest = (): number =>
         Math.max(0, ...entries(dir).filter((n) => n.startsWith(`${prefix}-`) && isTicketId(n)).map(idNumber));
       const n = claimNext(highest, (k) => mkdirSync(join(dir, `${prefix}-${k}`)));
       const id = `${prefix}-${n}`;
       // Le dossier appartient à son créateur : un remplacement suffit.
-      replaceFile(
-        join(dir, id, "ticket.md"),
-        formatDocument(
-          { id, title, status: "todo", priority: str(priority ?? 0), repositories: formatRepositories(repositories) },
-          description,
-        ),
-      );
+      replaceFile(join(dir, id, "ticket.md"), doc(id));
       return loadTicket(id);
     },
     async setTicketStatus({ id, status }) {
       const t = parseTicket({ ...loadTicket(id), status });
       const path = join(ticketDir(id), "ticket.md");
-      replaceFile(
-        path,
-        formatDocument(
-          {
-            id,
-            title: t.title,
-            status,
-            priority: str(t.priority),
-            repositories: formatRepositories(t.repositories),
-          },
-          t.description,
-        ),
-      );
+      // Les lignes d'en-tête existantes sont gardées ; seul le statut change.
+      const current = readDocument(path);
+      replaceFile(path, formatDocument({ ...current.fields, status: t.status }, current.body));
       return loadTicket(id);
     },
     async createSubtask({ ticket: ticketId, repository, position, rank, kind, fixes, text }) {
@@ -381,7 +389,7 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
             formatDocument({ id: String(k), subtask, recommended: recommended ?? "" }, text),
           ),
       );
-      return loadRequests(ticketId).find((r) => r.id === String(n)) as Request;
+      return loadRequest(ticketId, String(n));
     },
     async answerRequest({ ticket: ticketId, id, text }) {
       const folder = join(ticketDir(ticketId), "requests");
@@ -392,7 +400,7 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
         if (isExists(e)) throw new ConnectorError(`request ${id} is already answered`);
         throw e;
       }
-      return loadRequests(ticketId).find((r) => r.id === id) as Request;
+      return loadRequest(ticketId, id);
     },
     async addComment({ ticket: ticketId, author, kind, text }) {
       loadTicket(ticketId);
@@ -406,7 +414,7 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
         (k) =>
           claimFile(join(folder, `${pad(k)}.md`), formatDocument({ id: pad(k), author, kind, at }, text)),
       );
-      return loadComments(ticketId).find((c) => c.id === pad(n)) as Comment;
+      return loadComment(ticketId, pad(n));
     },
     async writeMission({ ticket: ticketId, file, text }) {
       const files: MissionFile[] = ["spec", "answers", "split"];
