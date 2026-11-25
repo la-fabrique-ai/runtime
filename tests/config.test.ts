@@ -31,6 +31,7 @@ test("the defaults are the spec's", () => {
     limits: { cpu: null, memory: "75%", processes: 10000, rootDisk: "50GiB" },
     teams: {},
     pilot: null,
+    project: null,
   });
 });
 
@@ -66,7 +67,7 @@ test("every key can be set", () => {
     storagePool: "fast",
     limits: { cpu: "0-3", memory: "12GiB", processes: 4096, rootDisk: "100GiB" },
   };
-  assert.deepEqual(parse(raw), { ...raw, teams: {}, pilot: null });
+  assert.deepEqual(parse(raw), { ...raw, teams: {}, pilot: null, project: null });
 });
 
 test("parsing never mutates the defaults", () => {

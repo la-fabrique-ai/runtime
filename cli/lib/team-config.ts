@@ -152,7 +152,7 @@ function names(invalid: Invalid, key: string, v: unknown, allowed: string[] | nu
   return v as string[];
 }
 
-function plugins(invalid: Invalid, key: string, v: unknown): string[] {
+export function plugins(invalid: Invalid, key: string, v: unknown): string[] {
   if (v === undefined) return [];
   if (!Array.isArray(v) || !v.every((p) => typeof p === "string" && PLUGIN.test(p))) {
     throw invalid(key, "a list of plugin names such as name or name@marketplace", v);
@@ -160,19 +160,19 @@ function plugins(invalid: Invalid, key: string, v: unknown): string[] {
   return v as string[];
 }
 
-function envPath(invalid: Invalid, key: string, v: unknown): string | null {
+export function envPath(invalid: Invalid, key: string, v: unknown): string | null {
   if (v === undefined || v === null) return null;
   if (typeof v !== "string" || !(v.startsWith("/") || v.startsWith("~/"))) throw invalid(key, "null or an absolute path (or ~/…) to a dotenv file", v);
   return v;
 }
 
-function bool(invalid: Invalid, key: string, v: unknown): boolean {
+export function bool(invalid: Invalid, key: string, v: unknown): boolean {
   if (v === undefined) return false;
   if (typeof v !== "boolean") throw invalid(key, "true or false", v);
   return v;
 }
 
-function memory(invalid: Invalid, key: string, v: unknown): string | null {
+export function memory(invalid: Invalid, key: string, v: unknown): string | null {
   if (v === undefined || v === null) return null;
   if (typeof v !== "string" || !SIZE.test(v)) throw invalid(key, 'null or a size (such as "8GiB")', v);
   return v;

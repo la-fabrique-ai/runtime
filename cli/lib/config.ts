@@ -5,12 +5,14 @@ import { readFileSync } from "node:fs";
 import { configHelpers, SIZE } from "./config-fields.ts";
 import { ForgeError } from "./context.ts";
 import { PRIVATE_RANGES, cidrWithin, isHostAddress, parseCidr } from "./ipv4.ts";
+import { parseProject, type ProjectConfig } from "./project-config.ts";
 import { parsePilot, parseTeams, type PilotConfig, type TeamConfig } from "./team-config.ts";
 
 export type Limits = { cpu: number | string | null; memory: string; processes: number; rootDisk: string };
 export type ForgeConfig = {
   network: { ipv4Address: string }; storagePool: string; limits: Limits;
   teams: Record<string, TeamConfig>; pilot: PilotConfig | null;
+  project: ProjectConfig | null;
 };
 
 export const DEFAULT_CONFIG: ForgeConfig = {
@@ -19,6 +21,7 @@ export const DEFAULT_CONFIG: ForgeConfig = {
   limits: { cpu: null, memory: "75%", processes: 10000, rootDisk: "50GiB" },
   teams: {},
   pilot: null,
+  project: null,
 };
 
 const PERCENT = /^([1-9][0-9]?|100)%$/;
@@ -47,7 +50,7 @@ export function parseConfig(path: string, raw: unknown): ForgeConfig {
   const { invalid, fields } = configHelpers(path);
 
   const config = structuredClone(DEFAULT_CONFIG);
-  const top = fields(raw, "", ["network", "storagePool", "limits", "teams", "pilot"]);
+  const top = fields(raw, "", ["network", "storagePool", "limits", "teams", "pilot", "project"]);
 
   if (top.teams !== undefined) config.teams = parseTeams(path, top.teams);
   if (top.pilot !== undefined) {
@@ -57,6 +60,14 @@ export function parseConfig(path: string, raw: unknown): ForgeConfig {
       if (!(t in config.teams)) {
         throw invalid("pilot.talkTo", `a list of declared team names (${Object.keys(config.teams).join(", ") || "none declared"})`, t);
       }
+    }
+  }
+
+  if (top.project !== undefined) {
+    config.project = parseProject(path, top.project);
+    // Le projet remplace les équipes : les garder ensemble est ambigu.
+    if (config.project !== null && (Object.keys(config.teams).length > 0 || config.pilot !== null)) {
+      throw new ForgeError(`${path}: project replaces teams and pilot: keep only project`);
     }
   }
 
