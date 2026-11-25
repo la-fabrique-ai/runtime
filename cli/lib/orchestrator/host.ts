@@ -1,5 +1,7 @@
+import { connect } from "node:net";
+
 // Contrat de l'API hôte, vu de l'orchestrateur (qui tourne dans un container).
-// L'hôte l'implémente (plan 1c) sur un socket ; le client est ajouté plus tard.
+// L'hôte l'implémente (plan 1c) sur un socket ; `socketHost` en est le client.
 //
 // Format sur le fil, une ligne JSON dans chaque sens :
 //   {"op":"status"}                                  -> {"ok":true,"executors":[ExecutorStatus…]}
@@ -33,4 +35,113 @@ export interface HostApi {
   assign(to: string, mission: MissionSpec): Promise<void>;
   release(to: string): Promise<void>;
   events(after: number): Promise<HostEvent[]>;
+}
+
+export class HostError extends Error {}
+
+const SESSIONS: readonly string[] = ["none", "idle", "working", "done", "exited", "lost", "unknown"];
+const MAX_REPLY = 4 * 1024 * 1024;
+
+type Obj = Record<string, unknown>;
+
+function isObj(v: unknown): v is Obj {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+// Les clés de l'objet sont exactement `keys` : toute dérive de l'hôte est bruyante.
+function exact(v: unknown, keys: string[]): v is Obj {
+  return isObj(v) && Object.keys(v).length === keys.length && keys.every((k) => k in v);
+}
+
+const isStr = (v: unknown): v is string => typeof v === "string";
+
+function parseHeld(v: unknown): HeldMission | null {
+  if (v === null) return null;
+  const keys = ["kind", "ticket", "subtask", "repository", "branch", "base"];
+  if (!exact(v, keys) || !keys.every((k) => isStr(v[k])) || v.kind !== "dev") throw new Error("mission invalide");
+  return { kind: "dev", ticket: v.ticket as string, subtask: v.subtask as string, repository: v.repository as string, branch: v.branch as string, base: v.base as string };
+}
+
+function parseExecutors(v: unknown): ExecutorStatus[] {
+  if (!Array.isArray(v)) throw new Error("executors n'est pas un tableau");
+  return v.map((e) => {
+    if (!exact(e, ["name", "mission", "session"]) || !isStr(e.name) || !isStr(e.session) || !SESSIONS.includes(e.session)) {
+      throw new Error("exécuteur invalide");
+    }
+    return { name: e.name, mission: parseHeld(e.mission), session: e.session as SessionState };
+  });
+}
+
+function parseEvents(v: unknown): HostEvent[] {
+  if (!Array.isArray(v)) throw new Error("events n'est pas un tableau");
+  return v.map((e) => {
+    if (
+      !exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch"]) ||
+      !Number.isInteger(e.id) || (e.id as number) < 0 || e.kind !== "done" ||
+      !isStr(e.executor) || !isStr(e.ticket) || !isStr(e.subtask) || !isStr(e.branch)
+    ) {
+      throw new Error("évènement invalide");
+    }
+    return { id: e.id as number, kind: "done", executor: e.executor, ticket: e.ticket, subtask: e.subtask, branch: e.branch };
+  });
+}
+
+// Une connexion par appel : écrire la requête, lire une ligne, fermer.
+function call(path: string, timeoutMs: number, request: Obj): Promise<Obj> {
+  const op = String(request.op);
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let buf = "";
+    let size = 0;
+    const socket = connect(path);
+    const finish = (err: Error | null, value?: Obj): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (err) reject(err);
+      else resolve(value as Obj);
+    };
+    const fail = (why: string): void => finish(new HostError(`hôte, ${op} : ${why}`));
+    const timer = setTimeout(() => fail(`délai de ${timeoutMs} ms dépassé`), timeoutMs);
+    socket.setEncoding("utf8");
+    socket.on("connect", () => socket.write(JSON.stringify(request) + "\n"));
+    socket.on("data", (chunk: string) => {
+      size += Buffer.byteLength(chunk);
+      if (size > MAX_REPLY) return fail("réponse trop grosse");
+      buf += chunk;
+      const nl = buf.indexOf("\n");
+      if (nl < 0) return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(buf.slice(0, nl));
+      } catch {
+        return fail("réponse illisible");
+      }
+      if (!isObj(parsed) || typeof parsed.ok !== "boolean") return fail("réponse invalide");
+      if (!parsed.ok) return fail(isStr(parsed.error) ? parsed.error : "refus sans message");
+      finish(null, parsed);
+    });
+    socket.on("error", (e) => fail(e.message));
+    socket.on("close", () => fail("connexion fermée sans réponse"));
+  });
+}
+
+export function socketHost(path: string, opts: { timeoutMs?: number } = {}): HostApi {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  // Valide la réponse ; toute erreur de forme devient une HostError nommant l'op.
+  const run = async <T>(request: Obj, pick: (r: Obj) => T): Promise<T> => {
+    const reply = await call(path, timeoutMs, request);
+    try {
+      return pick(reply);
+    } catch (e) {
+      throw new HostError(`hôte, ${String(request.op)} : ${(e as Error).message}`);
+    }
+  };
+  return {
+    status: () => run({ op: "status" }, (r) => parseExecutors(r.executors)),
+    assign: (to, mission) => run({ op: "assign", to, mission }, () => undefined),
+    release: (to) => run({ op: "release", to }, () => undefined),
+    events: (after) => run({ op: "events", after }, (r) => parseEvents(r.events)),
+  };
 }
