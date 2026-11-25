@@ -150,7 +150,7 @@
                   time.sleep(0.02)
               time.sleep(3600)
 
-        # Two containers under the same pressure: a team member (agent-wdtest)
+        # Two containers under the same pressure: a project container (agent-wdtest)
         # and, in the same project, forge-proxy, which the watchdog must not
         # watch (killing its squid would cut every strict container off).
         - name: Create the test project, its containers and their processes
@@ -227,7 +227,7 @@
           changed_when: false
           timeout: 80
 
-        # forge-proxy has stalled for as long as the team member did, and the
+        # forge-proxy has stalled for as long as the project container did, and the
         # threshold's duration has passed twice over: had it been watched, its
         # process would be dead. It is still there, and the journal never names it.
         - name: Give a watched container's time to be killed
@@ -236,7 +236,7 @@
 
         # Seen from the host: a stalled container does not answer incus exec,
         # which is what an unwatched one does. Only forge-proxy's process is
-        # left, the team member's was killed.
+        # left, the project container's was killed.
         - name: Check forge-proxy is not watched
           ansible.builtin.command:
             cmd: pgrep -fc "^python3 /home/aiuser/grow.py"

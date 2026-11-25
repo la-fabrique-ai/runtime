@@ -92,6 +92,8 @@ const SUMMARY_TIMEOUT_MS = 20000;
 // `error`, never a failed command.
 async function summary(ctx: Context, opts: TeamLaptopOptions): Promise<number> {
   if (!opts.json) throw new ForgeError(`forge team summary only has a JSON form: forge team summary --json\n${USAGE}`);
+  // Il couvre chaque hôte installé : un --host le laisserait croire limité à un seul.
+  if (opts.host !== undefined) throw new ForgeError(`forge team summary covers every installed host: it takes no --host\n${USAGE}`);
   const report: Summary = { hosts: [] };
   for (const host of loadHosts().filter((h) => h.done.includes("setup"))) {
     try {

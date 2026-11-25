@@ -7,7 +7,8 @@ import { fakeContext } from "./lib/fake-context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
 import { discardHalfProvisioned } from "../cli/lib/commands/provision.ts";
 
-// The provisioning of a member is tested in team-provision*.test.ts; what is
+// The provisioning of a project's containers is tested in
+// project-provision.test.ts, the hook probe in agent-files.test.ts; what is
 // left here is the discard of an interrupted one.
 let home: string;
 beforeEach(() => {

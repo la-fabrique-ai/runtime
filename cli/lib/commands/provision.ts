@@ -1,7 +1,7 @@
-// Les pièces du provisioning d'un container, partagées avec celui d'un membre
-// d'équipe (team-provision.ts) : les préconditions (token, identité git,
-// runtime), la poussée du token, la sonde du hook, la mise à jour de Claude
-// Code, et la défausse d'un provisioning interrompu. Un seul mode : supervised —
+// Les pièces du provisioning d'un container de projet (project-provision.ts,
+// agent-files.ts) : les préconditions (token, identité git, runtime), la
+// poussée du token, la sonde du hook, la mise à jour de Claude Code, et la
+// défausse d'un provisioning interrompu. Un seul mode : supervised —
 // aucun credential GitHub, aucune clé de signature, aucun compte bot dans le
 // container. Les chemins hôte restent surchargeables par variable
 // d'environnement (paths.ts) pour que les tests ne touchent jamais un vrai home.

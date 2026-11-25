@@ -76,23 +76,6 @@ async function sessionInfo(
   }
 }
 
-// Un forge-agent qui vient de démarrer n'a pas encore annoncé de statut
-// (`unknown`) : on attend qu'il en annonce un, une dizaine de regards d'une
-// seconde, comme `deliverMessage` attend un hc qui démarre. Les autres états
-// non vivants (`none`, `exited`, `lost`) se tranchent tout de suite.
-const LIVE_LOOKS = 10;
-const LIVE_STEP_MS = 1000;
-
-export async function awaitLiveSession(ctx: Context, container: string): Promise<boolean> {
-  const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  for (let look = 1; ; look++) {
-    const state = await sessionState(ctx, container);
-    if (isLive(state)) return true;
-    if (state !== "unknown" || look === LIVE_LOOKS) return false;
-    await sleep(LIVE_STEP_MS);
-  }
-}
-
 // Un agent qui meurt au démarrage (une option refusée, un token absent) se dit
 // tout de suite, plutôt qu'un « Assigned » trompeur : quelques regards pendant
 // environ 3 s. Un statut (OSC 7501) montre que l'agent a démarré ; sans statut

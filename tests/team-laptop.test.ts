@@ -159,6 +159,9 @@ test("summary answers one line of JSON for every installed host; an unreachable 
   assert.deepEqual(report.hosts[1].executors, { working: 0, idle: 0, free: 0 });
   assert.ok(ctx.execOptions.every((o) => o?.timeoutMs === 20000));
   await assert.rejects(() => cmdTeamLaptop(fakeContext(), ["summary"]), /only has a JSON form/);
+  const one = fakeContext();
+  await assert.rejects(() => cmdTeamLaptop(one, ["summary"], { json: true, host: "forge-local" }), /covers every installed host: it takes no --host/);
+  assert.deepEqual(one.calls, []);
 });
 
 test("the Inbox's commands are gone", async () => {

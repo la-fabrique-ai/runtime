@@ -398,16 +398,18 @@ orchestrator and without its checks on the tickets (the host still refuses a
 busy executor, or a sub-task another executor holds):
 
 ```bash
-forge team assign agent-executor-1 T-1.1 <<'EOF'
+forge team assign agent-executor-1 T-1.1 --repository web <<'EOF'
 Refuse an empty password in the form's validation, with a test.
 EOF
 forge team release agent-executor-1
 ```
 
-The repository and the base come from the branch's record when the sub-task
-was handed out before, else from `--repository <name>` (needed when the
-project has several) and `--base <ref>` (`origin/main` by default, or
-`agent/<sub-task>` to stack). Both are journaled under the caller `human`. A
+`--repository <name>` and `--base <ref>` (`origin/<branch>`, or
+`agent/<sub-task>` to stack) say where the sub-task works and what its branch
+starts from. Each one left out comes from the branch's record when the
+sub-task was handed out before; else the repository is the project's only one
+(with several, `--repository` is required) and the base is `origin/main`.
+Both commands are journaled under the caller `human`, refusals included. A
 release stops the session; the branch and the clone stay, and a later mission
 of the same sub-task resumes them.
 

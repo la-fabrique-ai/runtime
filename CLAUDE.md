@@ -29,7 +29,7 @@ Ce fichier décrit la v2, sortie sur `main` (la v1, LXD, n'est plus maintenue). 
 - **Dans un container forge v2** (mode `supervised`, le seul mode de container de la v2 ; la VM de dev a le sien, `contributor`, plus bas) :
   - tu commites sur `agent/<tâche>`. Les commits sont non signés et portent l'identité git de l'hôte ;
   - tu ne pousses jamais et tu n'utilises jamais `gh` : aucune credential n'existe, ils échouent (le hook ne surveille plus git dans un container supervisé). `origin` est un miroir en lecture seule (`/forge/origins/<dépôt>.git`, rafraîchi par l'hôte, `forge team sync <dépôt>`) : `git fetch origin` marche, `git push` non ;
-  - pour rafraîchir ta branche : `git fetch origin` puis `git rebase origin/main`, jamais `git merge` (un commit de merge fait refuser la branche par `forge ship`) ;
+  - pour rafraîchir ta branche : seulement sur la base de ta mission, par rebase : `git fetch origin` puis `git rebase origin/<b>` quand la base est `origin/<b>`, ou `git fetch team` puis `git rebase team/agent/<précédente>` quand la mission empile ta sous-tâche sur `agent/<précédente>` ; jamais `git merge` (un commit de merge fait refuser la branche par `forge ship`) ;
   - le mainteneur récupère ton travail depuis sa machine avec `forge fetch` dans son clone, le relit, puis `forge ship <tâche>` le re-signe, le pousse et ouvre la PR.
 - **Sur la machine de dev** (une session Claude Code dans ce repo, dont `.claude/settings.json` applique `container/pre-bash.sh`) :
   - push uniquement vers `agent/<tâche>` : `git push -u origin agent/<tâche>` ;
