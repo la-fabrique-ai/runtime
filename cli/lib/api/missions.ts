@@ -32,10 +32,10 @@ import { checkText, hasSecret, INSTRUCTION_MAX, REQUEST_MAX } from "./protocol.t
 export type ApiDeps = { ctx: Context; cfg: ForgeConfig; journal: Journal; secrets: readonly string[]; now: () => Date };
 export type ApiReply = { ok: true; [k: string]: unknown } | { ok: false; error: string };
 
-// `assign`, `release` et `done` passent un à la fois, tous appelants
-// confondus (l'orchestrateur, un exécuteur, l'humain par `forge team assign`
-// dans le même processus) : deux demandes au même instant ne voient pas le
-// même exécuteur libre.
+// `assign`, `release` et `done` du service passent un à la fois, tous
+// appelants confondus (l'orchestrateur, un exécuteur) : deux demandes au même
+// instant ne voient pas le même exécuteur libre. `forge team assign|release`,
+// la main de l'humain, tourne dans son propre processus, hors de cette file.
 let exclusiveChain: Promise<unknown> = Promise.resolve();
 export function exclusive<T>(fn: () => Promise<T>): Promise<T> {
   const run = exclusiveChain.then(fn, fn);
