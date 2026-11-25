@@ -17,12 +17,16 @@ class FakeHost implements HostApi {
   calls: string[] = [];
   assigned: { to: string; mission: MissionSpec }[] = [];
   failAssign: ((m: MissionSpec) => HostError | null) | null = null;
+  // L'hôte enregistre la mission puis sa réponse se perd (délai dépassé).
+  loseReply: ((m: MissionSpec) => boolean) | null = null;
+  failStatus: Error | null = null;
   failEvents = false;
   constructor(names: string[]) {
     this.executors = names.map((name) => ({ name, mission: null, session: "none" as SessionState }));
   }
   async status(): Promise<ExecutorStatus[]> {
     this.calls.push("status");
+    if (this.failStatus) throw this.failStatus;
     return this.executors.map((e) => ({ ...e, mission: e.mission ? { ...e.mission } : null }));
   }
   async assign(to: string, mission: MissionSpec): Promise<void> {
@@ -30,10 +34,12 @@ class FakeHost implements HostApi {
     const err = this.failAssign?.(mission);
     if (err) throw err;
     const e = this.executors.find((x) => x.name === to)!;
+    if (e.mission) throw new HostError(`${to} is busy`);
     const { instruction: _i, ...held } = mission;
     e.mission = held;
     e.session = "working";
     this.assigned.push({ to, mission });
+    if (this.loseReply?.(mission)) throw new HostError("hôte, assign : délai de 30000 ms dépassé");
   }
   async release(to: string): Promise<void> {
     this.calls.push(`release ${to}`);
@@ -92,7 +98,7 @@ test("deux tickets, deux exécuteurs libres : deux missions dans l'ordre de prio
   assert.equal(await status(tickets, "T-1.1"), "in-dev");
 });
 
-test("done : sous-tâche finie et liée, exécuteur libéré, suivante distribuée ; la dernière met le ticket en qa ; relire ne change rien", async () => {
+test("done : sous-tâche finie et liée, exécuteur libéré, suivante distribuée ; la dernière met le ticket en qa ; relire ne refait rien", async () => {
   const { tickets } = await setup();
   const host = new FakeHost(["a", "b", "c"]);
   const cursor = memCursor();
@@ -116,15 +122,69 @@ test("done : sous-tâche finie et liée, exécuteur libéré, suivante distribu�
   assert.equal((await tickets.getTicket({ id: "T-2" })).status, "qa");
   assert.equal((await tickets.getTicket({ id: "T-1" })).status, "qa");
 
-  // Les mêmes évènements relus : rien ne change, rien n'est libéré.
-  host.executors[0].mission = { kind: "dev", ticket: "T-2", subtask: "T-2.2", repository: "web", branch: "agent/T-2.2", base: "agent/T-2.1" };
-  host.executors[0].session = "working";
+  // Les mêmes évènements relus : rien n'est refait, rien n'est assigné.
   cursor.value = 0;
   host.calls = [];
   const r3 = await tick({ tickets, host, cursor });
   assert.deepEqual(r3.completed, []);
-  assert.ok(!host.calls.some((c) => c.startsWith("release")));
-  assert.ok(!host.calls.some((c) => c.startsWith("assign")));
+  assert.deepEqual(r3.problems, []);
+  assert.ok(!host.calls.some((c) => c.startsWith("release") || c.startsWith("assign")));
+});
+
+test("rattrapage : un exécuteur qui tient une sous-tâche done est libéré, un ticket tout done passe qa", async () => {
+  const { tickets } = await setup();
+  // Un évènement traité à moitié : la sous-tâche est done, ni release ni qa.
+  await tickets.setSubtaskStatus({ id: "T-1.1", status: "done" });
+  const host = new FakeHost(["a", "b"]);
+  host.executors[0].mission = { kind: "dev", ticket: "T-1", subtask: "T-1.1", repository: "web", branch: "agent/T-1.1", base: "origin/main" };
+  host.executors[0].session = "done";
+  const r = await tick({ tickets, host, cursor: memCursor() });
+  assert.ok(host.calls.includes("release a"));
+  assert.equal((await tickets.getTicket({ id: "T-1" })).status, "qa");
+  assert.deepEqual(r.assigned, [{ subtask: "T-2.1", executor: "a" }]);
+});
+
+test("assign accepté mais réponse perdue : la sous-tâche repasse in-dev au tour suivant, son done est compté", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a"]);
+  host.loseReply = (m) => m.subtask === "T-2.1";
+  const cursor = memCursor();
+  const r1 = await tick({ tickets, host, cursor });
+  assert.match(r1.problems[0], /T-2\.1.*délai/);
+  assert.equal(await status(tickets, "T-2.1"), "ready");
+  host.loseReply = null;
+  const r2 = await tick({ tickets, host, cursor });
+  assert.deepEqual(r2.assigned, []);
+  assert.equal(await status(tickets, "T-2.1"), "in-dev");
+  // Même sans le tour de rattrapage, un done d'une sous-tâche ready tenue par l'émetteur compte.
+  await tickets.setSubtaskStatus({ id: "T-2.1", status: "ready" });
+  host.finish("a");
+  const r3 = await tick({ tickets, host, cursor });
+  assert.deepEqual(r3.completed, ["T-2.1"]);
+  assert.equal(await status(tickets, "T-2.1"), "done");
+});
+
+test("une reprise dont l'assign échoue n'est pas retentée dans le même tour", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a", "b", "c"]);
+  const cursor = memCursor();
+  await tick({ tickets, host, cursor });
+  host.executors[1].session = "lost"; // b tient T-1.1
+  host.failAssign = (m) => (m.subtask === "T-1.1" ? new HostError("refus") : null);
+  host.calls = [];
+  const r = await tick({ tickets, host, cursor });
+  assert.deepEqual(r.recovered, []);
+  assert.deepEqual(r.assigned, []);
+  assert.equal(host.calls.filter((c) => c.startsWith("assign")).length, 1);
+  assert.equal(await status(tickets, "T-1.1"), "ready");
+});
+
+test("une erreur hors domaine est préfixée internal:", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a"]);
+  host.failStatus = new TypeError("boum");
+  const r = await tick({ tickets, host, cursor: memCursor() });
+  assert.deepEqual(r.problems, ["internal: boum"]);
 });
 
 test("une sous-tâche in-dev tenue par personne revient à ready et est redistribuée", async () => {

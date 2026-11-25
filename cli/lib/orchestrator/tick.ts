@@ -7,6 +7,7 @@ import { basename, dirname, join } from "node:path";
 import type { Connector } from "../tickets/connector.ts";
 import { ConnectorError } from "../tickets/model.ts";
 import type { Subtask, Ticket } from "../tickets/model.ts";
+import { HostError } from "./host.ts";
 import type { ExecutorStatus, HeldMission, HostApi, HostEvent, MissionSpec } from "./host.ts";
 import { candidates, missionBase, RuleError } from "./rule.ts";
 import type { Candidate } from "./rule.ts";
@@ -48,6 +49,9 @@ export function fileCursor(path: string): Cursor {
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 // Une erreur qui ne concerne qu'un ticket : le tour continue avec les autres.
 const local = (e: unknown): boolean => e instanceof ConnectorError || e instanceof RuleError;
+// Une erreur hors du domaine (ni hôte, ni base, ni règle) est un bug : `internal: `
+// la distingue d'une panne.
+const describe = (e: unknown): string => (local(e) || e instanceof HostError ? message(e) : `internal: ${message(e)}`);
 const LOST: readonly string[] = ["exited", "lost", "none"];
 
 export async function tick(d: { tickets: Connector; host: HostApi; cursor: Cursor }): Promise<TickReport> {
@@ -57,7 +61,7 @@ export async function tick(d: { tickets: Connector; host: HostApi; cursor: Curso
   } catch (e) {
     // HostError, ConnectorError de events/status/listTickets, ou toute autre
     // panne : le tour s'arrête là, la boucle (Task 5) relancera le suivant.
-    report.problems.push(message(e));
+    report.problems.push(describe(e));
   }
   return report;
 }
@@ -98,10 +102,43 @@ async function run(d: { tickets: Connector; host: HostApi; cursor: Cursor }, rep
     }
   }
 
-  // 3. Reprise.
+  // 3. Reprise. Tout se recalcule depuis la photographie à chaque tour : un
+  // évènement traité à moitié (crash, hôte muet) est rattrapé ici.
+  // Les sous-tâches dont l'assign a échoué ce tour-ci ne sont pas retentées.
+  const failed = new Set<string>();
   for (const ex of executors) {
     if (!ex.mission || !LOST.includes(ex.session)) continue;
-    await recover(tickets, host, ex, ex.mission, picture, unreadable, report);
+    await recover(tickets, host, ex, ex.mission, picture, unreadable, failed, report);
+  }
+  for (const ex of executors) {
+    const m = ex.mission;
+    if (!m) continue;
+    const s = picture.find((p) => p.ticket.id === m.ticket)?.subtasks.find((x) => x.id === m.subtask);
+    if (!s) continue;
+    if (s.status === "done") {
+      // Sous-tâche finie, exécuteur jamais libéré (release perdu) : on le libère.
+      await host.release(ex.name);
+      ex.mission = null;
+    } else if (s.status === "ready") {
+      // Tenue mais `ready` : l'hôte a accepté un assign dont la réponse s'est perdue.
+      try {
+        await tickets.setSubtaskStatus({ id: s.id, status: "in-dev" });
+        s.status = "in-dev";
+      } catch (e) {
+        if (!local(e)) throw e;
+        report.problems.push(`${m.ticket}: ${s.id} to in-dev: ${message(e)}`);
+      }
+    }
+  }
+  // Un ticket dont toutes les sous-tâches (au moins une) sont `done` passe `qa`.
+  for (const { ticket, subtasks } of picture) {
+    if (subtasks.length === 0 || !subtasks.every((x) => x.status === "done")) continue;
+    try {
+      await tickets.setTicketStatus({ id: ticket.id, status: "qa" });
+    } catch (e) {
+      if (!local(e)) throw e;
+      report.problems.push(`${ticket.id}: to qa: ${message(e)}`);
+    }
   }
   const held = new Set(executors.flatMap((e) => (e.mission ? [e.mission.subtask] : [])));
   for (const { ticket, subtasks } of picture) {
@@ -122,9 +159,10 @@ async function run(d: { tickets: Connector; host: HostApi; cursor: Cursor }, rep
   report.problems.push(...found.problems);
   const free = executors.filter((e) => e.mission === null).map((e) => e.name).sort();
   for (const c of found.candidates) {
+    if (failed.has(c.subtask.id)) continue;
     const to = free[0];
     if (to === undefined) break;
-    if (await launch(tickets, host, to, c, false, report)) {
+    if (await launch(tickets, host, to, c, false, failed, report)) {
       free.shift();
       report.assigned.push({ subtask: c.subtask.id, executor: to });
     }
@@ -140,7 +178,10 @@ async function onDone(tickets: Connector, host: HostApi, ev: HostEvent, report: 
   // ne changerait rien, il ne doit pas bloquer le curseur.
   if (!s) return void report.problems.push(`${ev.ticket}: event ${ev.id}: sub-task not found: ${ev.subtask}`);
   if (s.status === "done") return;
-  if (s.status !== "in-dev") {
+  const holder = (await host.status()).find((e) => e.name === ev.executor);
+  const holds = holder?.mission?.subtask === s.id;
+  // `ready` mais tenue par l'émetteur : un assign accepté dont la réponse s'est perdue.
+  if (s.status !== "in-dev" && !(s.status === "ready" && holds)) {
     return void report.problems.push(`${ev.ticket}: event ${ev.id}: ${s.id} is ${s.status}, not in-dev; ignored`);
   }
   // Le lien d'abord : une sous-tâche `done` n'est jamais sans sa branche.
@@ -148,8 +189,7 @@ async function onDone(tickets: Connector, host: HostApi, ev: HostEvent, report: 
   await tickets.setSubtaskStatus({ id: s.id, status: "done" });
   s.status = "done";
   report.completed.push(s.id);
-  const holder = (await host.status()).find((e) => e.name === ev.executor);
-  if (holder?.mission?.subtask === s.id) await host.release(ev.executor);
+  if (holds) await host.release(ev.executor);
   if (subtasks.length > 0 && subtasks.every((x) => x.status === "done")) {
     const ticket = await tickets.getTicket({ id: ev.ticket });
     if (ticket.status === "dev") await tickets.setTicketStatus({ id: ev.ticket, status: "qa" });
@@ -165,6 +205,7 @@ async function recover(
   held: HeldMission,
   picture: Picture[],
   unreadable: Set<string>,
+  failed: Set<string>,
   report: TickReport,
 ): Promise<void> {
   // Ticket illisible : déjà signalé, on ne touche à rien.
@@ -187,7 +228,7 @@ async function recover(
   }
   await host.release(ex.name);
   ex.mission = null;
-  if (await launch(tickets, host, ex.name, { ticket: entry.ticket, subtask: s, base }, true, report)) {
+  if (await launch(tickets, host, ex.name, { ticket: entry.ticket, subtask: s, base }, true, failed, report)) {
     ex.mission = held;
     report.recovered.push(s.id);
   }
@@ -201,6 +242,7 @@ async function launch(
   to: string,
   c: Candidate,
   resumed: boolean,
+  failed: Set<string>,
   report: TickReport,
 ): Promise<boolean> {
   const s = c.subtask;
@@ -227,7 +269,8 @@ async function launch(
     await host.assign(to, mission);
     return true;
   } catch (e) {
-    report.problems.push(`${c.ticket.id}: assign ${s.id} to ${to}: ${message(e)}`);
+    failed.add(s.id);
+    report.problems.push(`${c.ticket.id}: assign ${s.id} to ${to}: ${describe(e)}`);
     try {
       await tickets.setSubtaskStatus({ id: s.id, status: "ready" });
       s.status = "ready";
