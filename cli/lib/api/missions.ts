@@ -28,6 +28,7 @@ import { validateGitRef } from "../validate.ts";
 import type { ForgeConfig } from "../config.ts";
 import type { Entry, Journal, NewEntry } from "./journal.ts";
 import { checkText, hasSecret, INSTRUCTION_MAX, REQUEST_MAX } from "./protocol.ts";
+import { withMissionLock } from "./mission-lock.ts";
 
 export type ApiDeps = { ctx: Context; cfg: ForgeConfig; journal: Journal; secrets: readonly string[]; now: () => Date };
 export type ApiReply = { ok: true; [k: string]: unknown } | { ok: false; error: string };
@@ -35,7 +36,9 @@ export type ApiReply = { ok: true; [k: string]: unknown } | { ok: false; error: 
 // `assign`, `release` et `done` du service passent un à la fois, tous
 // appelants confondus (l'orchestrateur, un exécuteur) : deux demandes au même
 // instant ne voient pas le même exécuteur libre. `forge team assign|release`,
-// la main de l'humain, tourne dans son propre processus, hors de cette file.
+// la main de l'humain, tourne dans son propre processus : chaque changement de
+// mission, du service comme de l'humain, prend aussi le verrou partagé
+// (mission-lock.ts).
 let exclusiveChain: Promise<unknown> = Promise.resolve();
 export function exclusive<T>(fn: () => Promise<T>): Promise<T> {
   const run = exclusiveChain.then(fn, fn);
@@ -241,13 +244,13 @@ async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Prom
         throw new ForgeError(`repository ${req.mission.repository} is not declared in the project`);
       }
       const { to, mission } = req;
-      await exclusive(() => assign(d.ctx, p, to, mission));
+      await exclusive(() => withMissionLock(() => assign(d.ctx, p, to, mission)));
       return { reply: () => ({ ok: true }) };
     }
     case "release": {
       requireExecutor(req.to);
       const { to } = req;
-      await exclusive(() => release(d.ctx, to));
+      await exclusive(() => withMissionLock(() => release(d.ctx, to)));
       return { reply: () => ({ ok: true }) };
     }
     case "status":
@@ -263,18 +266,21 @@ async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Prom
     case "events":
       return events(d, req.after);
     case "done":
-      return exclusive(() => done(d, caller));
+      return exclusive(() => withMissionLock(() => done(d, caller)));
   }
 }
 
 // ---------------------------------------------------------------- la main de l'humain
 
 // `forge team assign` et `forge team release` (spec §6.10) : les fonctions des
-// verbes, appelées de l'hôte par l'humain, sans l'orchestrateur. La mission est
-// lue comme celle de l'API (mêmes refus) ; chaque appel est journalisé, accepté
-// ou refusé, sous l'appelant `human` et l'id 0, hors de la suite que le service
+// verbes, appelées de l'hôte par l'humain, sans l'orchestrateur, sous le verrou
+// partagé avec le service. La mission est lue comme celle de l'API (mêmes
+// refus) ; chaque appel est journalisé, accepté ou refusé (ses arguments
+// compris), sous l'appelant `human` et l'id 0, hors de la suite que le service
 // numérote en mémoire (comme `forge notify`) : ce n'est jamais un évènement.
-async function asHuman(journal: Journal, entry: Omit<NewEntry, "caller" | "outcome" | "error">, fn: () => Promise<void>): Promise<void> {
+type HumanEntry = Omit<NewEntry, "caller" | "outcome" | "error">;
+
+async function asHuman(journal: Journal, entry: HumanEntry, fn: () => Promise<void>): Promise<void> {
   const write = (outcome: Entry["outcome"], error: string | null) =>
     journal.append({ caller: "human", ...entry, outcome, error }, new Date(), 0);
   try {
@@ -286,21 +292,31 @@ async function asHuman(journal: Journal, entry: Omit<NewEntry, "caller" | "outco
   write("ok", null);
 }
 
+function requireHumanTarget(p: ProjectConfig, to: string): void {
+  if (!EXECUTOR.test(to) || !executors(p).some((m) => m.name === to)) throw new ForgeError(`${to} is not an executor of this project`);
+}
+
 export async function humanAssign(
   ctx: Context, p: ProjectConfig, journal: Journal, secrets: readonly string[], to: string, spec: unknown,
 ): Promise<void> {
-  if (!EXECUTOR.test(to) || !executors(p).some((m) => m.name === to)) throw new ForgeError(`${to} is not an executor of this project`);
-  const mission = parseMission(spec, secrets);
-  if (!Object.hasOwn(p.repositories, mission.repository)) {
-    throw new ForgeError(`repository ${mission.repository} is not declared in the project`);
-  }
-  await asHuman(journal, { op: "assign", to, task: mission.subtask, summary: null, text: mission.instruction, mission: held(mission) },
-    () => assign(ctx, p, to, mission));
+  // Complétée une fois la mission lue ; un refus des arguments garde ce qui est connu.
+  const entry: HumanEntry = { op: "assign", to, task: null, summary: null, text: null };
+  await asHuman(journal, entry, async () => {
+    requireHumanTarget(p, to);
+    const mission = parseMission(spec, secrets);
+    Object.assign(entry, { task: mission.subtask, text: mission.instruction, mission: held(mission) });
+    if (!Object.hasOwn(p.repositories, mission.repository)) {
+      throw new ForgeError(`repository ${mission.repository} is not declared in the project`);
+    }
+    await withMissionLock(() => assign(ctx, p, to, mission));
+  });
 }
 
 export async function humanRelease(ctx: Context, p: ProjectConfig, journal: Journal, to: string): Promise<void> {
-  if (!EXECUTOR.test(to) || !executors(p).some((m) => m.name === to)) throw new ForgeError(`${to} is not an executor of this project`);
-  await asHuman(journal, { op: "release", to, task: null, summary: null, text: null }, () => release(ctx, to));
+  await asHuman(journal, { op: "release", to, task: null, summary: null, text: null }, async () => {
+    requireHumanTarget(p, to);
+    await withMissionLock(() => release(ctx, to));
+  });
 }
 
 // Libre, ou tenant déjà cette sous-tâche (la reprise de l'orchestrateur : sa
@@ -531,10 +547,11 @@ async function done(d: ApiDeps, caller: ProjectMember): Promise<Outcome> {
   return { entry, reply: (id) => ({ ok: true, id }) };
 }
 
-// Le chemin de refreshTeamMirror (team-mirror.ts) : git de l'hôte n'ouvre que
-// le miroir d'équipe, hooks coupés ; le container répond par `forge
-// upload-pack`, qui sert le clone nommé par l'URL du remote, /workspace/<dépôt>.
-async function copyToTeamMirror(ctx: Context, container: string, repository: string, branch: string): Promise<void> {
+// Git de l'hôte n'ouvre que le miroir des agents du dépôt, hooks coupés, et ne
+// prend que la branche de la mission (forcée : une branche réécrite remplace
+// l'ancienne) ; le container répond par `forge upload-pack`, qui sert le clone
+// nommé par l'URL du remote, /workspace/<dépôt>.
+export async function copyToTeamMirror(ctx: Context, container: string, repository: string, branch: string): Promise<void> {
   const mirror = repoTeamMirror(repository);
   await ensureBareTeamMirror(ctx, mirror);
   const uploadpack = `FORGE_SIDE=host ${shellQuote(forgeCommand())} upload-pack ${container}`;

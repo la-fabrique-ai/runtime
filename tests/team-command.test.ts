@@ -250,6 +250,11 @@ test("assign reads the repository and the base from the branch's record, and ref
   await assert.rejects(() => cmdTeam(project().ctx, ["assign", "agent-executor-1", "T-4.1"], { repository: "web", stdin: instruction(" ") }),
     /instruction is empty/);
   await assert.rejects(() => cmdTeam(project().ctx, ["status"], { repository: "web" }), /--repository and --base only go with assign/);
+  // Les refus des arguments sont journalisés sous l'humain, comme les autres.
+  const refused = journalLines().filter((l) => l.outcome === "refused");
+  assert.deepEqual(refused.map((l) => [l.caller, l.op, l.to]).slice(0, 2),
+    [["human", "assign", "agent-executor-9"], ["human", "assign", "agent-executor-1"]]);
+  assert.match(refused[1].error, /mission.ticket is not a ticket id/);
 });
 
 test("assign to a busy executor is refused by the host and journaled refused; release frees it, journaled as human", async () => {

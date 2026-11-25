@@ -94,7 +94,7 @@ function dataDir(): string {
   return join(base, "agent-forge");
 }
 
-// Le journal de l'API entre containers y vit (DX 5, §5.4).
+// Le journal de l'API, les fiches des branches et le verrou des missions y vivent.
 export function apiDataDir(): string {
   return join(dataDir(), "api");
 }
