@@ -1,6 +1,7 @@
 {
   "pilot":    { "skills": ["design", "checkpoint"], "agents": ["scout"], "memory": true },
   "lead":     { "skills": ["split-request", "checkpoint"], "agents": ["scout", "branch-reviewer"], "memory": true },
+  "executor": { "skills": ["tdd", "diagnose", "verify-before-report"], "agents": ["scout", "branch-reviewer"], "memory": false },
   "dev":      { "skills": ["tdd", "diagnose", "verify-before-report"], "agents": ["scout"], "memory": false },
   "reviewer": { "skills": ["review-branch", "verify-before-report"], "agents": ["scout", "branch-reviewer"], "memory": false }
 }

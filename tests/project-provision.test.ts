@@ -1,6 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
@@ -315,4 +316,18 @@ test("a changed orchestrator source, or a changed prefix, restarts the service a
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
+});
+
+test("the instructions of project members are the mission text, with the executor's prompt for an executor only", async () => {
+  const cfg = config();
+  const { fake, ctx } = setup(NO_CLONE);
+  const mission = readFileSync(join(process.cwd(), "container", "CLAUDE-executor.md"), "utf8");
+  const prompt = readFileSync(join(process.cwd(), "teams", "reference", "prompts", "executor.md"), "utf8");
+  const claudeMd = (name: string) => fake.files.get(`agent-forge/${name}/home/aiuser/.claude/CLAUDE.md`)?.content;
+  await provisionExecutor(ctx, cfg, member(cfg, executorName(1)));
+  assert.equal(claudeMd(executorName(1)), `${mission}\n${prompt}`);
+  assert.ok(fake.files.get(`agent-forge/${executorName(1)}/home/aiuser/.claude/agents/scout.md`));
+  assert.ok(fake.files.get(`agent-forge/${executorName(1)}/home/aiuser/.claude/skills/verify-before-report/SKILL.md`));
+  await provisionControl(ctx, cfg, member(cfg, CONTROL));
+  assert.equal(claudeMd(CONTROL), mission);
 });

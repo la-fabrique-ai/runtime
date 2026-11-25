@@ -12,8 +12,10 @@
 //   forge-team status
 //   forge-team done                             un exécuteur de projet : sa mission est faite
 //
-// Dans un exécuteur de projet, `status` montre la mission tenue. Les autres
-// sous-commandes sont celles des équipes (retirées par la partie 1d).
+// Dans un exécuteur de projet (la socket répond `status` par une mission),
+// seules `done` et `status` existent : toute autre sous-commande affiche
+// l'usage de la mission et sort en 64. Les autres sous-commandes sont celles
+// des équipes (retirées avec elles).
 //
 // Sorties : 0 accepté ; 1 refusé par l'API (la raison sur stderr) ; 2 socket
 // injoignable ; 64 mauvais usage.
@@ -28,8 +30,11 @@ const USAGE = `usage: forge-team message <container> <summary>   (the body, if a
        forge-team status
        forge-team done`;
 
-function usage(message) {
-  process.stderr.write(`forge-team: ${message}\n${USAGE}\n`);
+const MISSION_USAGE = `usage: forge-team done     (your mission is finished and committed)
+       forge-team status`;
+
+function usage(message, text = USAGE) {
+  process.stderr.write(`forge-team: ${message}\n${text}\n`);
   process.exit(64);
 }
 
@@ -47,8 +52,23 @@ async function optionalBody() {
   return body.trim() === "" ? {} : { body };
 }
 
+// Une sonde `status` : l'API d'un exécuteur de projet répond par une mission.
+// Toute erreur (socket absente, refus, réponse vide) vaut « pas une mission » :
+// la sous-commande suit alors son cours et rapporte sa propre erreur.
+async function holdsMission() {
+  const out = await call({ op: "status" }, false);
+  try {
+    return "mission" in JSON.parse(out.split("\n")[0]);
+  } catch {
+    return false;
+  }
+}
+
 async function request() {
   const [command, ...args] = process.argv.slice(2);
+  if (command !== "done" && command !== "status" && await holdsMission()) {
+    usage(command === undefined ? "a command is required" : `${command} does not exist in a mission container`, MISSION_USAGE);
+  }
   const arity = (min, max) => {
     if (args.length < min || args.length > max) usage(`${command} takes ${min === max ? min : `${min} to ${max}`} argument(s)`);
   };
@@ -90,7 +110,7 @@ async function request() {
 // La requête part sans fermer l'écriture : le device proxy d'Incus prend la fin
 // du flux d'un côté pour la fin de la connexion, et la réponse serait perdue.
 // La réponse est une ligne, que l'on attend jusqu'à son saut de ligne.
-function call(req) {
+function call(req, fatal = true) {
   return new Promise((resolve) => {
     const socket = net.connect(SOCKET);
     let out = "";
@@ -101,6 +121,7 @@ function call(req) {
       if (out.includes("\n")) socket.destroy();
     });
     socket.on("error", (e) => {
+      if (!fatal) return resolve("");
       process.stderr.write(`forge-team: cannot reach the forge API at ${SOCKET}: ${e.code || e.message}\n`);
       process.exit(2);
     });

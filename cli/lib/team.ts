@@ -44,8 +44,9 @@ export function referenceKit(role: string): ReferenceKit {
   return roles[role];
 }
 
-// Les rôles d'une équipe de référence : ceux de roles.json, hors le Pilote.
-const referenceRoleNames = (): string[] => Object.keys(referenceRoles()).filter((r) => r !== "pilot").sort();
+// Les rôles d'une équipe de référence : ceux de roles.json, hors le Pilote et
+// l'exécuteur (celui des projets, pas des équipes).
+const referenceRoleNames = (): string[] => Object.keys(referenceRoles()).filter((r) => r !== "pilot" && r !== "executor").sort();
 
 function rolePrompt(prompts: string | null, role: string): string | null {
   if (prompts === null) return null;

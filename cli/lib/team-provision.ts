@@ -223,13 +223,14 @@ async function ensureMemory(ctx: Context, m: Member): Promise<void> {
 // pour un container neuf, `converge` pour un container déjà là. Rend vrai quand
 // les instructions ont changé : une session déjà lancée ne les relit pas.
 // `api` : le canal d'un container de projet (exécuteur ou contrôle), toujours
-// posé, avec le propriétaire de sa socket ; sans lui, needsApi tranche.
+// posé, avec le propriétaire de sa socket et le fichier d'instructions de
+// container/ qu'il reçoit (CLAUDE.md par défaut) ; sans lui, needsApi tranche.
 export async function installMemberFiles(
-  ctx: Context, m: Member, api: { owner: SocketOwner } | null = null,
+  ctx: Context, m: Member, api: { owner: SocketOwner; instructions?: string } | null = null,
 ): Promise<{ instructionsChanged: boolean }> {
   ctx.out("Installing Claude team instructions...");
   const rolePrompt = m.prompt === null ? "" : readPrompt(m);
-  const instructions = readFileSync(join(repoRoot(), "container", "CLAUDE.md"), "utf8");
+  const instructions = readFileSync(join(repoRoot(), "container", api?.instructions ?? "CLAUDE.md"), "utf8");
   const text = [instructions, rolePrompt, designsNote(m)].filter((p) => p !== "").join("\n");
   // Le .env du rôle, lu et vérifié avant que quoi que ce soit soit poussé.
   const env = m.env === null ? null : readEnvFile(m.env);

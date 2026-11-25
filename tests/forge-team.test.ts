@@ -17,12 +17,15 @@ let server: Server;
 let received: string[];
 // Ce que le faux serveur répond à la prochaine requête ; null : il ferme sans répondre.
 let answer: string | null;
+// Les requêtes `status` reçues en sonde, avant une sous-commande d'équipe.
+let probes: number;
 
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "forge-team-"));
   forgeTeam = join(dir, "forge-team");
   copyFileSync(SOURCE, forgeTeam);
   received = [];
+  probes = 0;
   answer = '{"ok":true,"id":7}';
   server = createServer((socket) => {
     let line = "";
@@ -30,7 +33,9 @@ beforeEach(async () => {
     socket.on("data", (c) => {
       line += c;
       if (line.includes("\n")) {
-        received.push(line.trimEnd());
+        // La sonde d'un exécuteur de projet (voir forge-team) n'est pas une demande.
+        if (line.trimEnd() === '{"op":"status"}') probes++;
+        else received.push(line.trimEnd());
         if (answer === null) socket.end();
         else socket.end(`${answer}\n`);
       }
@@ -119,4 +124,16 @@ test("done sends the bare verb; status prints the mission when the reply has its
     [0, "ok\nmission: T-1.1 ticket=T-1 repository=web branch=agent/T-1.1 base=origin/main\n"]);
   answer = '{"ok":true,"mission":null}';
   assert.equal((await run(["status"], "")).stdout, "ok\nmission: none\n");
+});
+
+test("in a mission container only done and status exist: a team verb prints the usage and exits 64", async () => {
+  answer = '{"ok":true,"mission":null}';
+  for (const args of [["message", "agent-web-lead", "Salut"], ["assign", "x", "t"], ["release", "x"], ["ask", "Quoi ?"], ["bogus"]]) {
+    const r = await run(args, "texte");
+    assert.equal(r.code, 64, args.join(" "));
+    assert.match(r.stderr, /usage: forge-team done.*\n\s+forge-team status/);
+    assert.doesNotMatch(r.stderr.split("usage:")[1], /message|assign|release|ask/);
+  }
+  assert.deepEqual(received, []);
+  assert.equal(probes, 5);
 });

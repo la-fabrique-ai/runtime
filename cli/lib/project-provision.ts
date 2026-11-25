@@ -25,7 +25,7 @@ import { apiDataDir, configPath, forgeHome, memoriesDir, mirrorsDir, repoRoot, w
 import { ensureRepoMirrors, repoOriginMirror, repoTeamMirror, type ProjectMember } from "./project.ts";
 import type { ProjectConfig } from "./project-config.ts";
 import { applyStrictSettings, requireStrictRuntime, strictLaunchArgs } from "./strict.ts";
-import { referenceKit, type Member, type ReferenceKit } from "./team.ts";
+import { referenceDir, referenceKit, type Member, type ReferenceKit } from "./team.ts";
 import { AIUSER_SOCKET, CONTAINER_SOCKET, ORCH_SOCKET } from "./api/access.ts";
 import { ensureRunning } from "./session.ts";
 import { installMemberFiles, installPlugins, requirePlugins } from "./team-provision.ts";
@@ -50,13 +50,13 @@ export const TICKETS_DEVICE = "tickets";
 const AIUSER_GROUP = "1001";
 const NO_ORCH = "the image has no forge-orch user: run forge image build";
 
-// Le kit d'un exécuteur : celui du développeur de référence, plus le sous-agent
-// qui relit une branche. Construit ici plutôt que dans roles.json, que la partie
-// 1d renomme.
-export function executorKit(): ReferenceKit {
-  const dev = referenceKit("dev");
-  return { ...dev, agents: [...new Set([...dev.agents, "branch-reviewer"])] };
-}
+// Le kit d'un exécuteur et son prompt : le rôle `executor` de roles.json et
+// teams/reference/prompts/executor.md. Les instructions du container (la mission,
+// container/CLAUDE-executor.md) sont les mêmes pour le contrôle, qui les lit pour
+// comprendre ce que font les exécuteurs.
+export const executorKit = (): ReferenceKit => referenceKit("executor");
+const executorPrompt = (): string => join(referenceDir(), "prompts", "executor.md");
+export const MISSION_INSTRUCTIONS = "CLAUDE-executor.md";
 
 function requireProject(cfg: ForgeConfig): ProjectConfig {
   if (cfg.project === null) throw new ForgeError("no project in the configuration");
@@ -110,7 +110,7 @@ function asMember(p: ProjectConfig, m: ProjectMember): Member {
   return {
     name: m.name, team: null, role: m.kind, index: m.index, repo: null, capabilities: [], talkTo: [],
     strict: executor && e.strict, memory: executor ? e.memory : null, cpu: executor ? e.cpu : null,
-    plugins: executor ? e.plugins : [], prompt: null, env: executor && e.env !== null ? hostPath(e.env) : null,
+    plugins: executor ? e.plugins : [], prompt: executor ? executorPrompt() : null, env: executor && e.env !== null ? hostPath(e.env) : null,
     lfs: false, reference: executor ? executorKit() : null, designs: {},
   };
 }
@@ -185,7 +185,7 @@ export async function provisionExecutor(ctx: Context, cfg: ForgeConfig, m: Proje
   await ensureExecutorRepos(ctx, p, m.name);
   await configureGit(ctx, m.name, identity);
   await pushAgentState(ctx, m.name);
-  await installMemberFiles(ctx, member, { owner: AIUSER_SOCKET });
+  await installMemberFiles(ctx, member, { owner: AIUSER_SOCKET, instructions: MISSION_INSTRUCTIONS });
   await finish(ctx, member, true);
 }
 
@@ -203,7 +203,7 @@ export async function convergeExecutor(ctx: Context, cfg: ForgeConfig, m: Projec
     await ensureRepoMirrors(ctx, { ...p, repositories: added });
   }
   await ensureExecutorRepos(ctx, p, m.name);
-  return installMemberFiles(ctx, asMember(p, m), { owner: AIUSER_SOCKET });
+  return installMemberFiles(ctx, asMember(p, m), { owner: AIUSER_SOCKET, instructions: MISSION_INSTRUCTIONS });
 }
 
 // Les filtres LFS globaux d'aiuser : avec le smudge dès qu'un dépôt lit ses
@@ -288,7 +288,7 @@ export async function provisionControl(ctx: Context, cfg: ForgeConfig, m: Projec
   await ensureTicketBase(ctx, p, m.name);
   await configureGit(ctx, m.name, identity);
   await pushAgentState(ctx, m.name);
-  await installMemberFiles(ctx, member, { owner: ORCH_SOCKET });
+  await installMemberFiles(ctx, member, { owner: ORCH_SOCKET, instructions: MISSION_INSTRUCTIONS });
   await installOrchestrator(ctx, cfg, m);
   await finish(ctx, member, false);
 }
@@ -301,7 +301,7 @@ export async function convergeControl(ctx: Context, cfg: ForgeConfig, m: Project
   await ensureRunning(ctx, m.name);
   await requireOrchestratorImage(ctx, m.name);
   await ensureTicketBase(ctx, p, m.name);
-  const files = await installMemberFiles(ctx, asMember(p, m), { owner: ORCH_SOCKET });
+  const files = await installMemberFiles(ctx, asMember(p, m), { owner: ORCH_SOCKET, instructions: MISSION_INSTRUCTIONS });
   await installOrchestrator(ctx, cfg, m);
   return files;
 }
