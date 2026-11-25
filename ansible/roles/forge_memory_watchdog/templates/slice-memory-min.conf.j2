@@ -1,0 +1,5 @@
+# Managed by Ansible (role forge_memory_watchdog): memory the kernel does not
+# reclaim from this slice while it uses less, so that containers filling the
+# RAM leave the host (sshd, Incus, the forge user's session) its working set.
+[Slice]
+MemoryMin={{ reserve }}

@@ -67,6 +67,12 @@
   register: verify_proc_options
   changed_when: false
 
+- name: Read the group exempt from hidepid
+  ansible.builtin.command:
+    cmd: getent group {{ hardening_proc_group | default('forge-procview') }}
+  register: verify_proc_group_entry
+  changed_when: false
+
 - name: Read logind's KillUserProcesses
   ansible.builtin.command:
     cmd: busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager KillUserProcesses
@@ -104,5 +110,7 @@
       - verify_sysctls.stdout_lines == ['1', '0', '1']
       - verify_userns_clone.rc != 0 or verify_userns_clone.stdout == '1'
       - verify_proc_options.stdout is search('hidepid=(2|invisible)')
+      # The group the memory watchdog's unit joins instead of holding CAP_SYS_PTRACE.
+      - verify_proc_options.stdout is search('(^|,)gid=' ~ verify_proc_group_entry.stdout.split(':')[2] ~ '(,|$)')
       # The herdr server must survive logout (validation spike, finding E).
       - verify_kill_user_processes.stdout == 'b false'

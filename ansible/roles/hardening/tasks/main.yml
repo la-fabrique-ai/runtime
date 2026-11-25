@@ -1,9 +1,17 @@
 ---
+# Before devsec, which mounts /proc: the mount option takes the group's number.
+- name: Create the group exempt from hidepid
+  ansible.builtin.group:
+    name: "{{ hardening_proc_group }}"
+    system: true
+  register: hardening_proc_group_result
+
 - name: Harden the OS with devsec.hardening.os_hardening
   ansible.builtin.import_role:
     name: devsec.hardening.os_hardening
   vars:
     sysctl_overwrite: "{{ hardening_sysctl_overwrite }}"
+    proc_mnt_options: "{{ hardening_proc_options }},gid={{ hardening_proc_group_result.gid }}"
     # UFW is not used: the firewall role runs native nftables.
     ufw_manage_defaults: false
     os_users_without_password_ageing: "{{ hardening_users_without_password_ageing }}"

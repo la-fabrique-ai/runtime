@@ -1,0 +1,4 @@
+# Managed by Ansible (role forge_memory_watchdog): a low OOM score, so that the
+# kernel's OOM killer picks this daemon last.
+[Service]
+OOMScoreAdjust={{ forge_memory_watchdog_oom_score_adjust }}
