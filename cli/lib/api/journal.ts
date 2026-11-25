@@ -112,6 +112,8 @@ export class Journal {
   // même temps que celles qu'un autre écrivain a ajoutées avant ou après elle, et
   // le décalage ne tombe jamais au milieu d'une ligne.
   append(e: NewEntry, now: Date, id?: number): Entry {
+    // Ce qu'un autre écrivain a ajouté d'abord : l'id réservé ici le suit.
+    if (id === undefined) this.refresh();
     const entry: Entry = { id: id ?? this.reserve(), time: now.toISOString(), ...e, question: e.question ?? null };
     appendFileSync(this.path, `${JSON.stringify(entry)}\n`);
     this.refresh();

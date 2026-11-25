@@ -1,4 +1,7 @@
 import { test } from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { fakeContext } from "./lib/fake-context.ts";
 import { assertNoHostGitIn } from "./lib/host-git.ts";
@@ -88,13 +91,28 @@ const executor = [
   { match: "incus --project agent-forge list", stdout: JSON.stringify([{ name: "agent-x", status: "Running" }]) },
 ];
 
-test("an executor serves the clone named by the path, /workspace/<repository> only", async () => {
+test("an executor serves the clone named by the path, /workspace/<declared repository> only", async () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-upload-pack-"));
+  mkdirSync(join(home, ".config", "agent-forge"), { recursive: true });
+  writeFileSync(join(home, ".config", "agent-forge", "config.json"), JSON.stringify({
+    project: { repositories: { web: { repo: "o/web" } }, executors: { count: 1 }, tickets: { base: "~/tickets" } },
+  }));
+  process.env.FORGE_HOME = home;
+  try {
+    await executorServes();
+  } finally {
+    delete process.env.FORGE_HOME;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+async function executorServes(): Promise<void> {
   const c = fakeContext({ rules: executor });
   assert.equal(await cmdUploadPack(c, "agent-x", undefined, "/workspace/web"), 0);
   const attach = c.calls.find((a) => a.includes("git-upload-pack"))!;
   assert.deepEqual(attach.slice(attach.indexOf("--cwd"), attach.indexOf("--cwd") + 2), ["--cwd", "/workspace/web"]);
   assert.deepEqual(attach.slice(-2), ["git-upload-pack", "/workspace/web"]);
-  for (const bad of [undefined, "/workspace", "/workspace/../etc", "/workspace/web/x", "/home/aiuser"]) {
+  for (const bad of [undefined, "/workspace", "/workspace/../etc", "/workspace/web/x", "/home/aiuser", "/workspace/api"]) {
     await assert.rejects(() => cmdUploadPack(fakeContext({ rules: executor }), "agent-x", undefined, bad), /\/workspace\/<repository>/, String(bad));
   }
-});
+}

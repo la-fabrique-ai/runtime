@@ -13,12 +13,25 @@
 // even a progress line: errors go through forge.ts's catch, on stderr.
 import type { Context } from "../context.ts";
 import { ForgeError, mustSucceed } from "../context.ts";
+import { loadConfig } from "../config.ts";
 import { containerRepo, isRunning } from "../containers.ts";
 import { configGet, startInstance, uploadPackArgv } from "../incus.ts";
+import { configPath } from "../paths.ts";
 import { validateContainerName } from "../validate.ts";
 
 // Le clone d'un dépôt chez un exécuteur : un nom de dépôt de projet, rien d'autre.
 const EXECUTOR_CLONE = /^\/workspace\/[a-z][a-z0-9-]*$/;
+
+// Les dépôts que déclare le projet de la config, quand elle se lit et en a un ;
+// sinon null, et seule la forme du chemin compte.
+function declaredRepositories(): string[] | null {
+  try {
+    const project = loadConfig(configPath()).project;
+    return project === null ? null : Object.keys(project.repositories);
+  } catch {
+    return null;
+  }
+}
 
 export async function cmdUploadPack(
   ctx: Context,
@@ -35,8 +48,10 @@ export async function cmdUploadPack(
     if ((await configGet(ctx, name, "user.forge.role")) !== "executor") {
       throw new ForgeError(`${name} is not a forge container (no user.forge.repo)`);
     }
-    if (path === undefined || !EXECUTOR_CLONE.test(path)) {
-      throw new ForgeError(`${name} is a project executor: the path must be /workspace/<repository>`);
+    const declared = declaredRepositories();
+    if (path === undefined || !EXECUTOR_CLONE.test(path) ||
+      (declared !== null && !declared.includes(path.slice("/workspace/".length)))) {
+      throw new ForgeError(`${name} is a project executor: the path must be /workspace/<repository>, a repository of the project`);
     }
     dir = path;
   }

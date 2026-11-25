@@ -252,9 +252,11 @@ export async function imageFingerprint(ctx: Context, alias: string): Promise<str
 
 // Comme execAsAgent, mais sans shell : chaque valeur est un élément d'argv.
 // Pour les valeurs venues de l'hôte (l'identité git : apostrophes, espaces,
-// accents), qui n'ont pas de jeu de caractères à valider.
-export function execAsAgentArgv(ctx: Context, name: string, argv: string[]): Promise<ExecResult> {
-  return ctx.exec(incus("exec", name, "--user", "1001", "--group", "1001", "--env", "HOME=/home/aiuser", "--", ...argv));
+// accents), qui n'ont pas de jeu de caractères à valider. `timeoutMs` : un délai
+// au client incus, pour une commande que l'agent pourrait faire attendre.
+export function execAsAgentArgv(ctx: Context, name: string, argv: string[], opts: { timeoutMs?: number } = {}): Promise<ExecResult> {
+  const argvFull = incus("exec", name, "--user", "1001", "--group", "1001", "--env", "HOME=/home/aiuser", "--", ...argv);
+  return opts.timeoutMs === undefined ? ctx.exec(argvFull) : ctx.exec(argvFull, { timeoutMs: opts.timeoutMs });
 }
 
 export async function imageExists(ctx: Context, alias: string): Promise<boolean> {

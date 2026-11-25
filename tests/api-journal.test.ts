@@ -148,3 +148,17 @@ test("a line another writer adds right before this one's write never leaves the 
     rmSync(dir, { recursive: true });
   }
 });
+
+test("append reads what another writer added before taking its id", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-journal-"));
+  try {
+    const path = join(dir, "journal.jsonl");
+    const a = Journal.open(path);
+    const b = Journal.open(path);
+    const fields = { caller: "x", op: "status" as const, to: null, task: null, outcome: "ok" as const, error: null, summary: null, text: null };
+    assert.equal(a.append(fields, new Date()).id, 1);
+    assert.equal(b.append(fields, new Date()).id, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

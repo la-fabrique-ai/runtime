@@ -5,10 +5,11 @@
 //
 // Comme handle.ts : l'appelant vient de la socket, jamais de la requête ; une
 // requête est validée à la main, champ par champ ; chaque appel laisse une
-// ligne au journal. `assign`, `release` et `done` passent un à la fois
-// (`exclusive()`), et l'id d'un `done` se prend en l'écrivant au journal, dans
-// cette file : un évènement d'id plus petit n'apparaît jamais après un plus grand.
-import type { Context } from "../context.ts";
+// ligne au journal, sauf les lectures acceptées du contrôle (status, events).
+// `assign`, `release` et `done` passent un à la fois (`exclusive()`), et l'id
+// d'un `done` se prend en l'écrivant au journal, dans cette file : un
+// évènement d'id plus petit n'apparaît jamais après un plus grand.
+import type { Context, ExecResult } from "../context.ts";
 import { ForgeError, mustSucceed } from "../context.ts";
 import { recordBranch } from "../branch-records.ts";
 import { clearMessages, hcArgv, sessionState, startSession, stopSession } from "../hc-session.ts";
@@ -189,6 +190,7 @@ export async function handleMission(d: ApiDeps, caller: ProjectMember, line: str
   }
   try {
     const out = await run(d, caller, req);
+    if (out.quiet) return out.reply(0);
     // `done` a écrit sa ligne lui-même, dans la file d'`exclusive()`.
     const id = out.entry?.id ?? d.journal.append(entryFields(caller, req, "ok", null), d.now()).id;
     return out.reply(id);
@@ -212,7 +214,9 @@ function entryFields(caller: ProjectMember, req: MissionRequest | null, outcome:
   };
 }
 
-type Outcome = { reply: (id: number) => ApiReply; entry?: Entry };
+// `quiet` : une lecture du contrôle (status, events), qu'il fait toutes les
+// quelques secondes : acceptée, elle n'est pas journalisée ; refusée, si.
+type Outcome = { reply: (id: number) => ApiReply; entry?: Entry; quiet?: boolean };
 
 async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Promise<Outcome> {
   const p = requireProject(d);
@@ -243,7 +247,7 @@ async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Prom
       }
       {
         const rows = await status(d.ctx, p);
-        return { reply: () => ({ ok: true, executors: rows }) };
+        return { reply: () => ({ ok: true, executors: rows }), quiet: true };
       }
     case "events":
       return events(d, req.after);
@@ -263,6 +267,11 @@ async function assign(ctx: Context, p: ProjectConfig, to: string, m: MissionSpec
   const mine = readHeld(target.config[MISSION_KEY]);
   if (mine === "unreadable") throw new ForgeError(`${to} has an unreadable mission key: release it first`);
   if (mine !== null && mine.subtask !== m.subtask) throw new ForgeError(`${to} holds ${mine.subtask}: release it first`);
+  // Une reprise reprend la même mission : un autre dépôt ou une autre base
+  // demande de libérer d'abord.
+  if (mine !== null && (mine.repository !== m.repository || mine.base !== m.base)) {
+    throw new ForgeError(`${m.subtask} is held with another repository or base`);
+  }
   for (const other of executors(p)) {
     if (other.name === to) continue;
     const theirs = readHeld(instances.find((i) => i.name === other.name)?.config[MISSION_KEY]);
@@ -272,7 +281,7 @@ async function assign(ctx: Context, p: ProjectConfig, to: string, m: MissionSpec
   }
 
   await ensureRunning(ctx, to);
-  await prepareBranch(ctx, to, m);
+  await prepareBranch(ctx, to, m, mine !== null);
   recordBranch({ branch: m.branch, repository: m.repository, ticket: m.ticket, subtask: m.subtask, base: m.base, executor: to });
   await mustSucceed("record the mission", configSet(ctx, to, MISSION_KEY, JSON.stringify(held(m))));
   try {
@@ -285,44 +294,78 @@ async function assign(ctx: Context, p: ProjectConfig, to: string, m: MissionSpec
 }
 
 // Tout git passe par un argv, dans le container, en aiuser : l'hôte ne lance
-// jamais git dans le clone d'un agent.
-const gitIn = (ctx: Context, container: string, repository: string) => (...args: string[]) =>
-  execAsAgentArgv(ctx, container, ["git", "-C", cloneDir(repository), ...args]);
+// jamais git dans le clone d'un agent. Le clone est à l'agent, sa config aussi :
+// git ne doit ni y lancer un programme qu'elle nomme (fsmonitor, hooks,
+// uploadpack des remotes) ni sortir des chemins locaux ; et chaque appel a un
+// délai, pour qu'un git qui attend ne bloque pas la file d'`exclusive()`, donc
+// tout le projet. Un délai dépassé est un refus qui nomme l'étape.
+const FETCH_MS = 60_000;
+const GIT_MS = 20_000;
+const MIRROR_MS = 120_000;
+const SAFE_GIT = [
+  "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+  "-c", "remote.origin.uploadpack=git-upload-pack", "-c", "remote.team.uploadpack=git-upload-pack",
+  "-c", "protocol.allow=never", "-c", "protocol.file.allow=always",
+];
 
-async function prepareBranch(ctx: Context, to: string, m: MissionSpec): Promise<void> {
+const gitIn = (ctx: Context, container: string, repository: string) =>
+  async (timeoutMs: number, ...args: string[]): Promise<ExecResult> => {
+    const r = await execAsAgentArgv(ctx, container, ["git", "-C", cloneDir(repository), ...SAFE_GIT, ...args], { timeoutMs });
+    if (r.timedOut) throw new ForgeError(`git ${args[0]} in ${container}:${cloneDir(repository)} timed out after ${timeoutMs / 1000} s`);
+    return r;
+  };
+
+// `recovering` : l'exécuteur tient déjà cette sous-tâche (la reprise d'une
+// session perdue). S'il est sur sa branche, son travail, même non commité, reste
+// tel quel : ni contrôle de propreté, ni changement de branche. Sinon, comme une
+// mission neuve ; jamais de `switch -C` sur un arbre sale.
+async function prepareBranch(ctx: Context, to: string, m: MissionSpec, recovering: boolean): Promise<void> {
   const dir = cloneDir(m.repository);
   const git = gitIn(ctx, to, m.repository);
-  const status = await mustSucceed("git status", git("status", "--porcelain"));
+  const fetch = async () => {
+    await mustSucceed("git fetch team", git(FETCH_MS, "fetch", "team"));
+    await mustSucceed("git fetch origin", git(FETCH_MS, "fetch", "origin"));
+  };
+  if (recovering) {
+    const head = await git(GIT_MS, "symbolic-ref", "--short", "HEAD");
+    if (head.code === 0 && head.stdout.trim() === m.branch) {
+      await fetch();
+      return;
+    }
+  }
+  const status = await mustSucceed("git status", git(GIT_MS, "status", "--porcelain"));
   const dirty = status.stdout.split("\n").filter((l) => l.trim() !== "").length;
   if (dirty > 0) {
-    throw new ForgeError(`${to}: ${dir} has ${dirty} uncommitted change${dirty === 1 ? "" : "s"}: ` +
-      "commit or discard them before assigning a mission");
+    const changes = `${dirty} uncommitted change${dirty === 1 ? "" : "s"}`;
+    throw new ForgeError(recovering
+      ? `${to}: ${dir} has ${changes} and is not on ${m.branch}: commit or discard them before resuming ${m.subtask}`
+      : `${to}: ${dir} has ${changes}: commit or discard them before assigning a mission`);
   }
-  await mustSucceed("git fetch team", git("fetch", "team"));
-  await mustSucceed("git fetch origin", git("fetch", "origin"));
-  const has = async (ref: string) => (await git("rev-parse", "--verify", "--quiet", ref)).code === 0;
+  await fetch();
+  const has = async (ref: string) => (await git(GIT_MS, "rev-parse", "--verify", "--quiet", ref)).code === 0;
   const local = await has(`refs/heads/${m.branch}`);
 
   // La branche est dans le miroir d'équipe (une sous-tâche reprise, ici ou
   // ailleurs) : son travail repart de là. Une branche locale qui contient déjà
   // celle du miroir (des commits pas encore rendus) est gardée telle quelle.
   if (await has(`refs/remotes/team/${m.branch}`)) {
-    const ahead = local && (await git("merge-base", "--is-ancestor", `team/${m.branch}`, m.branch)).code === 0;
-    await mustSucceed(`switch to ${m.branch}`, ahead ? git("switch", m.branch) : git("switch", "-C", m.branch, `team/${m.branch}`));
+    const ahead = local && (await git(GIT_MS, "merge-base", "--is-ancestor", `team/${m.branch}`, m.branch)).code === 0;
+    await mustSucceed(`switch to ${m.branch}`,
+      ahead ? git(GIT_MS, "switch", m.branch) : git(GIT_MS, "switch", "-C", m.branch, `team/${m.branch}`));
     return;
   }
   // Jamais rendue, mais déjà commencée dans ce clone : on la reprend.
   if (local) {
-    await mustSucceed(`switch to ${m.branch}`, git("switch", m.branch));
+    await mustSucceed(`switch to ${m.branch}`, git(GIT_MS, "switch", m.branch));
     return;
   }
   if (m.base.startsWith("origin/")) {
-    await mustSucceed(`create ${m.branch}`, git("switch", "-c", m.branch, m.base));
+    await mustSucceed(`create ${m.branch}`, git(GIT_MS, "switch", "-c", m.branch, m.base));
     return;
   }
   // `agent/<sous-tâche>` : la branche d'une sous-tâche rendue, dans le miroir d'équipe.
   if (!(await has(`refs/remotes/team/${m.base}`))) throw new ForgeError(`base ${m.base} is not in the team mirror`);
-  await mustSucceed(`create ${m.branch}`, git("switch", "-c", m.branch, `team/${m.base}`));
+  await mustSucceed(`create ${m.branch}`, git(GIT_MS, "switch", "-c", m.branch, `team/${m.base}`));
 }
 
 // Libérer un exécuteur libre ne change rien et n'est pas un refus. Un échec de
@@ -377,7 +420,7 @@ function events(d: ApiDeps, after: number): Outcome {
     .filter((e) => e.op === "done" && e.outcome === "ok" && e.id > after && e.mission !== undefined)
     .sort((a, b) => a.id - b.id)
     .map((e) => ({ id: e.id, kind: "done", executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask, branch: e.mission!.branch }));
-  return { reply: () => ({ ok: true, events: list, last }) };
+  return { reply: () => ({ ok: true, events: list, last }), quiet: true };
 }
 
 const shellQuote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
@@ -394,9 +437,9 @@ async function done(d: ApiDeps, caller: ProjectMember): Promise<Outcome> {
   // La base, à jour dans le clone : `origin/<b>` après `git fetch origin`,
   // `agent/<x>` est `team/agent/<x>` après `git fetch team`.
   const stacked = m.base.startsWith("agent/");
-  await mustSucceed(stacked ? "git fetch team" : "git fetch origin", git("fetch", stacked ? "team" : "origin"));
+  await mustSucceed(stacked ? "git fetch team" : "git fetch origin", git(FETCH_MS, "fetch", stacked ? "team" : "origin"));
   const from = stacked ? `team/${m.base}` : m.base;
-  const count = await mustSucceed("git rev-list", git("rev-list", "--count", `${from}..${m.branch}`));
+  const count = await mustSucceed("git rev-list", git(GIT_MS, "rev-list", "--count", `${from}..${m.branch}`));
   if (!(Number.parseInt(count.stdout.trim(), 10) > 0)) {
     throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
   }
@@ -416,7 +459,8 @@ async function copyToTeamMirror(ctx: Context, container: string, repository: str
     "git", `--git-dir=${mirror}`, "-c", "core.hooksPath=/dev/null",
     "-c", `remote.src.url=${cloneDir(repository)}`, "-c", `remote.src.uploadpack=${uploadpack}`,
     "fetch", "--no-tags", "src", `+refs/heads/${branch}:refs/heads/${branch}`,
-  ], { cwd: HOST_GIT_CWD, env: { GIT_TERMINAL_PROMPT: "0" } });
+  ], { cwd: HOST_GIT_CWD, env: { GIT_TERMINAL_PROMPT: "0" }, timeoutMs: MIRROR_MS });
+  if (r.timedOut) throw new ForgeError(`copying ${branch} to the team mirror timed out after ${MIRROR_MS / 1000} s`);
   if (r.code !== 0) {
     throw new ForgeError(`${branch} could not be copied to the team mirror: ${r.stderr.trim().split("\n")[0] || `exit code ${r.code}`}`);
   }

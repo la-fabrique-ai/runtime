@@ -42,11 +42,19 @@ let d: ApiDeps;
 // L'état que `hc get agent` rend, par container ; `hc ls` échoue pour ceux de `hcDown`.
 let sessions: Record<string, string>;
 let hcDown: Set<string>;
+// Les appels qui ne finiraient jamais : sans délai, le test le dit ; avec, le délai les coupe.
+let hangs: string[];
 
 function setup(rules: ExecRule[] = []): void {
   ctx = fakeContext({ incus: fake, rules });
   const inner = ctx.exec;
   ctx.exec = async (argv, opts) => {
+    if (hangs.some((h) => argv.join(" ").includes(h))) {
+      ctx.calls.push(argv);
+      return opts?.timeoutMs === undefined
+        ? { code: 99, stdout: "", stderr: "no timeout: this call would hang the queue" }
+        : { code: 124, stdout: "", stderr: "", timedOut: true };
+    }
     const hc = argv.indexOf("hc");
     if (hc > 0 && argv[0] === "incus") {
       const container = argv[argv.indexOf("exec") + 1];
@@ -82,6 +90,7 @@ beforeEach(() => {
   for (const name of [CONTROL, E1, E2]) fake.addInstance("agent-forge", name, { status: "Running" });
   sessions = {};
   hcDown = new Set();
+  hangs = [];
   setup();
 });
 afterEach(() => {
@@ -93,6 +102,12 @@ const call = (caller: string, req: Record<string, unknown>) => handleMission(d, 
 const keys = (name: string) => fake.instances.get("agent-forge")!.get(name)!.config;
 const joined = () => ctx.calls.map((c) => c.join(" "));
 const hold = (name: string, m: HeldMission) => { keys(name)[MISSION_KEY] = JSON.stringify(m); };
+
+// Git dans le clone d'un exécuteur : les options qui coupent ce que sa config
+// pourrait lancer.
+const GIT = "git -C /workspace/web -c core.fsmonitor=false -c core.hooksPath=/dev/null " +
+  "-c remote.origin.uploadpack=git-upload-pack -c remote.team.uploadpack=git-upload-pack " +
+  "-c protocol.allow=never -c protocol.file.allow=always";
 
 // Une branche absente du miroir d'équipe et du clone : `rev-parse --verify` échoue.
 const absent = (ref: string): ExecRule => ({ match: `rev-parse --verify --quiet ${ref}`, code: 1 });
@@ -138,12 +153,12 @@ test("assign of a first sub-task: git switch -c from origin/main in /workspace/w
   const r = await call(CONTROL, { op: "assign", to: E1, mission: spec() });
   assert.deepEqual(r, { ok: true });
   const calls = joined();
-  const sw = calls.find((c) => c.includes("git -C /workspace/web switch"));
+  const sw = calls.find((c) => c.includes(`${GIT} switch`));
   assert.ok(sw, calls.join("\n"));
   assert.ok(sw.includes(`exec ${E1} --user 1001 --group 1001`), sw);
   assert.ok(sw.endsWith("switch -c agent/T-1.1 origin/main"), sw);
-  const fetchTeam = calls.findIndex((c) => c.endsWith("git -C /workspace/web fetch team"));
-  const fetchOrigin = calls.findIndex((c) => c.endsWith("git -C /workspace/web fetch origin"));
+  const fetchTeam = calls.findIndex((c) => c.endsWith(`${GIT} fetch team`));
+  const fetchOrigin = calls.findIndex((c) => c.endsWith(`${GIT} fetch origin`));
   assert.ok(fetchTeam >= 0 && fetchOrigin > fetchTeam);
   assert.ok(calls.some((c) => c.includes("hc run") && c.includes("--cwd /workspace/web")));
   assert.deepEqual(JSON.parse(keys(E1)[MISSION_KEY]), held());
@@ -155,7 +170,7 @@ test("assign of a first sub-task: git switch -c from origin/main in /workspace/w
 test("assign of a branch that is in the team mirror: git switch -C from team/<branch>", async () => {
   setup([absent("refs/heads/agent/T-1.1")]);
   assert.deepEqual(await call(CONTROL, { op: "assign", to: E2, mission: spec() }), { ok: true });
-  assert.ok(joined().some((c) => c.endsWith("git -C /workspace/web switch -C agent/T-1.1 team/agent/T-1.1")), joined().join("\n"));
+  assert.ok(joined().some((c) => c.endsWith(`${GIT} switch -C agent/T-1.1 team/agent/T-1.1`)), joined().join("\n"));
   assert.ok(!joined().some((c) => c.includes("switch -c")));
 });
 
@@ -163,7 +178,7 @@ test("a second sub-task's assign starts from team/agent/<first sub-task>", async
   setup([absent("refs/remotes/team/agent/T-1.2"), absent("refs/heads/agent/T-1.2")]);
   const r = await call(CONTROL, { op: "assign", to: E1, mission: spec({ subtask: "T-1.2", branch: "agent/T-1.2", base: "agent/T-1.1" }) });
   assert.deepEqual(r, { ok: true });
-  assert.ok(joined().some((c) => c.endsWith("git -C /workspace/web switch -c agent/T-1.2 team/agent/T-1.1")), joined().join("\n"));
+  assert.ok(joined().some((c) => c.endsWith(`${GIT} switch -c agent/T-1.2 team/agent/T-1.1`)), joined().join("\n"));
 });
 
 test("a stacked base missing from the team mirror is refused, nothing recorded", async () => {
@@ -186,6 +201,38 @@ test("an executor that is not free: refused, unless it holds the same sub-task (
   assert.ok(joined().some((c) => c.includes("hc run")));
 });
 
+test("recovery on the branch with uncommitted work: no clean check, no switch, a new session", async () => {
+  hold(E1, held());
+  setup([{ match: "symbolic-ref --short HEAD", stdout: "agent/T-1.1\n" }, { match: "status --porcelain", stdout: " M a.ts\n" }]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }), { ok: true });
+  assert.ok(!joined().some((c) => c.includes(" switch")), joined().join("\n"));
+  assert.ok(!joined().some((c) => c.includes("status --porcelain")));
+  assert.ok(joined().some((c) => c.includes("hc run")));
+});
+
+test("recovery off the branch with a dirty tree is refused; a recovery with another base is refused", async () => {
+  hold(E1, held());
+  setup([{ match: "symbolic-ref --short HEAD", stdout: "main\n" }, { match: "status --porcelain", stdout: " M a.ts\n" }]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }),
+    { ok: false, error: `${E1}: /workspace/web has 1 uncommitted change and is not on agent/T-1.1: commit or discard them before resuming T-1.1` });
+  assert.ok(!joined().some((c) => c.includes(" switch")));
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec({ base: "origin/dev" }) }),
+    { ok: false, error: "T-1.1 is held with another repository or base" });
+});
+
+test("a git call that times out refuses the verb, and the queue goes on", async () => {
+  hangs = ["fetch team"];
+  setup([absent("refs/remotes/team/agent/T-1.1"), absent("refs/heads/agent/T-1.1")]);
+  const r = await call(CONTROL, { op: "assign", to: E1, mission: spec() });
+  assert.deepEqual(r, { ok: false, error: `git fetch in ${E1}:/workspace/web timed out after 60 s` });
+  hangs = ["fetch --no-tags src"];
+  hold(E2, held({ subtask: "T-1.2", branch: "agent/T-1.2" }));
+  setup([{ match: "rev-list --count", stdout: "1\n" }]);
+  assert.deepEqual(await call(E2, { op: "done" }), { ok: false, error: "copying agent/T-1.2 to the team mirror timed out after 120 s" });
+  hangs = [];
+  assert.deepEqual(await call(CONTROL, { op: "release", to: E2 }), { ok: true });
+});
+
 test("a sub-task held by another executor is refused", async () => {
   hold(E1, held());
   const r = await call(CONTROL, { op: "assign", to: E2, mission: spec() });
@@ -194,7 +241,7 @@ test("a sub-task held by another executor is refused", async () => {
 });
 
 test("a dirty clone, an unknown executor and an undeclared repository are refused", async () => {
-  setup([{ match: "git -C /workspace/web status --porcelain", stdout: " M a.ts\n" }]);
+  setup([{ match: `${GIT} status --porcelain`, stdout: " M a.ts\n" }]);
   assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }),
     { ok: false, error: `${E1}: /workspace/web has 1 uncommitted change: commit or discard them before assigning a mission` });
   assert.deepEqual(await call(CONTROL, { op: "assign", to: executorName(3), mission: spec() }),
@@ -266,7 +313,13 @@ test("done fetches the branch into repo-web.agents.git, and events(0) returns it
   assert.equal(fetch.at(-1), "+refs/heads/agent/T-1.1:refs/heads/agent/T-1.1");
   const ev = await call(CONTROL, { op: "events", after: 0 });
   assert.deepEqual(ev, { ok: true, events: [{ id: 1, kind: "done", executor: E1, ticket: "T-1", subtask: "T-1.1", branch: "agent/T-1.1" }], last: 1 });
-  assert.deepEqual(await call(CONTROL, { op: "events", after: 1 }), { ok: true, events: [], last: 2 });
+  // Les lectures acceptées du contrôle ne vont pas au journal : `last` ne bouge pas.
+  assert.deepEqual(await call(CONTROL, { op: "events", after: 1 }), { ok: true, events: [], last: 1 });
+  await call(CONTROL, { op: "status" });
+  assert.deepEqual(d.journal.entries().map((e) => e.op), ["done"]);
+  // Un refus du contrôle, si.
+  await call(CONTROL, { op: "events", after: -1 });
+  assert.deepEqual(d.journal.entries().map((e) => [e.op, e.outcome]), [["done", "ok"], [null, "refused"]]);
 });
 
 test("two done calls racing: event ids follow their append order", async () => {
