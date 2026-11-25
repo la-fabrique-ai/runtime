@@ -103,14 +103,14 @@ pull requests, and merges it on GitHub.
             approved               stack done           OK
   (Pilot) ──> Spec ──────────> Dev ──────────> QA ──────────> Human review
                                 ^               │                 │   │
-                                │   KO: fixes   │                 │   │ autonomous:
-                                ├───────────────┘                 │   │ the human merges
-                                │   changes requested             │   v
-                                ├─────────────────────────────────┘  Done
-                                │                                     ^
-                                │   peer comments      forge ship     │ PRs merged
-                                └──────────────── PR review <─────────┤ by the human
-                                                   (supervised)
+                                │   KO: fixes   │                 │
+                                ├───────────────┘                 │
+                                │   changes requested             │ forge ship
+                                ├─────────────────────────────────┤
+                                │                                 v
+                                │   peer comments             PR review ──> Done
+                                └─────────────────────────────────┘   PRs merged
+                                                                      by the human
 ```
 
 | Status | Who works on it | Leaves when |
@@ -118,8 +118,8 @@ pull requests, and merges it on GitHub.
 | Spec | the Pilot, with the human | the human approves the spec and the split; the Pilot creates the stacks → Dev |
 | Dev | execution containers, one sub-task after another | every sub-task is Done → QA |
 | QA | one execution container on a QA mission, on the top of the stacks | OK → Human review; KO → fixes → Dev |
-| Human review | the human. Supervised: `forge fetch`, and the review written to the Pilot. Autonomous: on the pull requests | changes → fixes → Dev; validated → `forge ship` → PR review (supervised), or the human merges → Done (autonomous) |
-| PR review | peers, on GitHub (supervised) | comments imported by the human → fixes → Dev; the human merges the stack → Done |
+| Human review | the human: `forge fetch`, and the review written to the Pilot | changes → fixes → Dev; validated → `forge ship` → PR review |
+| PR review | peers, on GitHub | comments imported by the human → fixes → Dev; the human merges the stack → Done |
 | Done | — | — |
 
 Any fix sends the ticket back to Dev, then through QA and human review again:
@@ -309,13 +309,13 @@ Numbered as on the model page, so the team can refer to them by number.
     API socket**, under its own Unix user; the sessions go through it. A
     change of the security architecture, validated by the maintainer on
     2026-11-25.
-26. **In autonomous mode, the orchestrator also holds the GitHub
-    credential.**
+26. *Withdrawn by decision 33* (the orchestrator held the GitHub credential
+    in autonomous mode).
 27. **`forge ship <ticket>` opens or updates all the stacks of the ticket**,
     in order. After a cascade, it force-pushes with `--force-with-lease`, on
     the ticket's branches only.
 28. **A stack is merged through GitHub's stacked pull requests, and the human
-    always merges**, in autonomous mode too.
+    always merges**.
 
 **Later**: independent sub-tasks of one ticket developed in parallel, on the
 Pilot's decision. Building the final stack then gets harder; for now, one
@@ -346,6 +346,17 @@ Settled after the review and the reading of the console's last version:
     against a hijacked session; accepted. What must hold: **no question
     reaches the Pilot's conversation with the human**. Only the human, and
     the human's own gestures, write into the Pilot's session.
+32. **The human's interface to the tickets starts as small as it can be, and
+    a colleague of the maintainer iterates on it once the runtime engine and
+    the connector API are defined.** Preparing a ticket is the conversation
+    with the Pilot in its terminal (§6.8), not the console's question and
+    spec pages. The screens keep to what that conversation does not give: the
+    list of tickets with their statuses, a ticket's page (sub-tasks, QA
+    report) and the answer to a request. They are the console's screens
+    taken as a base and adapted (§6.12), not rewritten.
+33. **No autonomous mode.** forge runs supervised only: the human ships with
+    `forge ship` and merges on GitHub. Decision 26 is withdrawn, §6.13 says
+    what stays, and the delivery has four parts (§8).
 
 ## 4. Goals, non-goals, anti-goals
 
@@ -372,8 +383,8 @@ Settled after the review and the reading of the console's last version:
 - An origin mirror refreshed without the human; peer comments read without
   the human, in supervised mode.
 - Several humans per VM (la-fabrique-ai/runtime#135).
-- The autonomous mode beyond what decisions 26 and 28 fix: it is the last
-  part (§8), with its open questions (§10).
+- The autonomous mode (decision 33): forge runs supervised only, and GitHub
+  is reached only at the human's gestures.
 - Keeping the current team model (Lead agent, Reviewer container, Inbox,
   `forge answer`, `forge team watch`) alongside the new one.
 
@@ -453,8 +464,7 @@ Settled after the review and the reading of the console's last version:
   container), the origin mirror and the team mirror of each repository, the
   journal.
 - **The control container**: the orchestrator (its own user, the ticket
-  manager's credential, the API socket, in autonomous mode the GitHub
-  credential), the Pilot and the question sessions, read-only clones of every
+  manager's credential, the API socket), the Pilot and the question sessions, read-only clones of every
   repository.
 - **The execution containers** (N): one mission at a time, every clone, the
   project's Docker services. They see only the forge API: no ticket
@@ -489,8 +499,7 @@ format:
 - **the orchestrator's user** (name: the builder's): runs the orchestrator as
   a long-running service; owns the ticket manager's credential (a mode-600
   file), the container's forge API socket (`/run/forge/api.sock`, owned by
-  this user, mode 600, where today `aiuser` owns it), and in autonomous mode
-  the GitHub credential;
+  this user, mode 600, where today `aiuser` owns it);
 - **`aiuser`**: runs the hc core, the Pilot session and the question
   sessions, with read-only clones of every repository (today's `read-repos`).
   It cannot read the orchestrator's files nor connect to the API socket.
@@ -727,8 +736,8 @@ container).
   on stdin); and, when every pull request of the ticket is merged, records the
   fact for the orchestrator, which sets the ticket to Done.
 - **Gone**: `forge team watch`, `forge answer`, the Herdr App mod's Inbox and
-  question notifications (the human's interface to the tickets takes over,
-  §10). `forge team assign`
+  question notifications (the screens of §6.12 take over, decision 32).
+  `forge team assign`
   and `forge team release` stay as the human's escape hatch, without checks.
 
 ### 6.11 `forge ship <ticket>` and GitHub stacked pull requests
@@ -797,16 +806,37 @@ repository. It survives the container's recreation, the human can read it on
 the host, and it can be made a git repository of its own (its history, a
 backup), still a single source of truth.
 
-**Open** (§10): the human's interface to the tickets: the console's Herdr App
-screens, moved to call the engine in the control container through forge's
-transport, or another way.
+**The screens** (decision 32). Read at `a31b23d`: one Herdr App window
+(`screens/mission-control/main.ts`, about 1,200 lines, with a test that runs
+outside Herdr against a stand-in), in a Herdr installation of its own. Its
+only link to the engine is one function that runs a command and reads a JSON
+reply, over a contract (`engine/contract.ts`) shared with the engine; it
+polls every three seconds. So the screens are taken and adapted:
 
-### 6.13 The autonomous mode
+- **The seam moves.** The command that reaches the engine now reaches the
+  orchestrator in the control container, through forge's transport; the
+  Linear key and the Keychain go. The cost of polling every three seconds
+  over that transport is not measured: the builder checks it.
+- **Kept**: the frame and the list of tickets (read from the Markdown base),
+  and the answer to a request.
+- **Added**: a ticket's page with its sub-tasks, their statuses and the QA
+  report.
+- **Not kept**: the question and spec pages (the conversation with the Pilot
+  replaces them), the plan page (parallel developers, tools, minutes) and the
+  development page (turns, reviews, the mission's pull request): they
+  describe the Lead's flow, which is gone (§7).
+- **The contract is the new model's**: sub-tasks, stacks, the eight common
+  statuses, requests with a recommended answer (no `lead`, `dev` or
+  `reviewer` askers, no mission stage). It is defined with the engine, and
+  the colleague's iterations follow it.
 
-What is decided: the orchestrator holds the GitHub credential (decision 26),
-opens and updates the pull requests and reads their comments; the human
-always merges (decision 28). The rest is open (§10) and designed in the last
-part.
+### 6.13 No autonomous mode
+
+forge runs supervised only (decision 33). No GitHub credential enters the
+control container: the pull requests are opened by `forge ship` and their
+comments read by the import command, both on the Mac with the human's
+access. The marker `~/.claude/forge-mode` and the autonomous rules of
+`container/pre-bash.sh` are not touched by this design.
 
 ## 7. What changes from DX 5 and the reference team
 
@@ -827,7 +857,6 @@ part.
 | `forge ship <task>` | `forge ship <ticket>`, every stack of the ticket, as GitHub stacked pull requests |
 | Questions to the human in forge's Inbox | Questions in the ticket manager |
 | The state in the agents' notes | The state in the ticket manager; resuming re-reads the statuses (#186) |
-| The relay (contributor VM) holds the bot's GitHub credential | In autonomous mode, the orchestrator holds the GitHub credential |
 | The console, a separate repository, drives forge's Lead over SSH from the Mac | The console's repository is archived; its ticket management runs in the control container |
 
 The contributor VM and its relay are not touched by this design.
@@ -855,15 +884,14 @@ the old system kept on a LAN host.
    ticket, the mission files, `create-stack`; question sessions, requests,
    Waiting for human, the answer back to Ready. *End state: the human
    specifies a ticket with the Pilot and answers questions.* It needs the
-   human's interface to the tickets (§10, question 1), at least for the
-   requests.
+   screens' small slice (§6.12, decision 32): the list of tickets and the
+   answer to a request.
 3. **QA, fixes, cascade, ship.** QA missions and their report, fix sub-tasks,
    rebase missions and the base check before QA, `forge fetch <ticket>`,
    `forge ship <ticket>` with the lease and the GitHub stack, the import of
    peer comments, Done on merge. *End state: the supervised flow of §2 runs
    end to end.*
 4. **Multi-repository tickets and tickets built on another's stack.**
-5. **The autonomous mode** (§6.13), after its open questions are settled.
 
 The Markdown base iterates alongside, with its author: part 1 gives it its
 structure (the ticket model, the adapter interface, files in the base's
@@ -885,8 +913,7 @@ folder), later parts add what the flow needs.
   What it does shows in the ticket manager. Accepted by the maintainer.
 - **A Unix user is a weaker boundary than a separate VM.** A session that
   gains the orchestrator's rights (a local privilege escalation in the
-  container) gets the manager's credential, and in autonomous mode the GitHub
-  credential too. The relay of the contributor VM, a separate machine, is the
+  container) gets the manager's credential. The relay of the contributor VM, a separate machine, is the
   stronger model; accepted for now.
 - **The ticket source is trusted by assumption** (decision 24): the connector
   guarantees who may write a sub-task or an answer. The orchestrator reads
@@ -897,7 +924,7 @@ folder), later parts add what the flow needs.
 - **The cloud ticket manager receives** the specs, the questions and the QA
   reports: excerpts of the client's code go there. That is for the client to
   know.
-- **GitHub** is reached only at the human's gesture in supervised mode. The
+- **GitHub** is reached only at the human's gesture. The
   force-push of `forge ship` is limited to the ticket's branches, with lease.
 - **The anti-goals of DX 5 stay**: no container reaches the host's hc core,
   `incus`, or another container's socket; no secret in an argv, hc's state or
@@ -905,16 +932,9 @@ folder), later parts add what the flow needs.
 
 ## 10. Open questions
 
-1. **The human's interface to the tickets** (§6.12): creating a ticket,
-   following statuses, answering requests, reading QA reports. The console's
-   Herdr App screens, moved to call the engine in the control container, or
-   another way. Part 2 needs at least the requests.
-2. **Autonomous mode, peer comments**: the orchestrator reads them with its
-   GitHub credential. Are they trusted like the tickets, or filtered by
-   author as the relay does?
-3. **Autonomous mode, signatures**: in supervised mode, `forge ship` signs
-   with the human's key. Who signs the commits the orchestrator pushes, and
-   with which key?
+None. The two questions of the autonomous mode (trust in peer comments read
+by the orchestrator, the signature of the commits it pushes) go with it
+(decision 33).
 
 ## 11. Tests
 
@@ -975,6 +995,10 @@ one by one; the maintainer chose to start from the page as it is and fix later.
 
 And calls made only in this document:
 
+- The screens' small slice is the list of tickets, a ticket's page and the
+  answer to a request, adapted from the console (§6.12). What the console's
+  screens cost to adapt is read from its code at `a31b23d`, not measured by
+  running them.
 - The adapter is an executable speaking JSON lines on stdio (§6.3).
 - The orchestrator keeps no state the flow needs; it recomputes from the
   manager and the host, and re-issues a mission whose session died (§6.4).
