@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
@@ -8,7 +8,7 @@ import { FakeIncus } from "./lib/fake-incus.ts";
 import { parseConfig, type ForgeConfig } from "../cli/lib/config.ts";
 import { CONTROL, executorName, projectMembers, repoOriginMirror, repoTeamMirror } from "../cli/lib/project.ts";
 import {
-  convergeControl, convergeExecutor, provisionControl, provisionExecutor, TICKETS_MOUNT,
+  convergeControl, convergeExecutor, provisionControl, provisionExecutor, ticketsBase, TICKETS_MOUNT,
 } from "../cli/lib/project-provision.ts";
 
 let home: string;
@@ -33,8 +33,8 @@ const IDENTITY: ExecRule[] = [
 ];
 // Un hook qui marche refuse la commande interdite de la sonde avec le code 2.
 const HOOK_BLOCKS: ExecRule[] = [{ match: "forge-hook-probe-deny", code: 2, stderr: "BLOCKED.\n" }];
-// Aucun clone n'existe encore dans le /workspace d'un exécuteur neuf.
-const NO_CLONE: ExecRule[] = [{ match: "-- test -d /workspace/", code: 1 }];
+// Aucun clone (ni donc de remote team) n'existe encore dans le /workspace d'un exécuteur neuf.
+const NO_CLONE: ExecRule[] = [{ match: "-- test -d /workspace/", code: 1 }, { match: "remote get-url team", code: 2 }];
 
 const config = (repositories: Record<string, unknown> = { web: { repo: "o/web" }, api: { repo: "o/api" } }): ForgeConfig =>
   parseConfig("/c.json", {
@@ -100,7 +100,9 @@ test("an executor of a two-repository project: both device pairs, both clones as
 
 test("converging an executor adds the devices and the clone of a repository added since, and keeps the others", async () => {
   const before = config({ web: { repo: "o/web" } });
-  const { fake, ctx } = setup([{ match: "-- test -d /workspace/api/.git", code: 1 }]);
+  const { fake, ctx } = setup([
+    { match: "-- test -d /workspace/api/.git", code: 1 }, { match: "-C /workspace/api remote get-url team", code: 2 },
+  ]);
   const name = executorName(1);
   fake.addInstance("agent-forge", name, {
     status: "Running", profiles: ["agent-forge"],
@@ -117,6 +119,23 @@ test("converging an executor adds the devices and the clone of a repository adde
   assert.ok(calls.some((c) => c.includes("git clone --no-local /forge/origins/api.git /workspace/api")));
   assert.ok(!calls.some((c) => c.includes("/workspace/web") && c.includes("git clone")));
   assert.ok(!calls.some((c) => c.includes(" launch ")));
+  // Le remote team d'un clone déjà là n'est pas rajouté ; l'exclusion du journal se repose.
+  assert.ok(!calls.some((c) => c.includes("-C /workspace/web remote add team")));
+  assert.ok(calls.some((c) => c.includes("cd /workspace/web && ") && c.includes(".git/info/exclude")));
+});
+
+test("a clone whose team remote is missing (an interrupted provisioning) gets it at the next converge", async () => {
+  const cfg = config({ web: { repo: "o/web" } });
+  const { fake, ctx } = setup([{ match: "-C /workspace/web remote get-url team", code: 2 }]);
+  const name = executorName(1);
+  fake.addInstance("agent-forge", name, {
+    status: "Running", profiles: ["agent-forge"], config: { "user.forge.role": "executor" },
+    devices: { "origin-web": { type: "disk" }, "team-web": { type: "disk" } },
+  });
+  await convergeExecutor(ctx, cfg, member(cfg, name));
+  const calls = flat(ctx);
+  assert.ok(!calls.some((c) => c.includes("git clone")));
+  assert.ok(calls.some((c) => c.includes("git -C /workspace/web remote add team /forge/teams/web.git")), calls.join("\n"));
 });
 
 test("the control: the ticket base mounted under forge-orch's home, group 1001 and setgid, the ACL, a socket for uid 1002, no clone", async () => {
@@ -178,4 +197,34 @@ test("converging the control re-applies the ACL without mounting the base twice"
   assert.ok(!calls.some((c) => c.includes("config device add agent-control tickets")), calls.join("\n"));
   assert.ok(calls.some((c) => c.endsWith("-- setfacl -R -m g:1001:rwX -m d:g:1001:rwX /var/lib/forge-orch/tickets")));
   assert.ok(calls.some((c) => c.includes("getent passwd forge-orch")));
+});
+
+const withBase = (base: string) => parseConfig("/c.json", {
+  project: { repositories: { web: { repo: "o/web" } }, executors: { count: 1 }, tickets: { base } },
+}).project!;
+
+test("the ticket base: the default is accepted; the home, the root, a link to the home and forge's folders are refused", () => {
+  assert.equal(ticketsBase(withBase("~/.local/share/agent-forge/tickets")), join(home, ".local", "share", "agent-forge", "tickets"));
+  assert.throws(() => ticketsBase(withBase("~/")), /project\.tickets\.base \(~\/\) holds your home/);
+  assert.throws(() => ticketsBase(withBase("/")), /project\.tickets\.base \(\/\) is the root of the file system/);
+  const links = mkdtempSync(join(tmpdir(), "forge-links-"));
+  try {
+    symlinkSync(home, join(links, "home"));
+    assert.throws(() => ticketsBase(withBase(join(links, "home"))), /holds your home/);
+    assert.throws(() => ticketsBase(withBase(join(links, "home", "x", ".."))), /holds your home/);
+  } finally {
+    rmSync(links, { recursive: true, force: true });
+  }
+  assert.throws(() => ticketsBase(withBase("~/.local/share/agent-forge")), /holds forge's API data/);
+  assert.throws(() => ticketsBase(withBase("~/mirrors/tickets")), /lies inside forge's mirrors/);
+});
+
+test("a refused ticket base stops the control before anything is launched", async () => {
+  const cfg = parseConfig("/c.json", {
+    project: { repositories: { web: { repo: "o/web" } }, executors: { count: 1 }, tickets: { base: "~/" } },
+  });
+  const { fake, ctx } = setup();
+  await assert.rejects(provisionControl(ctx, cfg, member(cfg, CONTROL)), /project\.tickets\.base/);
+  assert.ok(!flat(ctx).some((c) => c.includes(" launch ")));
+  assert.equal(fake.instances.get("agent-forge")!.get(CONTROL), undefined);
 });

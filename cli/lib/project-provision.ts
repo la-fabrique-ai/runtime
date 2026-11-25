@@ -5,8 +5,8 @@
 // change : les clés `user.forge.role=executor|control` sans équipe, un clone
 // par dépôt sous /workspace/<nom>, et le contrôle, qui n'a ni clone ni session
 // dans la partie 1.
-import { chmodSync, existsSync, mkdirSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { Context } from "./context.ts";
 import { ForgeError, mustSucceed } from "./context.ts";
 import type { ForgeConfig } from "./config.ts";
@@ -20,7 +20,7 @@ import {
   requireClaudeToken, requireHostLfs, requireRuntime,
 } from "./commands/provision.ts";
 import { egressNames, PROFILE } from "./objects.ts";
-import { forgeHome, repoRoot, workspacesDir } from "./paths.ts";
+import { apiDataDir, configPath, forgeHome, memoriesDir, mirrorsDir, repoRoot, workspacesDir } from "./paths.ts";
 import { ensureRepoMirrors, repoOriginMirror, repoTeamMirror, type ProjectMember } from "./project.ts";
 import type { ProjectConfig } from "./project-config.ts";
 import { applyStrictSettings, requireStrictRuntime, strictLaunchArgs } from "./strict.ts";
@@ -64,9 +64,40 @@ function requireProject(cfg: ForgeConfig): ProjectConfig {
 
 const hostPath = (p: string): string => (p.startsWith("~/") ? join(forgeHome(), p.slice(2)) : p);
 
-// Le dossier de la base des tickets sur l'hôte, `~/` résolu.
+// Un chemin absolu sans `..` ni lien symbolique : la partie qui existe passe
+// par realpath, le reste (pas encore créé) s'y ajoute tel quel.
+function realPath(p: string): string {
+  const abs = resolve(p);
+  if (existsSync(abs)) return realpathSync(abs);
+  const parent = dirname(abs);
+  return parent === abs ? abs : join(realPath(parent), basename(abs));
+}
+
+const within = (child: string, parent: string) => child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+
+// Le dossier de la base des tickets sur l'hôte, `~/` résolu. forge le monte en
+// lecture-écriture dans le contrôle et y repose, en root et récursivement, le
+// groupe, le setgid et l'ACL : une base qui contiendrait le home de l'humain,
+// sa config forge ou les données de forge (miroirs, workspaces, mémoires,
+// journal de l'API) en réécrirait les droits (~/.ssh, le token Claude). Une
+// base dans les miroirs ou les workspaces se mêlerait aux dépôts des agents.
+// Refusée avant tout montage ou commande.
 export function ticketsBase(p: ProjectConfig): string {
-  return hostPath(p.tickets.base);
+  const base = realPath(hostPath(p.tickets.base));
+  const refuse = (why: string) =>
+    new ForgeError(`project.tickets.base (${p.tickets.base}) ${why}: choose a folder of its own, such as ~/.local/share/agent-forge/tickets`);
+  if (base === sep) throw refuse("is the root of the file system");
+  const guarded: [string, string][] = [
+    [forgeHome(), "your home"], [dirname(configPath()), "forge's config folder"], [mirrorsDir(), "forge's mirrors"],
+    [workspacesDir(), "forge's workspaces"], [memoriesDir(), "forge's memories"], [apiDataDir(), "forge's API data"],
+  ];
+  for (const [dir, what] of guarded) {
+    if (within(realPath(dir), base)) throw refuse(`holds ${what} (${dir})`);
+  }
+  for (const [dir, what] of [[mirrorsDir(), "forge's mirrors"], [workspacesDir(), "forge's workspaces"]]) {
+    if (within(base, realPath(dir))) throw refuse(`lies inside ${what} (${dir})`);
+  }
+  return base;
 }
 
 // Un container de projet vu comme un membre, pour les aides de team-provision
@@ -154,7 +185,6 @@ export async function provisionExecutor(ctx: Context, cfg: ForgeConfig, m: Proje
   await configureGit(ctx, m.name, identity);
   await pushAgentState(ctx, m.name);
   await installMemberFiles(ctx, member, { owner: AIUSER_SOCKET });
-  await mustSucceed(`git-lfs filters in ${m.name}`, execAsAgent(ctx, m.name, lfsFilters(p)));
   await finish(ctx, member, true);
 }
 
@@ -179,11 +209,14 @@ export async function convergeExecutor(ctx: Context, cfg: ForgeConfig, m: Projec
 // objets LFS (chaque clone règle ensuite le sien, `--local`).
 const lfsFilters = (p: ProjectConfig) => (Object.values(p.repositories).some((r) => r.lfs) ? LFS_FILTERS_READ : LFS_FILTERS_INSTALL);
 
-// Idempotent : par dépôt, les deux devices s'ils manquent et le clone s'il
-// manque. Git ne tourne que dans le container, en aiuser.
+// Idempotent : les filtres LFS globaux, puis par dépôt les deux devices s'ils
+// manquent, le clone s'il manque, et à chaque passage le remote `team` et
+// l'exclusion du journal d'audit, qu'un clone interrompu après coup n'aurait pas.
+// Git ne tourne que dans le container, en aiuser.
 async function ensureExecutorRepos(ctx: Context, p: ProjectConfig, name: string): Promise<void> {
   const present = new Set(await deviceNames(ctx, name));
-  let filters = false;
+  // Les filtres d'abord : un clone LFS fait le smudge depuis le miroir.
+  await mustSucceed(`git-lfs filters in ${name}`, execAsAgent(ctx, name, lfsFilters(p)));
   for (const [repo, { repo: ownerRepo, lfs }] of Object.entries(p.repositories)) {
     const origin = `${ORIGINS_MOUNT}/${repo}.git`;
     const team = `${TEAMS_MOUNT}/${repo}.git`;
@@ -196,30 +229,34 @@ async function ensureExecutorRepos(ctx: Context, p: ProjectConfig, name: string)
         `source=${source}`, `path=${path}`, "readonly=true")));
     }
     const dir = cloneDir(repo);
-    if ((await execAsAgentArgv(ctx, name, ["test", "-d", `${dir}/.git`])).code === 0) continue;
-    // Les filtres d'abord : un clone LFS fait le smudge depuis le miroir.
-    if (!filters) {
-      await mustSucceed(`git-lfs filters in ${name}`, execAsAgent(ctx, name, lfsFilters(p)));
-      filters = true;
+    if ((await execAsAgentArgv(ctx, name, ["test", "-d", `${dir}/.git`])).code !== 0) {
+      await cloneRepo(ctx, name, repo, ownerRepo, lfs);
     }
-    ctx.out(`Cloning ${ownerRepo} into ${name}:${dir}...`);
-    // Sans `lfs`, pas de smudge : le miroir n'a aucun objet LFS et le container
-    // n'a pas de réseau vers eux. Avec, les objets se lisent dans le miroir.
-    const clone = lfs
-      ? ["git", "clone", ...lfsMirrorConfig(origin).flatMap(([k, v]) => ["-c", `${k}=${v}`]), "--no-local", origin, dir]
-      : ["env", "GIT_LFS_SKIP_SMUDGE=1", "git", "clone", "--no-local", origin, dir];
-    await mustSucceed(`clone ${repo} in ${name}`, execAsAgentArgv(ctx, name, clone));
-    await mustSucceed(`add the team remote of ${repo}`, execAsAgentArgv(ctx, name, ["git", "-C", dir, "remote", "add", "team", team]));
+    if ((await execAsAgentArgv(ctx, name, ["git", "-C", dir, "remote", "get-url", "team"])).code !== 0) {
+      await mustSucceed(`add the team remote of ${repo}`, execAsAgentArgv(ctx, name, ["git", "-C", dir, "remote", "add", "team", team]));
+    }
     // Le hook écrit son journal d'audit dans <cwd>/.claude : sans cette
     // exclusion, un clone neuf paraîtrait sale. `repo` suit [a-z][a-z0-9-]*.
     await mustSucceed("audit log exclude", execAsAgent(ctx, name,
       `cd ${dir} && { grep -qxF '/.claude/bash-audit.log' .git/info/exclude || echo '/.claude/bash-audit.log' >> .git/info/exclude; }`));
-    // Les hooks LFS et le filtre de ce clone (`--local`) : un dépôt sans `lfs`
-    // garde le smudge sauté même quand un autre dépôt le fait.
-    const hooks = await execAsAgentArgv(ctx, name, ["git", "-C", dir, "lfs", "install", "--local", ...(lfs ? [] : ["--skip-smudge"])]);
-    if (hooks.code !== 0) {
-      ctx.err(`WARNING: installing git-lfs hooks in ${dir} failed: ${hooks.stderr.trim() || `exit code ${hooks.code}`}`);
-    }
+  }
+}
+
+async function cloneRepo(ctx: Context, name: string, repo: string, ownerRepo: string, lfs: boolean): Promise<void> {
+  const origin = `${ORIGINS_MOUNT}/${repo}.git`;
+  const dir = cloneDir(repo);
+  ctx.out(`Cloning ${ownerRepo} into ${name}:${dir}...`);
+  // Sans `lfs`, pas de smudge : le miroir n'a aucun objet LFS et le container
+  // n'a pas de réseau vers eux. Avec, les objets se lisent dans le miroir.
+  const clone = lfs
+    ? ["git", "clone", ...lfsMirrorConfig(origin).flatMap(([k, v]) => ["-c", `${k}=${v}`]), "--no-local", origin, dir]
+    : ["env", "GIT_LFS_SKIP_SMUDGE=1", "git", "clone", "--no-local", origin, dir];
+  await mustSucceed(`clone ${repo} in ${name}`, execAsAgentArgv(ctx, name, clone));
+  // Les hooks LFS et le filtre de ce clone (`--local`) : un dépôt sans `lfs`
+  // garde le smudge sauté même quand un autre dépôt le fait.
+  const hooks = await execAsAgentArgv(ctx, name, ["git", "-C", dir, "lfs", "install", "--local", ...(lfs ? [] : ["--skip-smudge"])]);
+  if (hooks.code !== 0) {
+    ctx.err(`WARNING: installing git-lfs hooks in ${dir} failed: ${hooks.stderr.trim() || `exit code ${hooks.code}`}`);
   }
 }
 
@@ -231,6 +268,7 @@ export async function provisionControl(ctx: Context, cfg: ForgeConfig, m: Projec
   requireClaudeToken();
   const identity = p.gitIdentity ?? await hostGitIdentity(ctx);
   await requireRuntime(ctx);
+  ticketsBase(p);
 
   await launch(ctx, m.name, ["-c", `${PROVISIONING_KEY}=${m.name}`, "-c", "user.forge.role=control"], []);
   // L'utilisateur de l'orchestrateur et setfacl ne se voient que dans un
@@ -253,6 +291,7 @@ export async function provisionControl(ctx: Context, cfg: ForgeConfig, m: Projec
 // chaque fois) et ses fichiers.
 export async function convergeControl(ctx: Context, cfg: ForgeConfig, m: ProjectMember): Promise<{ instructionsChanged: boolean }> {
   const p = requireProject(cfg);
+  ticketsBase(p);
   await ensureRunning(ctx, m.name);
   await requireOrchestratorImage(ctx, m.name);
   await ensureTicketBase(ctx, p, m.name);
