@@ -168,6 +168,22 @@ test("a chain A <- B <- C shipped from C pushes A, B, C in order and stacks the 
   assert.equal(gh("agent/c~1"), gh("agent/b"));
 });
 
+// Les branches d'un projet : agent/T-1.2 sur agent/T-1.1, comme les enregistre l'hôte.
+test("a project's stacked sub-tasks ship as a chain: T-1.1 against main, T-1.2 against agent/T-1.1", async () => {
+  chain(["T-1.1", "a.txt"], ["T-1.2", "b.txt"]);
+  const ctx = teamContext({ rules: [
+    taskBase("T-1.1\torigin/main\nT-1.2\tagent/T-1.1\n"),
+    creates("main", "agent/T-1.1", url(1)), creates("agent/T-1.1", "agent/T-1.2", url(2)),
+  ], answers: [1] });
+  assert.equal(await ship(ctx, "T-1.2"), 0);
+  assert.deepEqual(said(ctx), [
+    "Signing 2 commits: T-1.1 (1), T-1.2 (1)",
+    `agent/T-1.1: pushed 1 commit, created PR ${url(1)}`,
+    `agent/T-1.2: pushed 1 commit, created PR ${url(2)}`,
+  ]);
+  assert.equal(git(layout.github, "rev-parse", "agent/T-1.2~1"), git(layout.github, "rev-parse", "agent/T-1.1"));
+});
+
 test("a clone that fetches only main still stacks the chain", async () => {
   // A push then updates no origin/agent/* ref by itself: ship fetches it for the task above.
   git(layout.clone, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main");

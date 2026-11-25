@@ -61,6 +61,18 @@ test("up checks hc, converges with the agent forwarded, then registers the machi
   assert.equal(adds[0][6], viaCommand("forge-local", "agent-web-lead"));
 });
 
+test("up on a project host registers one machine per member, from the project's status rows", async () => {
+  const rows = JSON.stringify({ members: ["agent-control", "agent-executor-1", "agent-executor-2"].map((name) =>
+    ({ name, kind: name === "agent-control" ? "control" : "executor", present: true, mission: null, session: "none" })) });
+  const ctx = fakeContext({ rules: [
+    HC, { match: "'forge' 'team' 'status' '--json'", stdout: rows },
+    { match: "hc machine ls --json", stdout: JSON.stringify({ machines: [] }) },
+  ] });
+  assert.equal(await cmdTeamLaptop(ctx, ["up"]), 0);
+  const adds = ctx.calls.filter((c) => c[0] === "hc" && c[2] === "add");
+  assert.deepEqual(adds.map((c) => c[4]), ["forge-local-control", "forge-local-executor-1", "forge-local-executor-2"]);
+});
+
 test("a Mac whose hc is not the pinned version converges nothing", async () => {
   const ctx = fakeContext({ rules: [{ match: "hc --version", stdout: "hc 0.1.20\n" }] });
   await assert.rejects(() => cmdTeamLaptop(ctx, ["up"]), /hc 0\.1\.21/);

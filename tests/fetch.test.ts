@@ -134,6 +134,23 @@ test("a base that is another agent branch counts against that branch", async () 
   ]);
 });
 
+// Un projet (forge à tickets) : `for-repo` répond le nom du dépôt, `task-base`
+// les sous-tâches de ses branches agent/T-<n>.<m>, empilées ou non.
+test("a project's sub-task branches, T-1.2 stacked on T-1.1, list with their bases", async () => {
+  saveHost(host("forge-local"));
+  git(layout.container, "branch", "agent/T-1.1", "main");
+  layout.commit(layout.container, "agent/T-1.1", "a.txt");
+  git(layout.container, "branch", "agent/T-1.2", "agent/T-1.1");
+  layout.commit(layout.container, "agent/T-1.2", "b.txt", "c.txt");
+  const ctx = teamContext({ rules: [taskBase("T-1.1\torigin/main\nT-1.2\tagent/T-1.1\n")] });
+  assert.equal(await cmdFetch(ctx, { cwd: layout.clone }), 0);
+  assert.equal(git(layout.clone, "config", `remote.${C}.uploadpack`), `forge team upload-pack ${T}`);
+  assert.deepEqual(listing(ctx), [
+    "agent/T-1.1  1 commits on origin/main",
+    "agent/T-1.2  2 commits on agent/T-1.1",
+  ]);
+});
+
 test("the host of the clone's forge remote is used without asking", async () => {
   saveHost(host("forge-a"));
   saveHost(host("forge-b"));

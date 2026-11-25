@@ -27,6 +27,7 @@ import { refreshTeamMirror } from "../team-mirror.ts";
 import { teamMirrorPath } from "../mirror.ts";
 import { hostReserveBytes, memoryWarning } from "../team-memory.ts";
 import { containerConfig, safeRef } from "./task-base.ts";
+import { projectCommand } from "./team-project.ts";
 
 const USAGE = `Usage: forge team converge [<team>]
        forge team assign <container> [<task>] [--from <task>]   (the instruction is read from stdin)
@@ -35,7 +36,8 @@ const USAGE = `Usage: forge team converge [<team>]
        forge team answer <question id> [--json]   (the answer is read from stdin, as JSON: {"summary": "…", "body": "…"})
        forge team status [--json] [--quick]
        forge team sync <team>
-       forge team for-repo <owner/repo> | task-base <team> | upload-pack <team>   (read by forge fetch and forge ship)`;
+       forge team for-repo <owner/repo> | task-base <team> | upload-pack <team>   (read by forge fetch and forge ship)
+With a project: converge, status [--json], sync <repository>, task-base <repository>, upload-pack <repository>.`;
 
 
 // `hostMemory` : la RAM de l'hôte, en octets ; les tests la fixent.
@@ -71,6 +73,14 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
     throw new ForgeError(USAGE);
   }
   const cfg = loadConfig(configPath());
+  // Un projet (forge à tickets) a ses propres converge, status, sync et les
+  // commandes que lisent fetch et ship ; assign et release passent par l'API.
+  if (cfg.project !== null && ["converge", "status", "sync", "for-repo", "task-base", "upload-pack"].includes(sub!)) {
+    return projectCommand(ctx, cfg, sub!, a, opts);
+  }
+  if (cfg.project !== null) {
+    throw new ForgeError(`forge team ${sub} is for teams: a project's executors get their missions from the orchestrator, through the API.`);
+  }
   // Lu par une machine (forge fetch) : sans équipe, pas de message sur stdout.
   if (sub === "for-repo") return forRepo(ctx, cfg, a);
   if (Object.keys(cfg.teams).length === 0 && cfg.pilot === null) {

@@ -479,3 +479,100 @@ test("sync on a host without git-lfs says so, before any fetch", async () => {
   await assert.rejects(() => cmdTeam(ctx, ["sync", "web"]), /git-lfs is not installed/);
   assert.ok(!ctx.calls.some((c) => c.includes("fetch")));
 });
+
+// ---------------------------------------------------------------- un projet (forge à tickets)
+
+const PROJECT = { project: { repositories: { web: { repo: "o/web" }, api: { repo: "o/API" } }, executors: { count: 2 } } };
+// Aucun clone (ni donc de remote team) n'existe encore dans un exécuteur neuf.
+const NO_CLONE: ExecRule[] = [{ match: "-- test -d /workspace/", code: 1 }, { match: "remote get-url team", code: 2 }];
+
+function project(fake = FakeIncus.withRuntime(), rules: ExecRule[] = []) {
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify(PROJECT));
+  return { fake, ctx: fakeContext({ incus: fake, rules: [...rules, ...RULES] }) };
+}
+
+test("converge of a fresh project creates both mirrors of each repository, then the control and two executors, then restarts the API", async () => {
+  const { fake, ctx } = project(undefined, NO_CLONE);
+  assert.equal(await cmdTeam(ctx, ["converge"]), 0);
+  const calls = ctx.calls.map((c) => c.join(" "));
+  const launches = ctx.calls.filter((c) => c.includes("launch")).map((c) => c[c.indexOf("launch") + 2]);
+  assert.deepEqual(launches, ["agent-control", "agent-executor-1", "agent-executor-2"]);
+  for (const repo of ["web", "api"]) {
+    const origin = calls.findIndex((c) => c.includes("clone --bare") && c.endsWith(`/repo-${repo}.git`));
+    const team = calls.findIndex((c) => c.includes("init --bare") && c.endsWith(`/repo-${repo}.agents.git`));
+    assert.ok(origin >= 0 && team > origin, calls.join("\n"));
+    assert.ok(origin < calls.findIndex((c) => c.includes(" launch ")), "the mirrors come before any container");
+  }
+  const restart = calls.indexOf("systemctl --user try-restart forge-api.service");
+  assert.ok(restart > calls.findLastIndex((c) => c.includes(" launch ")), calls.join("\n"));
+  assert.ok(fake.instances.get("agent-forge")!.has("agent-executor-2"));
+  assert.deepEqual(ctx.out_lines.filter((l) => /^(NAME|agent-)/.test(l)).map((l) => l.split(/\s+/).slice(0, 4).join(" ")), [
+    "NAME KIND STATUS MISSION", "agent-control control Running -", "agent-executor-1 executor Running free", "agent-executor-2 executor Running free",
+  ]);
+});
+
+test("converge of a project converges the present members, never deletes a stray executor, and takes no team", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  for (const n of [1, 2, 3]) fake.addInstance("agent-forge", `agent-executor-${n}`, { status: "Running", config: { "user.forge.role": "executor" } });
+  const { ctx } = project(fake);
+  assert.equal(await cmdTeam(ctx, ["converge"]), 0);
+  assert.ok(!ctx.calls.some((c) => c.includes("launch") || c.includes("delete")), ctx.calls.map((c) => c.join(" ")).join("\n"));
+  assert.ok(ctx.out_lines.includes("Updating agent-executor-1..."), ctx.out_lines.join("\n"));
+  assert.ok(ctx.out_lines.includes("agent-executor-3: not in the config, left as is"), ctx.out_lines.join("\n"));
+  await assert.rejects(() => cmdTeam(project().ctx, ["converge", "web"]), /a project converges as a whole: forge team converge, without a team/);
+});
+
+const HELD = { kind: "dev", ticket: "T-1", subtask: "T-1.2", repository: "web", branch: "agent/T-1.2", base: "agent/T-1.1" };
+
+test("status --json of a project prints its members: kind, presence, the mission held and the session", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  fake.addInstance("agent-forge", "agent-executor-1", { status: "Running", config: { "user.forge.mission": JSON.stringify(HELD) } });
+  const { ctx } = project(fake, [LIVE_IDLE]);
+  assert.equal(await cmdTeam(ctx, ["status"], { json: true }), 0);
+  assert.equal(ctx.out_lines.length, 1);
+  assert.deepEqual(JSON.parse(ctx.out_lines[0]), { members: [
+    { name: "agent-control", kind: "control", present: true, mission: null, session: "idle" },
+    { name: "agent-executor-1", kind: "executor", present: true, mission: HELD, session: "idle" },
+    { name: "agent-executor-2", kind: "executor", present: false, mission: null, session: "none" },
+  ] });
+  const text = project(fake, [LIVE_IDLE]).ctx;
+  assert.equal(await cmdTeam(text, ["status"]), 0);
+  assert.deepEqual(text.out_lines.map((l) => l.split(/\s+/).join(" ").trim()), [
+    "NAME KIND STATUS MISSION", "agent-control control Running -", "agent-executor-1 executor Running T-1.2 (web)", "agent-executor-2 executor Missing free",
+  ]);
+});
+
+test("for-repo of a project prints the repository's name; task-base its branches' sub-tasks and bases; upload-pack serves its team mirror", async () => {
+  const { ctx } = project();
+  assert.equal(await cmdTeam(ctx, ["for-repo", "o/api"]), 0);
+  assert.deepEqual(ctx.out_lines, ["api"]);
+  assert.equal(await cmdTeam(project().ctx, ["for-repo", "o/none"]), 1);
+
+  mkdirSync(join(home, ".local", "share", "agent-forge", "api"), { recursive: true });
+  const rec = (repository: string, subtask: string, base: string) =>
+    ({ branch: `agent/${subtask}`, repository, ticket: subtask.split(".")[0], subtask, base, executor: null });
+  writeFileSync(join(home, ".local", "share", "agent-forge", "api", "branches.json"), JSON.stringify({ version: 1, records: [
+    rec("web", "T-1.2", "agent/T-1.1"), rec("api", "T-2.1", "origin/main"), rec("web", "T-1.1", "origin/main"), rec("web", "T-1.3", "--upload-pack=x"),
+  ] }));
+  const bases = project().ctx;
+  assert.equal(await cmdTeam(bases, ["task-base", "web"]), 0);
+  assert.deepEqual(bases.out_lines, ["T-1.1\torigin/main", "T-1.2\tagent/T-1.1"]);
+  await assert.rejects(() => cmdTeam(project().ctx, ["task-base", "nope"]), /nope is not a repository of the project/);
+
+  const pack = project().ctx;
+  assert.equal(await cmdTeam(pack, ["upload-pack", "api", "/ignored"]), 0);
+  assert.deepEqual(pack.out_lines, []);
+  assert.deepEqual(pack.attachCalls[0].argv, ["git", "-c", "core.hooksPath=/dev/null", "upload-pack", join(home, "mirrors", "repo-api.agents.git")]);
+  await assert.rejects(() => cmdTeam(project().ctx, ["upload-pack", "nope"]), /nope is not a repository of the project/);
+});
+
+test("sync <repository> of a project refreshes that repository's origin mirror from GitHub", async () => {
+  const { ctx } = project();
+  assert.equal(await cmdTeam(ctx, ["sync", "api"]), 0);
+  const fetches = ctx.calls.map((c) => c.join(" ")).filter((c) => c.includes(" fetch --prune "));
+  assert.equal(fetches.length, 1);
+  assert.ok(fetches[0].includes(`--git-dir=${join(home, "mirrors", "repo-api.git")}`) && fetches[0].includes("o/API"), fetches[0]);
+  assert.deepEqual(ctx.out_lines, ["Synced api."]);
+});
