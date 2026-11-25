@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, linkSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Connector } from "./connector.ts";
 import { formatDocument, parseDocument } from "./header.ts";
@@ -62,12 +62,6 @@ const idNumber = (id: string): number => Number(id.slice(id.lastIndexOf("-") + 1
 const str = (v: number | null | string): string => (v === null ? "" : String(v));
 const formatRepositories = (repos: Repo[]): string => repos.map((r) => `${r.name}:${r.base}`).join(", ");
 
-// Écrit `content` dans un fichier neuf : `wx` échoue (EEXIST) si le chemin
-// existe déjà, donc deux écrivains ne se marchent jamais dessus.
-function claimFile(path: string, content: string): void {
-  writeFileSync(path, content, { flag: "wx" });
-}
-
 // Réécrit un fichier par un fichier temporaire du même dossier (même
 // système de fichiers, donc `renameSync` est atomique). Le nom commence par
 // `.tmp-` : il ne passe aucune garde d'id, un reste de crash n'est jamais un
@@ -77,6 +71,21 @@ function replaceFile(path: string, content: string): void {
   const tmp = join(path, "..", `.tmp-${process.pid}-${tmpCounter++}`);
   writeFileSync(tmp, content, { flag: "wx" });
   renameSync(tmp, path);
+}
+
+// Prend `path` avec un contenu déjà complet : on écrit un fichier temporaire du
+// même dossier, puis `linkSync` le publie sous son nom, atomiquement (EEXIST
+// si le nom est pris). Jamais de fichier vide visible, même après un crash.
+// Le temporaire créé par cet appel est retiré ensuite : la règle « rien n'est
+// supprimé » vaut pour les enregistrements.
+function claimFile(path: string, content: string): void {
+  const tmp = join(path, "..", `.tmp-${process.pid}-${tmpCounter++}`);
+  writeFileSync(tmp, content, { flag: "wx" });
+  try {
+    linkSync(tmp, path);
+  } finally {
+    unlinkSync(tmp);
+  }
 }
 
 const isExists = (e: unknown): boolean => (e as NodeJS.ErrnoException)?.code === "EEXIST";
@@ -99,6 +108,7 @@ function claimNext(highest: () => number, attempt: (n: number) => void): number 
 
 export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () => Date } = {}): Connector {
   const prefix = opts.prefix ?? "T";
+  if (!isTicketId(`${prefix}-1`)) throw new ConnectorError(`invalid ticket prefix: ${JSON.stringify(prefix)}`);
   const now = opts.now ?? (() => new Date());
   const ticketDir = (id: string): string => {
     if (!isTicketId(id)) throw new ConnectorError(`invalid ticket id: ${JSON.stringify(id)}`);
@@ -208,8 +218,8 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
   }
 
   // Réécrit l'en-tête d'une sous-tâche avec les champs changés, corps intact.
-  function rewriteSubtask(id: string, change: Record<string, string>): Subtask {
-    const s = subtaskById(id);
+  function rewriteSubtask(id: string, change: Partial<Subtask>): Subtask {
+    const s = parseSubtask({ ...subtaskById(id), ...change });
     const path = join(ticketDir(s.ticket), "subtasks", `${id.slice(id.indexOf(".") + 1)}.md`);
     const fields: Record<string, string> = {
       id,
@@ -222,7 +232,6 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
       reason: str(s.reason),
       branch: str(s.branch),
       pr: str(s.pr),
-      ...change,
     };
     replaceFile(path, formatDocument(fields, s.text));
     return subtaskById(id);
@@ -271,11 +280,14 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
         if (!isRepoName(r.name)) throw new ConnectorError(`invalid repository name: ${JSON.stringify(r.name)}`);
         if (!isBranchBase(r.base)) throw new ConnectorError(`invalid base: ${JSON.stringify(r.base)}`);
       }
+      // Le ticket complet passe par le parseur avant tout fichier.
+      parseTicket({ id: `${prefix}-1`, title, description, status: "todo", priority: priority ?? 0, repositories });
       const highest = (): number =>
         Math.max(0, ...entries(dir).filter((n) => n.startsWith(`${prefix}-`) && isTicketId(n)).map(idNumber));
       const n = claimNext(highest, (k) => mkdirSync(join(dir, `${prefix}-${k}`)));
       const id = `${prefix}-${n}`;
-      claimFile(
+      // Le dossier appartient à son créateur : un remplacement suffit.
+      replaceFile(
         join(dir, id, "ticket.md"),
         formatDocument(
           { id, title, status: "todo", priority: str(priority ?? 0), repositories: formatRepositories(repositories) },
@@ -285,7 +297,7 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
       return loadTicket(id);
     },
     async setTicketStatus({ id, status }) {
-      const t = loadTicket(id);
+      const t = parseTicket({ ...loadTicket(id), status });
       const path = join(ticketDir(id), "ticket.md");
       replaceFile(
         path,
@@ -310,6 +322,13 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
       if (fixes !== undefined && !loadSubtasks(ticketId).some((s) => s.id === fixes)) {
         throw new ConnectorError(`fixes is not a sub-task of ${ticketId}: ${JSON.stringify(fixes)}`);
       }
+      if ((kind === "fix") !== (fixes !== undefined)) {
+        throw new ConnectorError("a fix sub-task needs `fixes`, and only a fix sub-task may have it");
+      }
+      parseSubtask({
+        id: `${ticketId}.1`, ticket: ticketId, repository, position, rank, status: "ready", kind,
+        fixes: fixes ?? null, reason: null, branch: null, pr: null, text,
+      });
       const folder = join(ticketDir(ticketId), "subtasks");
       mkdirSync(folder, { recursive: true });
       const n = claimNext(
@@ -337,11 +356,11 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
       return subtaskById(`${ticketId}.${n}`);
     },
     async setSubtaskStatus({ id, status, reason }) {
-      return rewriteSubtask(id, { status, reason: reason ?? "" });
+      return rewriteSubtask(id, { status, reason: reason ?? null });
     },
     async setSubtaskLinks({ id, branch, pr }) {
-      // Un lien non donné reste tel qu'il est.
-      const change: Record<string, string> = {};
+      // Un lien omis est conservé tel quel (il ne s'efface pas).
+      const change: Partial<Subtask> = {};
       if (branch !== undefined) change.branch = branch;
       if (pr !== undefined) change.pr = pr;
       return rewriteSubtask(id, change);
@@ -351,6 +370,7 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
       if (!isSubtaskId(subtask) || !loadSubtasks(ticketId).some((s) => s.id === subtask)) {
         throw new ConnectorError(`not a sub-task of ${ticketId}: ${JSON.stringify(subtask)}`);
       }
+      parseRequest({ id: "1", ticket: ticketId, subtask, text, recommended: recommended ?? null, answer: null });
       const folder = join(ticketDir(ticketId), "requests");
       mkdirSync(folder, { recursive: true });
       const n = claimNext(
@@ -379,6 +399,7 @@ export function openMarkdownBase(dir: string, opts: { prefix?: string; now?: () 
       const folder = join(ticketDir(ticketId), "comments");
       mkdirSync(folder, { recursive: true });
       const at = now().toISOString();
+      parseComment({ id: "000001", ticket: ticketId, author, kind, at, text });
       const pad = (k: number): string => String(k).padStart(6, "0");
       const n = claimNext(
         () => Math.max(0, ...entries(folder).map((f) => f.slice(0, -3)).filter(isCommentId).map(Number)),

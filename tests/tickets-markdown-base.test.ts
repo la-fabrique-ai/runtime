@@ -148,7 +148,7 @@ async function withTicket(): Promise<{ base: string; c: ReturnType<typeof openMa
 }
 const SUB = { ticket: "T-1", repository: "api", position: 1, rank: 1, kind: "implementation" as const, text: "Faire" };
 
-test("dix createSubtask concurrents donnent dix ids distincts", async () => {
+test("dix createSubtask lancés ensemble donnent dix ids distincts", async () => {
   const { c } = await withTicket();
   const subs = await Promise.all(Array.from({ length: 10 }, () => c.createSubtask(SUB)));
   assert.deepEqual(subs.map((s) => s.id).sort(), Array.from({ length: 10 }, (_, i) => `T-1.${i + 1}`).sort());
@@ -212,4 +212,37 @@ test("setTicketStatus refuse un id piégé sans toucher hors de la base", async 
   await assert.rejects(c.setTicketStatus({ id: "../x", status: "dev" }), ConnectorError);
   assert.equal(existsSync(outside), false);
   assert.equal((await c.setTicketStatus({ id: "T-1", status: "dev" })).status, "dev");
+});
+
+test("createSubtask saute un numéro déjà pris à la main (reprise sur EEXIST)", async () => {
+  const { base, c } = await withTicket();
+  put(base, "T-1/subtasks/2.md", "id: T-1.2\nrepository: api\nposition: 1\nrank: 1\nstatus: ready\nkind: implementation\nfixes:\nreason:\nbranch:\npr:\n\nA la main\n");
+  assert.equal((await c.createSubtask(SUB)).id, "T-1.3");
+});
+
+test("setSubtaskStatus avec une raison inconnue est refusé et les sous-tâches restent listables", async () => {
+  const { c } = await withTicket();
+  const s = await c.createSubtask(SUB);
+  await assert.rejects(c.setSubtaskStatus({ id: s.id, status: "ready", reason: "x" as "rebase" }), ConnectorError);
+  assert.equal((await c.listSubtasks({ ticket: "T-1" })).length, 1);
+});
+
+test("un préfixe invalide est refusé avant tout dossier", () => {
+  const base = mkdtempSync(join(tmpdir(), "tickets-"));
+  assert.throws(() => openMarkdownBase(base, { prefix: "../x" }), ConnectorError);
+  assert.deepEqual(readdirSync(base), []);
+});
+
+test("createSubtask kind fix sans fixes, ou fixes sur une implémentation, est refusé", async () => {
+  const { c } = await withTicket();
+  const s = await c.createSubtask(SUB);
+  await assert.rejects(c.createSubtask({ ...SUB, kind: "fix" }), ConnectorError);
+  await assert.rejects(c.createSubtask({ ...SUB, fixes: s.id }), ConnectorError);
+});
+
+test("une priorité hors bornes est refusée sans dossier créé", async () => {
+  const base = mkdtempSync(join(tmpdir(), "tickets-"));
+  const c = openMarkdownBase(base, { prefix: "T" });
+  await assert.rejects(c.createTicket({ title: "t", priority: 9 as 1, ...NEW }), ConnectorError);
+  assert.deepEqual(readdirSync(base), []);
 });
