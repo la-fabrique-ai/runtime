@@ -48,12 +48,16 @@ export function exclusive<T>(fn: () => Promise<T>): Promise<T> {
 
 // La mission tenue par un exécuteur : le JSON d'une HeldMission, absent quand il est libre.
 export const MISSION_KEY = "user.forge.mission";
+// La question en attente d'un exécuteur : l'id de son `ask`, en décimal ;
+// absente quand il n'en attend aucune. `answer`, `assign` et `release` l'effacent.
+export const QUESTION_KEY = "user.forge.question";
 
 export type MissionRequest =
   | { op: "status" }
   | { op: "assign"; to: string; mission: MissionSpec }
   | { op: "release"; to: string }
   | { op: "events"; after: number }
+  | { op: "ask"; text: string }
   | { op: "done" };
 
 type Kind = ProjectMember["kind"];
@@ -62,11 +66,11 @@ export type MissionVerb = MissionRequest["op"];
 // Les verbes de chaque socket : un exécuteur ne confie rien, le contrôle ne finit rien.
 const VERBS: Record<Kind, readonly MissionVerb[]> = {
   control: ["status", "assign", "release", "events"],
-  executor: ["done", "status"],
+  executor: ["done", "status", "ask"],
 };
 // Les champs exacts de chaque verbe ; `op` est lu à part.
 const FIELDS: Record<MissionVerb, readonly string[]> = {
-  status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: [],
+  status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: [], ask: ["text"],
 };
 const MISSION_FIELDS = ["kind", "ticket", "subtask", "repository", "branch", "base", "instruction"] as const;
 const HELD_FIELDS = MISSION_FIELDS.filter((k) => k !== "instruction");
@@ -162,6 +166,12 @@ export function parseMissionRequest(line: string, from: Kind, secrets: readonly 
     }
     case "done":
       return { op: "done" };
+    case "ask": {
+      const text = json.text;
+      if (typeof text !== "string") throw new ForgeError("ask: text must be a string");
+      checkText(text, INSTRUCTION_MAX, "question", secrets);
+      return { op: "ask", text };
+    }
     default:
       return { op: "status" };
   }
@@ -169,7 +179,7 @@ export function parseMissionRequest(line: string, from: Kind, secrets: readonly 
 
 // ---------------------------------------------------------------- l'état tenu
 
-const held = (m: MissionSpec): HeldMission => ({
+const heldOf = (m: MissionSpec): HeldMission => ({
   kind: m.kind, ticket: m.ticket, subtask: m.subtask, repository: m.repository, branch: m.branch, base: m.base,
 });
 
@@ -220,14 +230,14 @@ export async function handleMission(d: ApiDeps, caller: ProjectMember, line: str
   }
 }
 
-function entryFields(caller: ProjectMember, req: MissionRequest | null, outcome: Entry["outcome"], error: string | null, done?: HeldMission): NewEntry {
-  const mission = req?.op === "assign" ? held(req.mission) : done;
+function entryFields(caller: ProjectMember, req: MissionRequest | null, outcome: Entry["outcome"], error: string | null, held?: HeldMission): NewEntry {
+  const mission = req?.op === "assign" ? heldOf(req.mission) : held;
   return {
     caller: caller.name, op: req?.op ?? null,
     to: req !== null && "to" in req ? req.to : null,
     task: mission?.subtask ?? null,
     outcome, error, summary: null,
-    text: req?.op === "assign" ? req.mission.instruction : null,
+    text: req?.op === "assign" ? req.mission.instruction : req?.op === "ask" ? req.text : null,
     ...(mission === undefined ? {} : { mission }),
   };
 }
@@ -271,6 +281,10 @@ async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Prom
       return events(d, req.after);
     case "done":
       return exclusive(() => withMissionLock(() => done(d, caller)));
+    case "ask": {
+      const { text } = req;
+      return exclusive(() => withMissionLock(() => ask(d, caller, text)));
+    }
   }
 }
 
@@ -308,7 +322,7 @@ export async function humanAssign(
   await asHuman(journal, entry, async () => {
     requireHumanTarget(p, to);
     const mission = parseMission(spec, secrets);
-    Object.assign(entry, { task: mission.subtask, text: mission.instruction, mission: held(mission) });
+    Object.assign(entry, { task: mission.subtask, text: mission.instruction, mission: heldOf(mission) });
     if (!Object.hasOwn(p.repositories, mission.repository)) {
       throw new ForgeError(`repository ${mission.repository} is not declared in the project`);
     }
@@ -350,8 +364,10 @@ async function assign(ctx: Context, p: ProjectConfig, to: string, m: MissionSpec
   await ensureRunning(ctx, to, { timeoutMs: INCUS_MS });
   await prepareBranch(ctx, to, m);
   recordBranch({ branch: m.branch, repository: m.repository, ticket: m.ticket, subtask: m.subtask, base: m.base, executor: to });
+  // Une question d'une mission précédente n'attend plus rien.
+  await clearQuestion(ctx, to);
   await mustSucceed("record the mission",
-    inTime(`recording the mission of ${to}`, INCUS_MS, configSet(ctx, to, MISSION_KEY, JSON.stringify(held(m)), { timeoutMs: INCUS_MS })));
+    inTime(`recording the mission of ${to}`, INCUS_MS, configSet(ctx, to, MISSION_KEY, JSON.stringify(heldOf(m)), { timeoutMs: INCUS_MS })));
   try {
     await startSession(ctx, { name: to }, m.subtask, m.instruction, { cwd: cloneDir(m.repository), timeoutMs: INCUS_MS });
   } catch (e) {
@@ -483,6 +499,12 @@ async function prepareBranch(ctx: Context, to: string, m: MissionSpec): Promise<
   await mustSucceed(`create ${m.branch}`, git(SWITCH_MS, "switch", "-c", m.branch, `team/${m.base}`));
 }
 
+async function clearQuestion(ctx: Context, to: string): Promise<void> {
+  if ((await configGet(ctx, to, QUESTION_KEY)) === "") return;
+  await mustSucceed("clear the question",
+    inTime(`clearing the question of ${to}`, INCUS_MS, configUnset(ctx, to, QUESTION_KEY, { timeoutMs: INCUS_MS })));
+}
+
 // Libérer un exécuteur libre ne change rien et n'est pas un refus. Un échec de
 // l'arrêt de la session ne défait pas la libération.
 async function release(ctx: Context, to: string): Promise<void> {
@@ -490,6 +512,7 @@ async function release(ctx: Context, to: string): Promise<void> {
     await mustSucceed("clear the mission",
       inTime(`clearing the mission of ${to}`, INCUS_MS, configUnset(ctx, to, MISSION_KEY, { timeoutMs: INCUS_MS })));
   }
+  await clearQuestion(ctx, to);
   let stopped: boolean;
   try {
     stopped = await stopSession(ctx, to, { timeoutMs: INCUS_MS });
@@ -536,25 +559,50 @@ async function status(ctx: Context, p: ProjectConfig): Promise<ExecutorStatus[]>
       return { name: m.name, mission: null, session: "unknown", question: null };
     }
     return {
-      name: m.name, mission, session: await executorSession(ctx, p, m.name, inst?.status === "Running", mission !== null), question: null,
+      name: m.name, mission, session: await executorSession(ctx, p, m.name, inst?.status === "Running", mission !== null),
+      question: readQuestion(inst?.config[QUESTION_KEY]),
     };
   }));
 }
 
-// Les `done` acceptés d'id > after, par id croissant ; `last` est le plus
-// grand id du journal (0 s'il est vide), lu dans le même instant.
+// Les `done` et les `ask` acceptés d'id > after, par id croissant ; `last` est
+// le plus grand id du journal (0 s'il est vide), lu dans le même instant.
 function events(d: ApiDeps, after: number): Outcome {
   d.journal.refresh();
   const entries = d.journal.entries();
   const last = entries.reduce((max, e) => Math.max(max, e.id), 0);
   const list: HostEvent[] = entries
-    .filter((e) => e.op === "done" && e.outcome === "ok" && e.id > after && e.mission !== undefined)
+    .filter((e) => (e.op === "done" || e.op === "ask") && e.outcome === "ok" && e.id > after && e.mission !== undefined)
     .sort((a, b) => a.id - b.id)
-    .map((e): HostEvent => ({
-      id: e.id, kind: "done", executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask, branch: e.mission!.branch,
-      wip: false, report: null,
-    }));
+    .map((e): HostEvent => {
+      const base = { id: e.id, executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask };
+      if (e.op === "ask") return { ...base, kind: "ask", text: e.text ?? "" };
+      return { ...base, kind: "done", branch: e.mission!.branch, wip: false, report: null };
+    });
   return { reply: () => ({ ok: true, events: list, last }), quiet: true };
+}
+
+// La valeur de QUESTION_KEY : l'id de la question en attente, null si absente
+// ou illisible.
+function readQuestion(value: string | undefined): number | null {
+  if (value === undefined || !/^[1-9][0-9]{0,15}$/.test(value.trim())) return null;
+  const n = Number(value.trim());
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+// Une question sur la mission tenue : la ligne du journal d'abord, dont l'id
+// est celui de la question, puis la clé. Une seule question à la fois.
+async function ask(d: ApiDeps, caller: ProjectMember, text: string): Promise<Outcome> {
+  const { ctx } = d;
+  const m = readHeld(await configGet(ctx, caller.name, MISSION_KEY));
+  if (m === null) throw new ForgeError(`${caller.name} holds no mission: there is nothing to ask about`);
+  if (m === "unreadable") throw new ForgeError(`${caller.name}'s mission key is unreadable: ask for it to be released`);
+  const pending = readQuestion(await configGet(ctx, caller.name, QUESTION_KEY));
+  if (pending !== null) throw new ForgeError(`question ${pending} still waits for its answer`);
+  const entry = d.journal.append(entryFields(caller, { op: "ask", text }, "ok", null, m), d.now());
+  await mustSucceed("record the question",
+    inTime(`recording the question of ${caller.name}`, INCUS_MS, configSet(ctx, caller.name, QUESTION_KEY, String(entry.id), { timeoutMs: INCUS_MS })));
+  return { entry, reply: (id) => ({ ok: true, id }) };
 }
 
 // Une mission tenue, des clones sans changements suivis, au moins un commit

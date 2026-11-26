@@ -11,7 +11,7 @@ import { parseConfig } from "../cli/lib/config.ts";
 import type { ApiDeps } from "../cli/lib/api/missions.ts";
 import { Journal } from "../cli/lib/api/journal.ts";
 import { hostSocketPath, serveApi } from "../cli/lib/api/server.ts";
-import { handleMission, MISSION_KEY, parseMissionRequest } from "../cli/lib/api/missions.ts";
+import { handleMission, MISSION_KEY, parseMissionRequest, QUESTION_KEY } from "../cli/lib/api/missions.ts";
 import { readBranchRecords } from "../cli/lib/branch-records.ts";
 import { socketHost, type HeldMission, type MissionSpec } from "../cli/lib/orchestrator/host.ts";
 import { CONTROL, executorName, projectMembers, repoTeamMirror } from "../cli/lib/project.ts";
@@ -577,4 +577,37 @@ test("with a project, the server opens one socket per project container and answ
     await served;
     delete process.env.FORGE_API_RUNTIME;
   }
+});
+
+// --------------------------------------------------------------- les questions (plan 2b)
+
+test("ask: accepted with a mission, its id is the journal line's; status and events show it", async () => {
+  hold(E1, held());
+  const r = await call(E1, { op: "ask", text: "what is the limit?" });
+  const line = d.journal.entries().find((e) => e.op === "ask")!;
+  assert.deepEqual(r, { ok: true, id: line.id });
+  assert.equal(keys(E1)[QUESTION_KEY], String(line.id));
+  const st = await call(CONTROL, { op: "status" }) as unknown as { executors: { name: string; question: number | null }[] };
+  assert.deepEqual(st.executors.map((e) => [e.name, e.question]), [[E1, line.id], [E2, null]]);
+  const ev = await call(CONTROL, { op: "events", after: 0 });
+  assert.deepEqual(ev, { ok: true, events: [{ id: line.id, kind: "ask", executor: E1, ticket: "T-1", subtask: "T-1.1", text: "what is the limit?" }], last: line.id });
+});
+
+test("ask: a second ask is refused with the pending id; without a mission, or from the control, refused", async () => {
+  hold(E1, held());
+  const first = await call(E1, { op: "ask", text: "q1" }) as unknown as { id: number };
+  assert.deepEqual(await call(E1, { op: "ask", text: "q2" }), { ok: false, error: `question ${first.id} still waits for its answer` });
+  assert.deepEqual(await call(E2, { op: "ask", text: "q" }), { ok: false, error: `${E2} holds no mission: there is nothing to ask about` });
+  assert.deepEqual(await call(CONTROL, { op: "ask", text: "q" }), { ok: false, error: "ask is not a verb of the control container" });
+});
+
+test("ask: a question holding a secret is refused, and the journal does not hold it; release clears the key", async () => {
+  hold(E1, held());
+  const r = await call(E1, { op: "ask", text: "the token is tok-123" });
+  assert.equal(r.ok, false);
+  assert.ok(!readFileSync(join(home, "api", "journal.jsonl"), "utf8").includes("tok-123"));
+  await call(E1, { op: "ask", text: "q" });
+  assert.ok(keys(E1)[QUESTION_KEY]);
+  await call(CONTROL, { op: "release", to: E1 });
+  assert.equal(keys(E1)[QUESTION_KEY], undefined);
 });
