@@ -9,7 +9,7 @@ const MAX_BYTES = 65_536;
 
 // Où l'hôte pose la copie en lecture seule des fichiers de mission, dans
 // l'exécuteur (plan 2b, MISSION_FILES_DIR), et la taille d'une copie.
-export const MISSION_DIR = "/home/aiuser/.forge/mission";
+export const MISSION_DIR = "/etc/forge/mission";
 export const MISSION_FILE_MAX = 262_144;
 const FILE_CUT = "[cut: this copy is partial]";
 const FILE_NAMES = ["spec", "answers", "split"] as const;

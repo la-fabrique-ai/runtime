@@ -113,7 +113,7 @@ test("devInstruction coupe aussi un titre géant, après la description et le te
 test("devInstruction porte les fichiers de mission présents et les questions déjà répondues", () => {
   const answered: Request[] = [{ id: "1", ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: null, answer: "100 per page" }];
   const out = devInstruction(cand(), false, { answered, files: { spec: "# spec", answers: null, split: null } });
-  assert.ok(out.includes("## Mission files") && out.includes("/home/aiuser/.forge/mission/spec.md"));
+  assert.ok(out.includes("## Mission files") && out.includes("/etc/forge/mission/spec.md"));
   assert.ok(!out.includes("answers.md"));
   assert.ok(out.includes("## Questions already answered") && out.includes("Which limit?") && out.includes("100 per page"));
   assert.ok(out.includes("## If you are blocked") && out.includes("forge-team ask") && out.includes("forge-team done --wip"));

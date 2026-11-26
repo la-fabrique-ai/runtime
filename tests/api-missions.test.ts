@@ -638,13 +638,15 @@ test("a mission file over 262 144 bytes, or holding a secret, is refused", async
   assert.match((secret as { error: string }).error, /mission\.files\.answers holds a secret/);
 });
 
-test("the first assign of a fresh executor creates /home/aiuser/.forge as aiuser before the root mkdir of the mission folder", async () => {
+test("the mission files live under /etc/forge, a root-owned parent outside aiuser's home, created by root first", async () => {
+  assert.equal(MISSION_FILES_DIR, "/etc/forge/mission");
   setup(FRESH);
   await call(CONTROL, { op: "assign", to: E1, mission: spec() });
   const calls = joined();
-  const parent = calls.findIndex((c) => c.includes(`exec ${E1} --user 1001`) && c.endsWith("mkdir -p -- /home/aiuser/.forge"));
+  const parent = calls.findIndex((c) => c === `incus --project agent-forge exec ${E1} -- install -d -o root -g root -m 755 -- /etc/forge`);
   const mk = calls.findIndex((c) => c.endsWith(`-- mkdir -m 755 -- ${MISSION_FILES_DIR}`));
   assert.ok(parent >= 0 && mk > parent, calls.join("\n"));
+  assert.ok(!calls.some((c) => c.includes("file push") && c.includes("/home/aiuser")), calls.join("\n"));
 });
 
 // --------------------------------------------------------------- ask : une question pour l'humain (décision 35)

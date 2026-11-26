@@ -41,8 +41,8 @@ test("no agent terminal in the control: ensurePilot starts forge-agent in /works
   assert.equal(await ensurePilot(ctx), "started");
   const [run] = runs(ctx);
   assert.ok(run.includes(`exec ${CONTROL} `) && run.includes("--name agent --cwd /workspace ") && run.includes("forge-agent"), run);
-  const push = ctx.calls.map((c) => c.join(" ")).find((c) => c.includes("file push"))!;
-  assert.ok(push.includes(`${CONTROL}/home/aiuser/.forge/instruction.md`), push);
+  const write = ctx.calls.map((c) => c.join(" ")).find((c) => c.includes("node -e") && c.endsWith("/home/aiuser/.forge/instruction.md"))!;
+  assert.ok(write.includes(`exec ${CONTROL} --user 1001`), write);
   assert.ok(PILOT_INSTRUCTION.startsWith("[forge] You are the Pilot of this project."));
 });
 

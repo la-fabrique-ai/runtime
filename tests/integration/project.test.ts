@@ -162,7 +162,7 @@ test("a project: the control's socket and home, assign, done, a stacked sub-task
   assert.equal(rows[EX1].mission?.subtask, "T-1.1");
   assert.equal(rows[EX1].session, "idle", JSON.stringify(rows));
   // La copie des fichiers de mission : lisible par l'agent, pas modifiable.
-  const spec = "/home/aiuser/.forge/mission/spec.md";
+  const spec = "/etc/forge/mission/spec.md";
   assert.equal(must("read spec.md", await asAiuser(EX1, ["cat", spec])).stdout, "# Spec de T-1.1\n");
   assert.notEqual((await asAiuser(EX1, ["sh", "-c", `echo x >> ${spec}`])).status, 0, "aiuser could write spec.md");
 

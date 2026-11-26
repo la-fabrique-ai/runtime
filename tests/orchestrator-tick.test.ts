@@ -449,7 +449,7 @@ test("la mission envoyée porte le spec.md de la base dans files.spec", async ()
   const m = host.assigned[0].mission;
   assert.equal(m.subtask, "T-2.1");
   assert.deepEqual(m.files, { spec: "# The spec\n", answers: null, split: null });
-  assert.ok(m.instruction.includes("/home/aiuser/.forge/mission/spec.md"));
+  assert.ok(m.instruction.includes("/etc/forge/mission/spec.md"));
 });
 
 test("a plain done of the last sub-task leaves the ticket in dev while one of its requests waits for the human", async () => {

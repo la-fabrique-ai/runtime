@@ -149,20 +149,19 @@ function parseFiles(v: unknown, secrets: readonly string[]): MissionFiles {
 
 // La copie en lecture seule des fichiers de mission, dans l'exécuteur : un
 // dossier à root (755), chaque fichier à root (444) ; l'agent les lit et ne
-// peut pas les changer (décision 29 : la base reste la vérité). Le même chemin
-// que MISSION_DIR de cli/lib/orchestrator/instruction.ts (un test le vérifie).
-export const MISSION_FILES_DIR = "/home/aiuser/.forge/mission";
+// peut pas les changer (décision 29 : la base reste la vérité). Hors du home
+// d'aiuser, sous un parent à root (/etc/forge) : root n'écrit jamais dans un
+// dossier qu'aiuser possède, où un lien symbolique planté détournerait
+// l'écriture. Le même chemin que MISSION_DIR de
+// cli/lib/orchestrator/instruction.ts (un test le vérifie).
+export const MISSION_FILES_DIR = "/etc/forge/mission";
 
-// En root, dans le container : le dossier est retiré (quoi qu'il soit, un lien
-// symbolique compris, que `rm` ne suit pas), puis recréé neuf ; `mkdir` sans
-// `-p` échoue si quelque chose a pris sa place entre-temps.
+// En root, dans le container : /etc/forge (sous /etc, à root), puis le dossier
+// retiré et recréé neuf.
 async function resetMissionFiles(ctx: Context, to: string): Promise<void> {
   const asRoot = (step: string, argv: string[]) =>
     mustSucceed(step, inTime(`${step} in ${to}`, INCUS_MS, ctx.exec(incus("exec", to, "--", ...argv), { timeoutMs: INCUS_MS })));
-  // Le parent est à aiuser ; avant la première session d'un exécuteur neuf, il
-  // n'existe pas encore : aiuser le crée (root le ferait à root).
-  await mustSucceed("create /home/aiuser/.forge", inTime(`create /home/aiuser/.forge in ${to}`, INCUS_MS,
-    execAsAgentArgv(ctx, to, ["mkdir", "-p", "--", dirname(MISSION_FILES_DIR)], { timeoutMs: INCUS_MS })));
+  await asRoot("create /etc/forge", ["install", "-d", "-o", "root", "-g", "root", "-m", "755", "--", dirname(MISSION_FILES_DIR)]);
   await asRoot("remove the mission files", ["rm", "-rf", "--", MISSION_FILES_DIR]);
   await asRoot("create the mission files folder", ["mkdir", "-m", "755", "--", MISSION_FILES_DIR]);
 }
