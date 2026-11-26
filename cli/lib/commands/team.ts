@@ -300,6 +300,14 @@ async function pilotSession(ctx: Context, instructionsChanged: boolean): Promise
 // Le miroir d'origine d'un dépôt, depuis GitHub par l'agent SSH transmis.
 async function sync(ctx: Context, p: ProjectConfig, name: string | undefined): Promise<number> {
   const repo = requireRepository(p, name);
+  await refreshOriginMirror(ctx, p, repo);
+  ctx.out(`Synced ${repo}.`);
+  return 0;
+}
+
+// Rafraîchit le miroir d'origine d'un dépôt déclaré (et ses objets LFS) ; un
+// échec dit comment faire passer l'agent SSH. `forge pilot` l'appelle aussi.
+export async function refreshOriginMirror(ctx: Context, p: ProjectConfig, repo: string): Promise<void> {
   const { repo: ownerRepo, lfs } = p.repositories[repo];
   // Avant tout fetch : sans le paquet, l'étape LFS échouerait sur un message de git.
   if (lfs) await requireHostLfs(ctx);
@@ -311,8 +319,6 @@ async function sync(ctx: Context, p: ProjectConfig, name: string | undefined): P
     if (l.code !== 0) throw new ForgeError(`fetching the LFS objects of ${ownerRepo} failed: ${l.stderr.trim() || `exit code ${l.code}`}\n${hint}`);
     if (l.warning) ctx.err(`WARNING: ${l.warning}`);
   }
-  ctx.out(`Synced ${repo}.`);
-  return 0;
 }
 
 // Le laptop demande quel dépôt du projet est son clone : le nom sur stdout

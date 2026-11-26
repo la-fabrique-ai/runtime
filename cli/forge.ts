@@ -22,6 +22,7 @@ import { cmdNotify } from "./lib/commands/notify.ts";
 import { cmdTeam } from "./lib/commands/team.ts";
 import { cmdTeamLaptop } from "./lib/commands/team-laptop.ts";
 import { cmdHcVia } from "./lib/commands/hc-via.ts";
+import { cmdPilot, cmdPilotLaptop } from "./lib/commands/pilot.ts";
 import { cmdHcExec } from "./lib/commands/hc-exec.ts";
 import { currentSide, requireSide } from "./lib/side.ts";
 
@@ -82,6 +83,7 @@ On your laptop:
   team up [--host <name>]           Converge the project on the host, then add each container as a Herdr App machine
                                     (team assign, release, status and sync also work from here, over SSH)
   team summary --json               Every installed host's executors, as one line of JSON (read by the Herdr App bar)
+  pilot <ticket> [--fresh] [--host <name>]   Open a ticket with the Pilot: refresh the mirrors, then tell the Pilot (--fresh: in a new session)
   ship <task> [--host <name>]       Re-sign a task's new commits, push agent/<task> and open its PR
                                     (a stacked task ships with the tasks under it, bottom first)
 
@@ -89,7 +91,7 @@ A bracketed argument is asked for when you leave it out, as a numbered menu.
 With no terminal on stdin (scripts, CI) nothing is asked and the command
 exits with this usage instead.`;
 
-type LaptopOptions = { remote?: string; host?: string; sshPersist?: string };
+type LaptopOptions = { remote?: string; host?: string; sshPersist?: string; fresh?: boolean };
 type RelayArgs = { title?: string; bodyFile?: string; json?: boolean; quick?: boolean; repository?: string; base?: string };
 type NoticeArgs = { pid?: string; rssKib?: string };
 
@@ -112,6 +114,9 @@ function dispatch(
     case "notify": return cmdNotify(ctx, a, b, notice);
     case "hc-via": return cmdHcVia(ctx, a, b, positionals[3]);
     case "hc-exec": return cmdHcExec(ctx, a, b);
+    case "pilot": return currentSide() === "laptop"
+      ? cmdPilotLaptop(ctx, positionals.slice(1), { host: laptop.host, fresh: laptop.fresh })
+      : cmdPilot(ctx, positionals.slice(1), { fresh: laptop.fresh });
     case "image": return cmdImage(ctx, a, b);
     case "completion": return cmdCompletion(ctx, a);
     case "install": return cmdInstall(ctx, laptop);
@@ -133,7 +138,7 @@ async function main(): Promise<number> {
         remote: { type: "string" }, host: { type: "string" }, "ssh-persist": { type: "string" },
         title: { type: "string" }, "body-file": { type: "string" },
         json: { type: "boolean" }, quick: { type: "boolean" }, repository: { type: "string" }, base: { type: "string" },
-        pid: { type: "string" }, "rss-kib": { type: "string" },
+        pid: { type: "string" }, "rss-kib": { type: "string" }, fresh: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
       allowPositionals: true,
@@ -149,10 +154,11 @@ async function main(): Promise<number> {
     if (values.remote !== undefined && cmd !== "install") {
       throw new ForgeError("--remote only goes with install: forge install --remote <address>");
     }
-    if (values.host !== undefined && !["install", "open", "fetch", "ship", "cloud", "team"].includes(cmd)) {
-      throw new ForgeError("--host only goes with install, open, fetch, ship, cloud and team: forge install --host <name>, " +
+    if (values.host !== undefined && !["install", "open", "fetch", "ship", "cloud", "team", "pilot"].includes(cmd)) {
+      throw new ForgeError("--host only goes with install, open, fetch, ship, cloud, team and pilot: forge install --host <name>, " +
         "forge open --host <name>, forge fetch --host <name>, forge ship <task> --host <name>, forge cloud start --host <name>");
     }
+    if (values.fresh && cmd !== "pilot") throw new ForgeError("--fresh only goes with pilot: forge pilot <ticket> --fresh");
     if ((values.title !== undefined || values["body-file"] !== undefined) && cmd !== "relay") {
       throw new ForgeError("--title and --body-file only go with relay: forge relay pr <task> --title <text> --body-file <file>");
     }
@@ -167,7 +173,7 @@ async function main(): Promise<number> {
     if (values["ssh-persist"] !== undefined && cmd !== "install") {
       throw new ForgeError("--ssh-persist only goes with install: forge install --ssh-persist 2h");
     }
-    const laptop = { remote: values.remote, host: values.host, sshPersist: values["ssh-persist"] };
+    const laptop = { remote: values.remote, host: values.host, sshPersist: values["ssh-persist"], fresh: values.fresh === true };
     return await dispatch(ctx, positionals, values.force === true, laptop,
       { title: values.title, bodyFile: values["body-file"], json: values.json, quick: values.quick, repository: values.repository, base: values.base },
       { pid: values.pid, rssKib: values["rss-kib"] });
