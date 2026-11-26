@@ -11,7 +11,8 @@ import { parseConfig } from "../cli/lib/config.ts";
 import type { ApiDeps } from "../cli/lib/api/missions.ts";
 import { Journal } from "../cli/lib/api/journal.ts";
 import { hostSocketPath, serveApi } from "../cli/lib/api/server.ts";
-import { handleMission, MISSION_KEY, parseMissionRequest, QUESTION_KEY } from "../cli/lib/api/missions.ts";
+import { handleMission, MISSION_FILES_DIR, MISSION_KEY, parseMissionRequest, QUESTION_KEY } from "../cli/lib/api/missions.ts";
+import { MISSION_DIR } from "../cli/lib/orchestrator/instruction.ts";
 import { SUMMARY_ALLOWED } from "../cli/lib/api/protocol.ts";
 import { readBranchRecords } from "../cli/lib/branch-records.ts";
 import { socketHost, type HeldMission, type MissionSpec } from "../cli/lib/orchestrator/host.ts";
@@ -702,4 +703,47 @@ test("the two typed lines pass SUMMARY_ALLOWED once their [forge] prefix is remo
     const [line] = sentLines();
     assert.ok(line.startsWith("[forge] ") && SUMMARY_ALLOWED.test(line.slice("[forge] ".length)), line);
   }
+});
+
+// --------------------------------------------------------------- les fichiers de mission (plan 2b)
+
+const FRESH = [absent("refs/remotes/team/agent/T-1.1"), absent("refs/heads/agent/T-1.1")];
+const files = (over: Partial<MissionSpec["files"]> = {}) => ({ spec: null, answers: null, split: null, ...over });
+
+test("the mission files folder is the one the instruction names", () => {
+  assert.equal(MISSION_FILES_DIR, MISSION_DIR);
+});
+
+test("assign with files.spec: the folder is reset as root, spec.md pushed by root in mode 444, no answers.md; the key holds no files", async () => {
+  setup(FRESH);
+  const r = await call(CONTROL, { op: "assign", to: E1, mission: spec({ files: files({ spec: "# The spec" }) }) });
+  assert.deepEqual(r, { ok: true });
+  const calls = joined();
+  const rm = calls.findIndex((c) => c === `incus --project agent-forge exec ${E1} -- rm -rf -- ${MISSION_FILES_DIR}`);
+  const mk = calls.findIndex((c) => c === `incus --project agent-forge exec ${E1} -- mkdir -m 755 -- ${MISSION_FILES_DIR}`);
+  const push = calls.findIndex((c) => c.includes("file push") && c.includes(`${E1}${MISSION_FILES_DIR}/spec.md`));
+  const run = calls.findIndex((c) => c.includes("-- hc run "));
+  assert.ok(rm >= 0 && mk > rm && push > mk && run > push, calls.join("\n"));
+  assert.ok(calls[push].includes("--uid 0 --gid 0 --mode 444"), calls[push]);
+  assert.ok(!calls.some((c) => c.includes("answers.md")));
+  assert.deepEqual(JSON.parse(keys(E1)[MISSION_KEY]), held());
+  assert.ok(!readFileSync(join(home, "api", "journal.jsonl"), "utf8").includes("# The spec"));
+});
+
+test("Review Focus 4: an assign with no file, and a release, empty the folder and push nothing", async () => {
+  setup(FRESH);
+  await call(CONTROL, { op: "assign", to: E1, mission: spec() });
+  assert.ok(joined().some((c) => c.endsWith(`-- rm -rf -- ${MISSION_FILES_DIR}`)));
+  assert.ok(!joined().some((c) => c.includes("file push") && c.includes(MISSION_FILES_DIR)));
+  setup();
+  await call(CONTROL, { op: "release", to: E1 });
+  assert.ok(joined().some((c) => c.endsWith(`-- rm -rf -- ${MISSION_FILES_DIR}`)));
+});
+
+test("a mission file over 262 144 bytes, or holding a secret, is refused", async () => {
+  const over = await call(CONTROL, { op: "assign", to: E1, mission: spec({ files: files({ split: "x".repeat(262_145) }) }) });
+  assert.deepEqual(over, { ok: false, error: "assign: mission.files.split is longer than 262144 bytes" });
+  const secret = await call(CONTROL, { op: "assign", to: E1, mission: spec({ files: files({ answers: "tok-123" }) }) });
+  assert.equal(secret.ok, false);
+  assert.match((secret as { error: string }).error, /mission\.files\.answers holds a secret/);
 });

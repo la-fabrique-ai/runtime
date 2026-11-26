@@ -119,6 +119,8 @@ async function assignCommand(
   const mission = {
     kind: "dev", ticket: subtask.slice(0, Math.max(0, subtask.indexOf("."))), subtask, repository,
     branch: `agent/${subtask}`, base, instruction,
+    // La main de l'humain n'envoie aucun fichier de mission.
+    files: { spec: null, answers: null, split: null },
   };
   await humanAssign(ctx, p, Journal.open(journalPath()), handedOutSecrets(ctx), to, mission);
   ctx.out(`Assigned ${subtask} to ${to} (${repository}, from ${base}).`);

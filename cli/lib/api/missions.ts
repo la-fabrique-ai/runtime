@@ -14,9 +14,9 @@ import type { Context, ExecResult } from "../context.ts";
 import { ForgeError, inTime, mustSucceed } from "../context.ts";
 import { recordBranch } from "../branch-records.ts";
 import { clearMessages, hcArgv, isLive, MESSAGES_DIR, NO_SESSION, sessionState, startSession, stopSession, typeNotice } from "../hc-session.ts";
-import { configGet, configSet, configUnset, execAsAgentArgv, listInstances, pushText } from "../incus.ts";
+import { configGet, configSet, configUnset, execAsAgentArgv, incus, listInstances, pushText } from "../incus.ts";
 import { ensureBareTeamMirror, HOST_GIT_CWD } from "../mirror.ts";
-import type { ExecutorStatus, HeldMission, HostEvent, MissionSpec, SessionState } from "../orchestrator/host.ts";
+import type { ExecutorStatus, HeldMission, HostEvent, MissionFiles, MissionSpec, SessionState } from "../orchestrator/host.ts";
 import { forgeCommand } from "../paths.ts";
 import { CONTROL, projectMembers, repoTeamMirror, type ProjectMember } from "../project.ts";
 import { cloneDir } from "../project-provision.ts";
@@ -106,7 +106,7 @@ function checkBase(base: string, subtask: string): void {
 
 function parseMission(v: unknown, secrets: readonly string[]): MissionSpec {
   if (!isObj(v)) throw new ForgeError("assign: mission must be an object");
-  // `files` : lu par le plan 2b (tâche 4) ; accepté, ignoré d'ici là.
+  // `files` n'est pas une chaîne : il est lu à part (parseFiles).
   unknownFields("assign: mission", v, [...MISSION_FIELDS, "files"]);
   for (const k of MISSION_FIELDS) {
     if (typeof v[k] !== "string") throw new ForgeError(`assign: mission.${k} must be a string`);
@@ -126,8 +126,56 @@ function parseMission(v: unknown, secrets: readonly string[]): MissionSpec {
   checkText(m.instruction, INSTRUCTION_MAX, "instruction", secrets);
   return {
     kind: "dev", ticket: m.ticket, subtask: m.subtask, repository: m.repository, branch: m.branch, base: m.base, instruction: m.instruction,
-    files: { spec: null, answers: null, split: null },
+    files: parseFiles(v.files, secrets),
   };
+}
+
+// Les fichiers de mission : exactement `spec`, `answers` et `split`, chacun
+// null ou un texte d'au plus MISSION_FILE_MAX octets, sans secret.
+const FILE_NAMES = ["spec", "answers", "split"] as const;
+export const MISSION_FILE_MAX = 262_144;
+
+function parseFiles(v: unknown, secrets: readonly string[]): MissionFiles {
+  if (!isObj(v)) throw new ForgeError("assign: mission.files must be an object");
+  unknownFields("assign: mission.files", v, FILE_NAMES);
+  const out: MissionFiles = { spec: null, answers: null, split: null };
+  for (const k of FILE_NAMES) {
+    const f = v[k];
+    if (f === null) continue;
+    if (typeof f !== "string") throw new ForgeError(`assign: mission.files.${k} must be a string or null`);
+    if (Buffer.byteLength(f, "utf8") > MISSION_FILE_MAX) {
+      throw new ForgeError(`assign: mission.files.${k} is longer than ${MISSION_FILE_MAX} bytes`);
+    }
+    if (hasSecret(f, secrets)) throw new ForgeError(`assign: mission.files.${k} holds a secret forge handed out: remove it`);
+    out[k] = f;
+  }
+  return out;
+}
+
+// La copie en lecture seule des fichiers de mission, dans l'exécuteur : un
+// dossier à root (755), chaque fichier à root (444) ; l'agent les lit et ne
+// peut pas les changer (décision 29 : la base reste la vérité). Le même chemin
+// que MISSION_DIR de cli/lib/orchestrator/instruction.ts (un test le vérifie).
+export const MISSION_FILES_DIR = "/home/aiuser/.forge/mission";
+
+// En root, dans le container : le dossier est retiré (quoi qu'il soit, un lien
+// symbolique compris, que `rm` ne suit pas), puis recréé neuf ; `mkdir` sans
+// `-p` échoue si quelque chose a pris sa place entre-temps.
+async function resetMissionFiles(ctx: Context, to: string): Promise<void> {
+  const asRoot = (step: string, argv: string[]) =>
+    mustSucceed(step, inTime(`${step} in ${to}`, INCUS_MS, ctx.exec(incus("exec", to, "--", ...argv), { timeoutMs: INCUS_MS })));
+  await asRoot("remove the mission files", ["rm", "-rf", "--", MISSION_FILES_DIR]);
+  await asRoot("create the mission files folder", ["mkdir", "-m", "755", "--", MISSION_FILES_DIR]);
+}
+
+async function pushMissionFiles(ctx: Context, to: string, files: MissionFiles): Promise<void> {
+  await resetMissionFiles(ctx, to);
+  for (const k of FILE_NAMES) {
+    const text = files[k];
+    if (text === null) continue;
+    await mustSucceed(`push ${k}.md`, inTime(`push ${k}.md to ${to}`, INCUS_MS,
+      pushText(ctx, to, `${MISSION_FILES_DIR}/${k}.md`, text, { uid: 0, gid: 0, mode: "444" }, { timeoutMs: INCUS_MS })));
+  }
 }
 
 function questionId(verb: string, v: unknown): number {
@@ -418,6 +466,8 @@ async function assign(ctx: Context, p: ProjectConfig, to: string, m: MissionSpec
   await mustSucceed("record the mission",
     inTime(`recording the mission of ${to}`, INCUS_MS, configSet(ctx, to, MISSION_KEY, JSON.stringify(heldOf(m)), { timeoutMs: INCUS_MS })));
   try {
+    // Les fichiers de la mission précédente partent, ceux de celle-ci arrivent.
+    await pushMissionFiles(ctx, to, m.files);
     await startSession(ctx, { name: to }, m.subtask, m.instruction, { cwd: cloneDir(m.repository), timeoutMs: INCUS_MS });
   } catch (e) {
     // Une session qui ne démarre pas ne laisse pas l'exécuteur marqué occupé.
@@ -571,6 +621,12 @@ async function release(ctx: Context, to: string): Promise<void> {
   }
   if (!stopped) ctx.err(`WARNING: could not stop ${to}'s session: it stays as it is until the next assign.`);
   await clearMessages(ctx, to, { timeoutMs: INCUS_MS });
+  try {
+    await resetMissionFiles(ctx, to);
+  } catch (e) {
+    if (!(e instanceof ForgeError)) throw e;
+    ctx.err(`WARNING: could not empty ${to}'s mission files: the next assign replaces them.`);
+  }
 }
 
 // Le contrat de `session` (orchestrator/host.ts) : `none` seulement pour un
