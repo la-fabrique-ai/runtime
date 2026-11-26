@@ -11,9 +11,11 @@ export function forgeHome(): string {
 
 // La commande que herdr tape dans un onglet : le chemin par lequel l'utilisateur
 // a lancé forge (exporté par le shim), rendu absolu mais pas résolu — un lien
-// symbolique reste stable d'une release à l'autre. `forge` quand il est absent.
+// symbolique reste stable d'une release à l'autre. Absent (forge lancé sans le
+// shim), le shim de ce checkout ou de cette release, jamais un `forge` nu que le
+// PATH pourrait résoudre vers un autre forge.
 export function forgeCommand(): string {
-  return process.env.FORGE_INVOKED_AS ? resolve(process.env.FORGE_INVOKED_AS) : "forge";
+  return process.env.FORGE_INVOKED_AS ? resolve(process.env.FORGE_INVOKED_AS) : resolve(repoRoot(), "cli", "forge");
 }
 
 // cli/lib/paths.ts → the repository (or release) root is two levels up. The
@@ -92,7 +94,7 @@ function dataDir(): string {
   return join(base, "agent-forge");
 }
 
-// Le journal de l'API entre containers y vit (DX 5, §5.4).
+// Le journal de l'API, les fiches des branches et le verrou des missions y vivent.
 export function apiDataDir(): string {
   return join(dataDir(), "api");
 }

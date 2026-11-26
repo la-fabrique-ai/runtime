@@ -1,13 +1,12 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
 import { ForgeError } from "../cli/lib/context.ts";
-import { installReferenceKit, KIT_MANIFEST } from "../cli/lib/reference-kit.ts";
-import type { Member } from "../cli/lib/team.ts";
+import { installReferenceKit, KIT_MANIFEST, referenceDir, referenceKit } from "../cli/lib/reference-kit.ts";
 
 const realRoot = process.env.FORGE_REPO_DIR;
 afterEach(() => {
@@ -35,16 +34,12 @@ function kitRoot(): string {
   return root;
 }
 
-const DEV: Member = {
-  name: "agent-x", team: "t", role: "dev", index: null, repo: "o/x", capabilities: ["repo"], talkTo: [],
-  strict: false, memory: null, cpu: null, plugins: [], prompt: null, env: null, lfs: false,
-  reference: { skills: ["tdd", "diagnose"], agents: ["scout"], memory: true }, designs: {},
-};
+const DEV = { name: "agent-x", reference: { skills: ["tdd", "diagnose"], agents: ["scout"], memory: true } };
 
 const lines = (c: ReturnType<typeof fakeContext>) => c.calls.map((x) => x.join(" "));
 const removal = (l: string) => l.includes("--user 1001") && l.includes("rm -rf");
 
-test("a reference developer gets its skills and sub-agents, after the old ones are removed", async () => {
+test("a container with a reference kit gets its skills and sub-agents, after the old ones are removed", async () => {
   const root = kitRoot();
   try {
     const c = fakeContext();
@@ -84,7 +79,7 @@ test("an unchanged kit is left alone", async () => {
   }
 });
 
-test("a custom team's member gets nothing", async () => {
+test("a container without a kit (the control) gets nothing", async () => {
   const c = fakeContext();
   assert.equal(await installReferenceKit(c, { ...DEV, reference: null }), false);
   assert.equal(c.calls.length, 0);
@@ -101,4 +96,14 @@ test("a kit file missing from the repository stops before any push", async () =>
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the repository's kits: the Pilot and the executor, every skill and sub-agent they name exists", () => {
+  const roles = JSON.parse(readFileSync(join(referenceDir(), "roles.json"), "utf8")) as Record<string, { skills: string[]; agents: string[] }>;
+  assert.deepEqual(Object.keys(roles).sort(), ["executor", "pilot"]);
+  for (const kit of Object.values(roles)) {
+    for (const s of kit.skills) assert.ok(existsSync(join(referenceDir(), "skills", s, "SKILL.md")), s);
+    for (const a of kit.agents) assert.ok(existsSync(join(referenceDir(), "agents", `${a}.md`)), a);
+  }
+  assert.throws(() => referenceKit("lead"), /no reference kit for role lead \(known: pilot, executor\)/);
 });

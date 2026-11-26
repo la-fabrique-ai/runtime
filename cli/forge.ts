@@ -9,7 +9,6 @@ import { cmdDelete } from "./lib/commands/delete.ts";
 import { cmdList } from "./lib/commands/list.ts";
 import { cmdEgress } from "./lib/commands/egress.ts";
 import { cmdImage } from "./lib/commands/image.ts";
-import { cmdTaskBase } from "./lib/commands/task-base.ts";
 import { cmdUploadPack } from "./lib/commands/upload-pack.ts";
 import { cmdCompletion } from "./lib/commands/completion.ts";
 import { cmdCloud } from "./lib/commands/cloud.ts";
@@ -21,7 +20,7 @@ import { cmdRelay } from "./lib/commands/relay.ts";
 import { cmdApi } from "./lib/commands/api.ts";
 import { cmdNotify } from "./lib/commands/notify.ts";
 import { cmdTeam } from "./lib/commands/team.ts";
-import { cmdAnswer, cmdTeamLaptop } from "./lib/commands/team-laptop.ts";
+import { cmdTeamLaptop } from "./lib/commands/team-laptop.ts";
 import { cmdHcVia } from "./lib/commands/hc-via.ts";
 import { cmdHcExec } from "./lib/commands/hc-exec.ts";
 import { currentSide, requireSide } from "./lib/side.ts";
@@ -40,19 +39,14 @@ On the forge host:
   egress log [<owner/repo>]         Show the proxy's recent requests (old lines may name the
                                     wrong container: addresses are reused)
   upload-pack <container> [<path>]  Serve a container's repository to git fetch (see the README, "Get the work back")
-  task-base <container> [<task>]    Print the ref a task started from (every task, tab-separated, without <task>)
-  team converge [<team>]            Create or start the agents of the configured teams (and the Pilot), refresh the team mirror
-  team assign <container> [<task>] [--from <task>]
-                                    Give a team member a task, the instruction read from stdin (a fresh session);
-                                    --from starts its branch from another task of the same developer
-  team release <container>          Free a team member
-  team status [--json] [--quick]    Each member's task, session and wait, the human's questions, the origin mirror's age
-                                    (refreshes the team mirror first, unless --quick)
-  team inbox --json                 Every installed host's questions and counts, as one line of JSON (read by the Herdr App mod)
-  team question <id> [--json] [--host <name>]
-                                    A question's summary and detail (the Inbox lists them)
-  team watch [--host <name>]        The team, its questions and the origin mirror in this terminal (from the Mac)
-  team sync <team>                  Refresh the team's origin mirror (needs the forwarded SSH agent), then the team mirror
+  team converge                     Create or update the project's containers (the control container and its
+                                    orchestrator, the executors and their clones), the repositories' mirrors
+  team status [--json]              Each container: its mission, its session, the orchestrator's state
+  team assign <executor> <sub-task> [--repository <name>] [--base <ref>]
+                                    The human's hand: give an executor a sub-task, the instruction read from stdin
+                                    (a fresh session), without the orchestrator
+  team release <executor>           Free an executor (its branch and clone stay)
+  team sync <repository>            Refresh a repository's origin mirror (needs the forwarded SSH agent)
   relay publish [<task>]            On the contributor's dev VM: publish agent/<task> through the relay
   relay pr <task> --title <text> --body-file <file|->
                                     Open the task's pull request (the body from a file, or stdin with -)
@@ -62,9 +56,9 @@ On the forge host:
   relay read <number>               Read an issue or pull request thread (trusted accounts only)
   relay ci <pr> [<job-id>]          List a pull request's CI runs, or print one job's log
   notify <container> memory-kill --pid <n> --rss-kib <n>
-                                    Tell a team member's session that the memory watchdog killed one of its
+                                    Tell an executor's session that the memory watchdog killed one of its
                                     processes (the watchdog runs it; the agents have no such verb)
-  api serve                         Answer the team containers' requests (the forge-api user service runs it)
+  api serve                         Answer the project containers' requests (the forge-api user service runs it)
   image build                       Build the agent-base image (Ansible, through Incus)
   image commit                      Print the commit agent-base was built from (nothing if no image)
   completion bash                   Print a bash completion function (eval it in ~/.bashrc)
@@ -84,13 +78,10 @@ On your laptop:
   cloud rebuild-relay [--host <name>]
                                     Replace the relay with a new one: a new bot token, push key and
                                     signing key
-  fetch [--host <name>]             Fetch the agents' branches into this clone and list the tasks
-  team up [<team>] [--host <name>]  Converge the teams on the host, then add each agent as a Herdr App machine
+  fetch [--host <name>]             Fetch the agents' branches into this clone and list the sub-tasks
+  team up [--host <name>]           Converge the project on the host, then add each container as a Herdr App machine
                                     (team assign, release, status and sync also work from here, over SSH)
-  answer <id> "<summary>" [--host <name>] [--json]
-                                    Answer an agent's question (see forge team status): the summary is typed to the
-                                    agent, a body piped on stdin goes in a file it reads (with --json, for the Herdr
-                                    App inbox: stdin is not read, a longer text is split, one line of JSON back)
+  team summary --json               Every installed host's executors, as one line of JSON (read by the Herdr App bar)
   ship <task> [--host <name>]       Re-sign a task's new commits, push agent/<task> and open its PR
                                     (a stacked task ships with the tasks under it, bottom first)
 
@@ -99,7 +90,7 @@ With no terminal on stdin (scripts, CI) nothing is asked and the command
 exits with this usage instead.`;
 
 type LaptopOptions = { remote?: string; host?: string; sshPersist?: string };
-type RelayArgs = { title?: string; bodyFile?: string; json?: boolean; quick?: boolean; from?: string };
+type RelayArgs = { title?: string; bodyFile?: string; json?: boolean; quick?: boolean; repository?: string; base?: string };
 type NoticeArgs = { pid?: string; rssKib?: string };
 
 function dispatch(
@@ -112,13 +103,11 @@ function dispatch(
     case "delete": return cmdDelete(ctx, a, force);
     case "list": return cmdList(ctx);
     case "egress": return cmdEgress(ctx, a, b);
-    case "upload-pack": return cmdUploadPack(ctx, a);
-    case "task-base": return cmdTaskBase(ctx, a, b);
+    case "upload-pack": return cmdUploadPack(ctx, a, undefined, b);
     case "relay": return cmdRelay(ctx, a, positionals.slice(2), relay);
     case "team": return currentSide() === "laptop"
-      ? cmdTeamLaptop(ctx, positionals.slice(1), { host: laptop.host, json: relay.json, quick: relay.quick, from: relay.from })
-      : cmdTeam(ctx, positionals.slice(1), { json: relay.json, quick: relay.quick, from: relay.from });
-    case "answer": return cmdAnswer(ctx, a, b, { host: laptop.host, json: relay.json });
+      ? cmdTeamLaptop(ctx, positionals.slice(1), { host: laptop.host, json: relay.json, quick: relay.quick, repository: relay.repository, base: relay.base })
+      : cmdTeam(ctx, positionals.slice(1), { json: relay.json, quick: relay.quick, repository: relay.repository, base: relay.base });
     case "api": return cmdApi(ctx, a);
     case "notify": return cmdNotify(ctx, a, b, notice);
     case "hc-via": return cmdHcVia(ctx, a, b, positionals[3]);
@@ -143,7 +132,7 @@ async function main(): Promise<number> {
         force: { type: "boolean" },
         remote: { type: "string" }, host: { type: "string" }, "ssh-persist": { type: "string" },
         title: { type: "string" }, "body-file": { type: "string" },
-        json: { type: "boolean" }, quick: { type: "boolean" }, from: { type: "string" },
+        json: { type: "boolean" }, quick: { type: "boolean" }, repository: { type: "string" }, base: { type: "string" },
         pid: { type: "string" }, "rss-kib": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
@@ -160,18 +149,18 @@ async function main(): Promise<number> {
     if (values.remote !== undefined && cmd !== "install") {
       throw new ForgeError("--remote only goes with install: forge install --remote <address>");
     }
-    if (values.host !== undefined && !["install", "open", "fetch", "ship", "cloud", "team", "answer"].includes(cmd)) {
-      throw new ForgeError("--host only goes with install, open, fetch, ship, cloud, team and answer: forge install --host <name>, " +
+    if (values.host !== undefined && !["install", "open", "fetch", "ship", "cloud", "team"].includes(cmd)) {
+      throw new ForgeError("--host only goes with install, open, fetch, ship, cloud and team: forge install --host <name>, " +
         "forge open --host <name>, forge fetch --host <name>, forge ship <task> --host <name>, forge cloud start --host <name>");
     }
     if ((values.title !== undefined || values["body-file"] !== undefined) && cmd !== "relay") {
       throw new ForgeError("--title and --body-file only go with relay: forge relay pr <task> --title <text> --body-file <file>");
     }
     if (values.quick && cmd !== "team") throw new ForgeError("--quick only goes with team status: forge team status --quick");
-    if (values.from !== undefined && cmd !== "team") {
-      throw new ForgeError("--from only goes with team assign: forge team assign <container> <task> --from <task>");
+    if ((values.repository !== undefined || values.base !== undefined) && cmd !== "team") {
+      throw new ForgeError("--repository and --base only go with team assign: forge team assign <executor> <sub-task> --repository <name>");
     }
-    if (values.json && cmd !== "team" && cmd !== "answer") throw new ForgeError("--json only goes with team and answer: forge team status --json");
+    if (values.json && cmd !== "team") throw new ForgeError("--json only goes with team: forge team status --json");
     if ((values.pid !== undefined || values["rss-kib"] !== undefined) && cmd !== "notify") {
       throw new ForgeError("--pid and --rss-kib only go with notify");
     }
@@ -180,7 +169,7 @@ async function main(): Promise<number> {
     }
     const laptop = { remote: values.remote, host: values.host, sshPersist: values["ssh-persist"] };
     return await dispatch(ctx, positionals, values.force === true, laptop,
-      { title: values.title, bodyFile: values["body-file"], json: values.json, quick: values.quick, from: values.from },
+      { title: values.title, bodyFile: values["body-file"], json: values.json, quick: values.quick, repository: values.repository, base: values.base },
       { pid: values.pid, rssKib: values["rss-kib"] });
   } catch (e) {
     // Le préfixe "Error: " est ajouté ici, une seule fois : une ForgeError ne

@@ -27,8 +27,8 @@ export type Config = {
   // cgroup of container <c> in project <p> "lxc.payload.<p>_<c>".
   cgroupRoot: string;
   prefix: string;
-  // The start of the container names in that project: the team containers are
-  // all named agent-<team>-… (and agent-pilot); forge-proxy is not one.
+  // The start of the container names in that project: the project's containers
+  // are all named agent-… (agent-control, agent-executor-<n>); forge-proxy is not one.
   containerPrefix: string;
   procRoot: string;
   // `full avg10`, in percent, to reach and hold for `seconds`.

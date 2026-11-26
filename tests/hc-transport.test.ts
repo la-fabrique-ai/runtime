@@ -14,7 +14,7 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "forge-hc-transport-"));
   mkdirSync(join(home, "agent-forge"), { recursive: true });
   writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo"] } } } },
+    project: { repositories: { web: { repo: "o/web" } }, executors: { count: 1 } },
   }));
   process.env.XDG_CONFIG_HOME = home;
 });
@@ -40,36 +40,36 @@ test("hc-via refuses an alias that would be an ssh option, and a name that is no
 
 test("hc-exec serves a declared container: su - aiuser -c <line>, with hc's own variables, non-interactive", async () => {
   const ctx = fakeContext();
-  await cmdHcExec(ctx, "agent-web-dev-1", "hc get agent");
+  await cmdHcExec(ctx, "agent-executor-1", "hc get agent");
   assert.deepEqual(ctx.attachCalls[0].argv, [
-    "incus", "--project", "agent-forge", "exec", "-T", "agent-web-dev-1", "--", "su", "-", "aiuser", "-c",
+    "incus", "--project", "agent-forge", "exec", "-T", "agent-executor-1", "--", "su", "-", "aiuser", "-c",
     "export XDG_RUNTIME_DIR='/run/user/1001' DBUS_SESSION_BUS_ADDRESS='unix:path=/run/user/1001/bus'; hc get agent",
   ]);
 });
 
 test("hc-exec gives hc the variables forge's own hcArgv gives it: one core, not two", async () => {
   const ctx = fakeContext();
-  await cmdHcExec(ctx, "agent-web-dev-1", "hc get agent");
+  await cmdHcExec(ctx, "agent-executor-1", "hc get agent");
   const script = ctx.attachCalls[0].argv.at(-1)!;
-  const env = hcArgv("agent-web-dev-1", []).filter((a) => /^(XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS)=/.test(a));
+  const env = hcArgv("agent-executor-1", []).filter((a) => /^(XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS)=/.test(a));
   assert.equal(env.length, 2);
   for (const pair of env) assert.ok(script.includes(pair.replace("=", "='") + "'"), `${pair} not in ${script}`);
 });
 
 test("hc-exec refuses a container in preparation and one without /run/user/1001, before attaching anything", async () => {
   const fake = FakeIncus.withRuntime();
-  fake.addInstance("agent-forge", "agent-web-dev-1", { status: "Running", config: { "user.forge.provisioning": "o/web" } });
+  fake.addInstance("agent-forge", "agent-executor-1", { status: "Running", config: { "user.forge.provisioning": "o/web" } });
   const preparing = fakeContext({ incus: fake });
-  await assert.rejects(() => cmdHcExec(preparing, "agent-web-dev-1", "hc get agent"), /still being provisioned/);
+  await assert.rejects(() => cmdHcExec(preparing, "agent-executor-1", "hc get agent"), /still being provisioned/);
   assert.deepEqual(preparing.attachCalls, []);
 
   const booting = fakeContext({ rules: [{ match: "test -d /run/user/1001", code: 1 }] });
-  await assert.rejects(() => cmdHcExec(booting, "agent-web-dev-1", "hc get agent"), /not ready: \/run\/user\/1001 does not exist/);
+  await assert.rejects(() => cmdHcExec(booting, "agent-executor-1", "hc get agent"), /not ready: \/run\/user\/1001 does not exist/);
   assert.deepEqual(booting.attachCalls, []);
 });
 
 test("hc-exec refuses an undeclared or malformed container before any incus call", async () => {
-  for (const name of ["agent-o-r", "agent-web-dev-1;id", "agent-web-dev-9"]) {
+  for (const name of ["agent-o-r", "agent-executor-1;id", "agent-executor-9"]) {
     const ctx = fakeContext();
     await assert.rejects(() => cmdHcExec(ctx, name, "hc ls"));
     assert.deepEqual(ctx.calls, []);

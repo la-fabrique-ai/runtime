@@ -125,7 +125,7 @@ test("without --skip-smudge, the same worktree add fails (control)", { skip }, (
   assert.throws(() => addTask(ws), /smudge filter lfs failed/);
 });
 
-// The read mode, in forge's order for `lfs: true` (team-provision.ts): the
+// The read mode, in forge's order for `lfs: true` (project-provision.ts): the
 // filters without the skip, the clone with the mirror's LFS settings (`git clone
 // -c` writes them in the new repository before the checkout), then the hooks.
 // The mirror's path stands in for /forge/origin.git.

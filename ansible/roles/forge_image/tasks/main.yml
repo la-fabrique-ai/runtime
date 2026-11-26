@@ -32,6 +32,9 @@
 - name: Create aiuser and its directories
   ansible.builtin.import_tasks: aiuser.yml
 
+- name: Create the orchestrator's user
+  ansible.builtin.import_tasks: orchestrator.yml
+
 - name: Set up rootless Docker for aiuser
   ansible.builtin.import_tasks: rootless_docker.yml
 

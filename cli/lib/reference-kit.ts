@@ -4,13 +4,26 @@ import { dirname, join } from "node:path";
 import type { Context } from "./context.ts";
 import { ForgeError, mustSucceed } from "./context.ts";
 import { execAsAgentArgv, pullText, pushText } from "./incus.ts";
-import { referenceDir } from "./team.ts";
-import type { Member } from "./team.ts";
+import { repoRoot } from "./paths.ts";
 
 export const SKILLS_DIR = "/home/aiuser/.claude/skills";
 export const AGENTS_DIR = "/home/aiuser/.claude/agents";
 // Le manifeste vit dans SKILLS_DIR : il disparaît avec les skills qu'il décrit.
 export const KIT_MANIFEST = "/home/aiuser/.claude/skills/.forge-kit";
+
+// Ce qu'un rôle de référence reçoit en plus de son prompt (teams/reference/roles.json).
+export type ReferenceKit = { skills: string[]; agents: string[]; memory: boolean };
+
+// Lu à l'appel, pas au chargement : les tests pointent FORGE_REPO_DIR ailleurs.
+export function referenceDir(): string {
+  return join(repoRoot(), "teams", "reference");
+}
+
+export function referenceKit(role: string): ReferenceKit {
+  const roles = JSON.parse(readFileSync(join(referenceDir(), "roles.json"), "utf8")) as Record<string, ReferenceKit>;
+  if (!roles[role]) throw new ForgeError(`no reference kit for role ${role} (known: ${Object.keys(roles).join(", ")})`);
+  return roles[role];
+}
 
 type KitFile = { rel: string; dest: string; content: string };
 
@@ -23,9 +36,9 @@ function readKitFile(rel: string, dest: string): KitFile {
   }
 }
 
-// Pose les skills et les sous-agents d'un membre de l'équipe de référence.
+// Pose les skills et les sous-agents d'un container qui a un kit de référence.
 // Rend vrai quand il a poussé (une session lancée ne relit pas ses skills).
-export async function installReferenceKit(ctx: Context, m: Member): Promise<boolean> {
+export async function installReferenceKit(ctx: Context, m: { name: string; reference: ReferenceKit | null }): Promise<boolean> {
   if (m.reference === null) return false;
   // Tout est lu avant le moindre appel : un fichier manquant n'efface rien.
   const files = [

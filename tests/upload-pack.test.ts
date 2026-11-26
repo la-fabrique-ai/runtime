@@ -1,4 +1,7 @@
 import { test } from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { fakeContext } from "./lib/fake-context.ts";
 import { assertNoHostGitIn } from "./lib/host-git.ts";
@@ -78,4 +81,59 @@ test("no host git runs", async () => {
   await cmdUploadPack(c, "agent-x", "version=2");
   assertNoHostGitIn(c.calls, workspacesDir());
   assert.ok(!c.calls.some((a) => a[0] === "git"));
+});
+
+// Un exécuteur de projet (sans user.forge.repo) : le chemin que git ajoute nomme
+// le clone servi, /workspace/<dépôt>, et rien d'autre.
+const executor = [
+  { match: "agent-x user.forge.repo", stdout: "" },
+  { match: "agent-x user.forge.role", stdout: "executor\n" },
+  { match: "incus --project agent-forge list", stdout: JSON.stringify([{ name: "agent-x", status: "Running" }]) },
+];
+
+test("an executor serves the clone named by the path, /workspace/<declared repository> only", async () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-upload-pack-"));
+  mkdirSync(join(home, ".config", "agent-forge"), { recursive: true });
+  writeFileSync(join(home, ".config", "agent-forge", "config.json"), JSON.stringify({
+    project: { repositories: { web: { repo: "o/web" } }, executors: { count: 1 }, tickets: { base: "~/tickets" } },
+  }));
+  process.env.FORGE_HOME = home;
+  // Les runners de CI définissent XDG_CONFIG_HOME, qui l'emporterait sur FORGE_HOME.
+  const xdg = process.env.XDG_CONFIG_HOME;
+  delete process.env.XDG_CONFIG_HOME;
+  try {
+    await executorServes();
+  } finally {
+    if (xdg !== undefined) process.env.XDG_CONFIG_HOME = xdg;
+    delete process.env.FORGE_HOME;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+async function executorServes(): Promise<void> {
+  const c = fakeContext({ rules: executor });
+  assert.equal(await cmdUploadPack(c, "agent-x", undefined, "/workspace/web"), 0);
+  const attach = c.calls.find((a) => a.includes("git-upload-pack"))!;
+  assert.deepEqual(attach.slice(attach.indexOf("--cwd"), attach.indexOf("--cwd") + 2), ["--cwd", "/workspace/web"]);
+  assert.deepEqual(attach.slice(-2), ["git-upload-pack", "/workspace/web"]);
+  for (const bad of [undefined, "/workspace", "/workspace/../etc", "/workspace/web/x", "/home/aiuser", "/workspace/api", "/workspace/web-", "/workspace/a--b"]) {
+    await assert.rejects(() => cmdUploadPack(fakeContext({ rules: executor }), "agent-x", undefined, bad), /\/workspace\/<repository>/, String(bad));
+  }
+}
+
+test("without a readable project, only the path form counts: a trailing or double dash is refused", async () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-upload-pack-"));
+  process.env.FORGE_HOME = home;
+  const xdg = process.env.XDG_CONFIG_HOME;
+  delete process.env.XDG_CONFIG_HOME;
+  try {
+    assert.equal(await cmdUploadPack(fakeContext({ rules: executor }), "agent-x", undefined, "/workspace/web-2"), 0);
+    for (const bad of ["/workspace/web-", "/workspace/a--b"]) {
+      await assert.rejects(() => cmdUploadPack(fakeContext({ rules: executor }), "agent-x", undefined, bad), /\/workspace\/<repository>/, bad);
+    }
+  } finally {
+    if (xdg !== undefined) process.env.XDG_CONFIG_HOME = xdg;
+    delete process.env.FORGE_HOME;
+    rmSync(home, { recursive: true, force: true });
+  }
 });

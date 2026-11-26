@@ -358,9 +358,9 @@ Linux, it also needs QEMU and a writable `/dev/kvm`: be in the `kvm` group.
 A container at its memory limit does not always get an OOM kill: the kernel
 frees the file pages of its own programs, which are read back from disk at
 once, and the container thrashes for hours (#126). `roles/forge_memory_watchdog`
-installs `forge-memory-watchdog.service`, which watches the cgroups of the team
-containers (`lxc.payload.agent-forge_agent-*`: every member is named
-`agent-<team>-…`, the Pilot `agent-pilot`; `forge-proxy` is never watched) and,
+installs `forge-memory-watchdog.service`, which watches the cgroups of the project's
+containers (`lxc.payload.agent-forge_agent-*`: the control container is named
+`agent-control`, the executors `agent-executor-<n>`; `forge-proxy` is never watched) and,
 when `memory.pressure`'s `full avg10` stays at or above a threshold for a
 while, kills the container's process with the biggest RSS. It spares the
 container's PID 1 and `claude`, only picks the forge user's own processes, and

@@ -72,6 +72,25 @@
     fail_msg: "aiuser is {{ forge_image_aiuser_ids.results | map(attribute='stdout') | join(':') }}"
     quiet: true
 
+- name: Read the orchestrator's passwd entry, its UID and its groups
+  ansible.builtin.command:
+    cmd: "{{ item }}"
+  loop:
+    - getent passwd {{ forge_image_orch_user }}
+    - id -G {{ forge_image_orch_user }}
+    - which setfacl
+  register: forge_image_orch_checks
+  changed_when: false
+
+- name: Check the orchestrator's user (own UID, member of aiuser's group, no login) and setfacl
+  ansible.builtin.assert:
+    that:
+      - forge_image_orch_checks.results[0].stdout.split(':')[2] == (forge_image_orch_uid | string)
+      - forge_image_orch_checks.results[0].stdout.split(':')[6] == '/usr/sbin/nologin'
+      - (forge_image_aiuser_uid | string) in forge_image_orch_checks.results[1].stdout.split()
+    fail_msg: "{{ forge_image_orch_user }}: {{ forge_image_orch_checks.results[0].stdout }} / groups {{ forge_image_orch_checks.results[1].stdout }}"
+    quiet: true
+
 - name: List the accounts whose shell is a login shell
   ansible.builtin.command:
     cmd: >-

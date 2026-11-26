@@ -4,20 +4,21 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
-import type { ExecOptions } from "../cli/lib/context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
-import { cmdTeam, type TeamStatus } from "../cli/lib/commands/team.ts";
+import { cmdTeam } from "../cli/lib/commands/team.ts";
 
 let home: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "forge-team-cmd-"));
   mkdirSync(join(home, "agent-forge"), { recursive: true });
   writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    teams: { web: { repo: "o/web", roles: { dev: { count: 2, capabilities: ["repo", "publish"] } } } },
+    project: { repositories: { web: { repo: "o/web" }, api: { repo: "o/API" } }, executors: { count: 2 } },
   }));
   mkdirSync(join(home, ".config", "agent-forge"), { recursive: true });
   writeFileSync(join(home, ".config", "agent-forge", "claude-token"), "tok-test\n");
   process.env.XDG_CONFIG_HOME = home;
+  // Un XDG_DATA_HOME de la machine l'emporterait sur FORGE_HOME.
+  delete process.env.XDG_DATA_HOME;
   process.env.FORGE_HOME = home;
   process.env.FORGE_REPO_DIR = process.cwd();
   process.env.FORGE_WORKSPACES = join(home, "workspaces");
@@ -34,448 +35,250 @@ const RULES: ExecRule[] = [
   { match: "forge-hook-probe-deny", code: 2, stderr: "BLOCKED.\n" },
 ];
 
-function setup() {
-  const fake = FakeIncus.withRuntime();
-  fake.addInstance("agent-forge", "agent-web-dev-1", { status: "Running" });
-  const ctx = fakeContext({ incus: fake, rules: RULES });
-  return { fake, ctx };
+// ---------------------------------------------------------------- un projet (forge à tickets)
+
+const PROJECT = { project: { repositories: { web: { repo: "o/web" }, api: { repo: "o/API" } }, executors: { count: 2 } } };
+// Aucun clone (ni donc de remote team) n'existe encore dans un exécuteur neuf.
+const NO_CLONE: ExecRule[] = [{ match: "-- test -d /workspace/", code: 1 }, { match: "remote get-url team", code: 2 }];
+
+function project(fake = FakeIncus.withRuntime(), rules: ExecRule[] = []) {
+  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify(PROJECT));
+  return { fake, ctx: fakeContext({ incus: fake, rules: [...rules, ...RULES] }) };
 }
 
-test("assign reads the instruction from stdin and gives the task on behalf of the human", async () => {
-  const { fake, ctx } = setup();
-  const code = await cmdTeam(ctx, ["assign", "agent-web-dev-1", "fix-login"], { stdin: async () => "Corrige le login\n" });
-  assert.equal(code, 0);
-  const keys = fake.instances.get("agent-forge")!.get("agent-web-dev-1")!.config;
-  assert.deepEqual([keys["user.forge.task"], keys["user.forge.assigned_by"]], ["fix-login", "human"]);
-  assert.equal(fake.files.get("agent-forge/agent-web-dev-1/home/aiuser/.forge/instruction.md")!.content,
-    "[forge] task fix-login from human\n\nCorrige le login");
-});
-
-test("assign --from starts the task from another task of the same developer; --from goes with assign only", async () => {
-  const { fake, ctx } = setup();
-  const keys = fake.instances.get("agent-forge")!.get("agent-web-dev-1")!.config;
-  keys["user.forge.base.fix-login"] = "origin/main";
-  await cmdTeam(ctx, ["assign", "agent-web-dev-1", "use-login"], { stdin: async () => "Continue\n", from: "fix-login" });
-  assert.equal(keys["user.forge.base.use-login"], "agent/fix-login");
-  await assert.rejects(() => cmdTeam(ctx, ["status"], { from: "fix-login" }), /--from only goes with assign/);
-});
-
-test("an empty instruction is refused before any Incus call", async () => {
-  const { ctx } = setup();
-  await assert.rejects(() => cmdTeam(ctx, ["assign", "agent-web-dev-1", "fix-login"], { stdin: async () => "  \n" }), /instruction is empty/);
-  assert.deepEqual(ctx.calls, []);
-});
-
-test("converge launches only the missing members and reports a stray one without deleting it", async () => {
-  const { fake, ctx } = setup();
-  fake.addInstance("agent-forge", "agent-web-dev-9", { status: "Stopped", config: { "user.forge.team": "web" } });
-  await cmdTeam(ctx, ["converge"]);
-  const launches = ctx.calls.filter((c) => c.includes("launch")).map((c) => c[c.indexOf("launch") + 2]);
-  assert.deepEqual(launches, ["agent-web-dev-2"]);
-  assert.ok(ctx.out_lines.some((l) => l.startsWith("agent-web-dev-9") && l.includes("not in the config, left as is")), ctx.out_lines.join("\n"));
-  assert.ok(fake.instances.get("agent-forge")!.has("agent-web-dev-9"));
-  assert.ok(!ctx.calls.some((c) => c.includes("delete")));
-});
-
-// Sorti, ou un terminal que hc a gardé et relancé en shell (redémarrage de la VM).
-const DEAD_PILOT: [string, string][] = [
-  ["it has exited", '{"state":"finished","reason":"exited","exit_code":1,"status":null}'],
-  ["hc kept its terminal as a shell", '{"argv":["/bin/bash"],"keep":true,"state":"live","status":null}'],
-];
-for (const [why, dead] of DEAD_PILOT) test(`converge starts the pilot's session again when ${why}`, async () => {
-  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    pilot: { capabilities: ["assign"], talkTo: ["web"] },
-    teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo", "publish"] } } } },
-  }));
-  const fake = FakeIncus.withRuntime();
-  fake.addInstance("agent-forge", "agent-pilot", { status: "Running" });
-  fake.addInstance("agent-forge", "agent-web-dev-1", { status: "Running" });
-  // La session du pilote est morte jusqu'au `hc run` qui la relance, puis vivante.
-  const base = fakeContext({ incus: fake, rules: RULES });
-  let ran = false;
-  const ctx = { ...base, exec: async (argv: string[], o?: ExecOptions) => {
-    const line = argv.join(" ");
-    if (line.includes("agent-pilot") && line.endsWith("-- hc get agent")) {
-      return { code: 0, stderr: "", stdout: ran ? '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}'
-        : dead };
-    }
-    if (line.includes("agent-pilot") && line.includes("-- hc run ")) ran = true;
-    return base.exec(argv, o);
-  } };
-  await cmdTeam(ctx, ["converge"]);
-  const runs = base.calls.map((c) => c.join(" ")).filter((c) => c.includes("hc run"));
-  assert.equal(runs.length, 1, runs.join("\n"));
-  assert.ok(runs[0].includes("agent-pilot") && runs[0].includes("--forge-task agent-pilot-session"), runs[0]);
-  assert.ok(base.out_lines.includes("Started agent-pilot's session."), base.out_lines.join("\n"));
-});
-
-test("converge starts the session of a pilot it has just created", async () => {
-  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    pilot: { capabilities: ["assign"], talkTo: ["web"] },
-    teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo", "publish"] } } } },
-  }));
-  const fake = FakeIncus.withRuntime();
-  fake.addInstance("agent-forge", "agent-web-dev-1", { status: "Running" });
-  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "-- hc get agent", code: 1 }] });
-  await cmdTeam(ctx, ["converge"]);
-  const calls = ctx.calls.map((c) => c.join(" "));
-  const launch = calls.findIndex((c) => c.includes("launch") && c.includes("agent-pilot"));
-  const run = calls.findIndex((c) => c.includes("hc run") && c.includes("--forge-task agent-pilot-session"));
-  assert.ok(launch >= 0 && run > launch, calls.join("\n"));
-});
-
-const lead = "agent-web-lead";
-const LIVE_IDLE: ExecRule = { match: "-- hc get agent", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}' };
-
-// Une question ouverte du Lead au journal, comme `forge-team ask` la laisse.
-function writeJournal(...lines: object[]): void {
-  mkdirSync(join(home, ".local", "share", "agent-forge", "api"), { recursive: true });
-  writeFileSync(join(home, ".local", "share", "agent-forge", "api", "journal.jsonl"), lines.map((l) => `${JSON.stringify(l)}\n`).join(""));
-}
-const ASK = { id: 7, time: new Date(Date.now() - 120_000).toISOString(), caller: lead, op: "ask-human", to: null, task: null, outcome: "ok", error: null, summary: "Quel séparateur ?", text: null };
-
-test("status --json prints one TeamStatus object and nothing else on stdout", async () => {
-  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    teams: { web: { repo: "o/web", roles: { lead: { capabilities: ["repo", "ask-human"] }, dev: { count: 1, capabilities: ["repo", "publish"] } } } },
-  }));
-  writeJournal(ASK);
-  const fake = FakeIncus.withRuntime();
-  fake.addInstance("agent-forge", lead, { status: "Running", config: { "user.forge.task": "fix", "user.forge.assigned_by": "human" } });
-  const ctx = fakeContext({ incus: fake, rules: [...RULES, LIVE_IDLE] });
-  await cmdTeam(ctx, ["status"], { json: true });
-  assert.equal(ctx.out_lines.length, 1);
-  const s = JSON.parse(ctx.out_lines[0]) as TeamStatus;
-  assert.deepEqual(s.members.map((m) => [m.name, m.present, m.task, m.assignedBy, m.session, m.waitingOn]), [
-    [lead, true, "fix", "human", "idle", "human"],
-    ["agent-web-dev-1", false, null, null, "none", null],
-  ]);
-  assert.deepEqual(s.inbox.map((q) => [q.id, q.from, q.summary]), [[7, lead, "Quel séparateur ?"]]);
-  assert.deepEqual(s.mirrors, [{ team: "web", originAgeSeconds: null }]);
-});
-
-test("status: a member whose session is over waits on no one; a free one whose session lives still waits", async () => {
-  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    teams: { web: { repo: "o/web", roles: { lead: { capabilities: ["repo", "ask-human"] } } } },
-  }));
-  writeJournal(ASK);
-  const fake = FakeIncus.withRuntime();
-  fake.addInstance("agent-forge", lead, { status: "Running" });
-  const wait = async (session: ExecRule) => {
-    const ctx = fakeContext({ incus: fake, rules: [...RULES, session] });
-    await cmdTeam(ctx, ["status"], { json: true, quick: true });
-    const [m] = (JSON.parse(ctx.out_lines[0]) as TeamStatus).members;
-    return [m.task, m.session, m.waitingOn];
-  };
-  assert.deepEqual(await wait(LIVE_IDLE), [null, "idle", "human"]);
-  assert.deepEqual(await wait({ match: "-- hc get agent", stdout: '{"state":"finished","exit_code":0,"status":null}' }), [null, "exited", null]);
-});
-
-test("status --quick refreshes no mirror; without it the team mirror is refreshed", async () => {
-  const quick = setup();
-  await cmdTeam(quick.ctx, ["status"], { json: true, quick: true });
-  assert.ok(!quick.ctx.calls.some((c) => c[0] === "git"), quick.ctx.calls.map((c) => c.join(" ")).join("\n"));
-  const full = setup();
-  await cmdTeam(full.ctx, ["status"], { json: true });
-  assert.ok(full.ctx.calls.some((c) => c[0] === "git"), "the team mirror is refreshed (created) as before");
-});
-
-test("the text status has a WAITING column, the INBOX and the origin mirror's age; a control character in a summary is dropped", async () => {
-  writeJournal({ ...ASK, summary: "Quel\u001b[2J séparateur ?" });
-  const { ctx } = setup();
-  await cmdTeam(ctx, ["status"], { quick: true });
-  assert.match(ctx.out_lines[0], /^NAME\s+ROLE\s+TASK\s+SESSION\s+WAITING$/);
-  assert.ok(ctx.out_lines.includes("INBOX"));
-  assert.ok(ctx.out_lines.some((l) => l === `#7 ${lead} 2 min: Quel[2J séparateur ?`), ctx.out_lines.join("\n"));
-  assert.ok(ctx.out_lines.some((l) => l === "web: origin mirror never synced"));
-  assert.ok(!ctx.out_lines.join("\n").includes("\u001b"));
-});
-
-test("for-repo prints the team that holds the repository, and nothing (exit 1) for another", async () => {
-  const { ctx } = setup();
-  assert.equal(await cmdTeam(ctx, ["for-repo", "o/web"]), 0);
-  assert.deepEqual(ctx.out_lines, ["web"]);
-  const none = setup();
-  assert.equal(await cmdTeam(none.ctx, ["for-repo", "o/none"]), 1);
-  assert.deepEqual(none.ctx.out_lines, []);
-});
-
-test("task-base prints one sorted <task><TAB><base> line per owned task, dropping an unsafe ref", async () => {
-  const { fake, ctx } = setup();
-  const keys = (n: string) => fake.instances.get("agent-forge")!.get(n)!.config;
-  Object.assign(keys("agent-web-dev-1"), { "user.forge.base.fix-login": "origin/main" });
-  fake.addInstance("agent-forge", "agent-web-dev-2", {
-    status: "Running", config: { "user.forge.base.export-csv": "origin/main", "user.forge.base.bad": "--upload-pack=x" },
-  });
-  assert.equal(await cmdTeam(ctx, ["task-base", "web"]), 0);
-  assert.deepEqual(ctx.out_lines, ["export-csv\torigin/main", "fix-login\torigin/main"]);
-});
-
-test("upload-pack writes nothing to stdout, then attaches git upload-pack on the team mirror with hooks off", async () => {
-  const { ctx } = setup();
-  const code = await cmdTeam(ctx, ["upload-pack", "web", "/ignored/path"]);
-  assert.equal(code, 0);
-  assert.deepEqual(ctx.out_lines, []);
-  assert.equal(ctx.attachCalls.length, 1);
-  const argv = ctx.attachCalls[0].argv;
-  assert.deepEqual(argv.slice(0, 4), ["git", "-c", "core.hooksPath=/dev/null", "upload-pack"]);
-  assert.ok(argv[4].endsWith("team-web.agents.git") && argv.length === 5, argv.join(" "));
-  await assert.rejects(() => cmdTeam(setup().ctx, ["upload-pack", "nope"]), /not a declared team/);
-});
-
-test("converge gives an existing member its API channel, then restarts the service; a failing restart only warns", async () => {
-  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    teams: { web: { repo: "o/web", roles: {
-      lead: { capabilities: ["repo", "assign"], talkTo: ["team"] },
-      dev: { capabilities: ["repo", "publish"], talkTo: ["lead"] },
-    } } },
-  }));
-  const fake = FakeIncus.withRuntime();
-  fake.addInstance("agent-forge", "agent-web-lead", { status: "Running" });
-  fake.addInstance("agent-forge", "agent-web-dev", { status: "Running" });
-  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "systemctl", code: 1, stderr: "no bus\n" }] });
+test("converge of a fresh project creates both mirrors of each repository, then the control and two executors, then restarts the API", async () => {
+  const { fake, ctx } = project(undefined, NO_CLONE);
   assert.equal(await cmdTeam(ctx, ["converge"]), 0);
   const calls = ctx.calls.map((c) => c.join(" "));
-  const adds = calls.flatMap((c, i) => (c.includes("config device add") && c.includes("forge-api") ? [i] : []));
-  const restart = calls.indexOf("systemctl --user try-restart forge-api.service");
-  assert.equal(adds.length, 2);
-  assert.ok(restart > Math.max(...adds), calls.join("\n"));
-  assert.ok(ctx.err_lines.some((l) => l.startsWith("WARNING: could not restart forge-api.service")));
-});
-
-test("converge updates an existing member's files; a live pilot is told its instructions changed, not killed, and only once", async () => {
-  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    pilot: { capabilities: ["assign"], talkTo: ["web"] },
-    teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo", "publish"] } } } },
-  }));
-  const fake = FakeIncus.withRuntime();
-  fake.addInstance("agent-forge", "agent-pilot", { status: "Running" });
-  fake.addInstance("agent-forge", "agent-web-dev-1", { status: "Running" });
-  const base = fakeContext({ incus: fake, rules: RULES });
-  const ctx = { ...base, exec: async (argv: string[], o?: ExecOptions) => argv.join(" ").endsWith("-- hc get agent")
-    ? { code: 0, stderr: "", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}' } : base.exec(argv, o) };
-  const claudeMd = (name: string) => fake.files.get(`agent-forge/${name}/home/aiuser/.claude/CLAUDE.md`)?.content;
-
-  await cmdTeam(ctx, ["converge"]);
-  for (const name of ["agent-pilot", "agent-web-dev-1"]) {
-    assert.match(claudeMd(name) ?? "", /forge-team status/, `${name} has no current CLAUDE.md`);
+  const launches = ctx.calls.filter((c) => c.includes("launch")).map((c) => c[c.indexOf("launch") + 2]);
+  assert.deepEqual(launches, ["agent-control", "agent-executor-1", "agent-executor-2"]);
+  for (const repo of ["web", "api"]) {
+    const origin = calls.findIndex((c) => c.includes("clone --bare") && c.endsWith(`/repo-${repo}.git`));
+    const team = calls.findIndex((c) => c.includes("init --bare") && c.endsWith(`/repo-${repo}.agents.git`));
+    assert.ok(origin >= 0 && team > origin, calls.join("\n"));
+    assert.ok(origin < calls.findIndex((c) => c.includes(" launch ")), "the mirrors come before any container");
   }
-  assert.ok(base.err_lines.some((l) => l.includes("agent-pilot's instructions or environment changed") && l.includes("Herdr App") && l.includes("forge team up")), base.err_lines.join("\n"));
-  assert.ok(!base.err_lines.some((l) => l.includes("hc-exec")), "the host's commands are not the human's");
-  // Chaque mise à jour nomme son membre.
-  assert.deepEqual(base.out_lines.filter((l) => l.startsWith("Updating ")), ["Updating agent-pilot...", "Updating agent-web-dev-1..."]);
-  assert.ok(!base.calls.some((c) => c.join(" ").includes("-- hc kill") || c.join(" ").includes("-- hc run ")), "the live session is left alone");
-
-  base.err_lines.length = 0;
-  await cmdTeam(ctx, ["converge"]);
-  assert.ok(!base.err_lines.some((l) => l.includes("environment changed")), "nothing changed the second time");
+  const restart = calls.indexOf("systemctl --user try-restart forge-api.service");
+  assert.ok(restart > calls.findLastIndex((c) => c.includes(" launch ")), calls.join("\n"));
+  assert.ok(fake.instances.get("agent-forge")!.has("agent-executor-2"));
+  assert.deepEqual(ctx.out_lines.filter((l) => /^(NAME|agent-)/.test(l)).map((l) => l.split(/\s+/).slice(0, 4).join(" ")), [
+    "NAME KIND STATUS MISSION", "agent-control control Running -", "agent-executor-1 executor Running free", "agent-executor-2 executor Running free",
+  ]);
 });
 
-// Les limites promises (celle du rôle, sinon celle du profil) contre la RAM moins la réserve de l'hôte.
+test("converge of a project converges the present members, never deletes a stray executor, and takes no team", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  for (const n of [1, 2, 3]) fake.addInstance("agent-forge", `agent-executor-${n}`, { status: "Running", config: { "user.forge.role": "executor" } });
+  const { ctx } = project(fake);
+  assert.equal(await cmdTeam(ctx, ["converge"]), 0);
+  assert.ok(!ctx.calls.some((c) => c.includes("launch") || c.includes("delete")), ctx.calls.map((c) => c.join(" ")).join("\n"));
+  assert.ok(ctx.out_lines.includes("Updating agent-executor-1..."), ctx.out_lines.join("\n"));
+  assert.ok(ctx.out_lines.includes("agent-executor-3: not in the config, left as is"), ctx.out_lines.join("\n"));
+  await assert.rejects(() => cmdTeam(project().ctx, ["converge", "web"]), /a project converges as a whole: forge team converge, without a team/);
+});
+
+const LIVE_IDLE: ExecRule = { match: "-- hc get agent", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}' };
+// systemctl is-active sort en 3 pour un service en échec, et en écrit l'état.
+const ORCH_FAILED: ExecRule = { match: "systemctl is-active forge-orchestrator", code: 3, stdout: "failed\n" };
+const HELD = { kind: "dev", ticket: "T-1", subtask: "T-1.2", repository: "web", branch: "agent/T-1.2", base: "agent/T-1.1" };
+
+test("status --json of a project prints its members: kind, presence, the mission held and the session", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  fake.addInstance("agent-forge", "agent-executor-1", { status: "Running", config: { "user.forge.mission": JSON.stringify(HELD) } });
+  const { ctx } = project(fake, [LIVE_IDLE, ORCH_FAILED]);
+  assert.equal(await cmdTeam(ctx, ["status"], { json: true }), 0);
+  assert.equal(ctx.out_lines.length, 1);
+  assert.deepEqual(JSON.parse(ctx.out_lines[0]), { members: [
+    { name: "agent-control", kind: "control", present: true, mission: null, session: "idle", orchestrator: "failed" },
+    { name: "agent-executor-1", kind: "executor", present: true, mission: HELD, session: "idle" },
+    { name: "agent-executor-2", kind: "executor", present: false, mission: null, session: "none" },
+  ] });
+  const text = project(fake, [LIVE_IDLE, ORCH_FAILED]).ctx;
+  assert.equal(await cmdTeam(text, ["status"]), 0);
+  assert.deepEqual(text.out_lines.map((l) => l.split(/\s+/).join(" ").trim()), [
+    "NAME KIND STATUS SESSION MISSION", "agent-control control Running idle orchestrator failed",
+    "agent-executor-1 executor Running idle T-1.2 (web)", "agent-executor-2 executor Missing none free",
+  ]);
+});
+
+test("status shows a blocked session, and warns of a mission whose agent waits on its screen", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-executor-1", { status: "Running", config: { "user.forge.mission": JSON.stringify(HELD) } });
+  const { ctx } = project(fake, [{ match: "-- hc get agent", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"blocked"}}' }]);
+  assert.equal(await cmdTeam(ctx, ["status"]), 0);
+  assert.ok(ctx.out_lines.some((l) => l.split(/\s+/).join(" ").trim() === "agent-executor-1 executor Running blocked T-1.2 (web)"),
+    ctx.out_lines.join("\n"));
+  assert.deepEqual(ctx.err_lines.filter((l) => l.startsWith("WARNING")), [
+    "WARNING: agent-executor-1 holds T-1.2 but its agent is blocked, waiting for an answer on its screen: read it with hc read <machine>/agent",
+  ]);
+});
+
+test("status: the orchestrator of a control that does not answer in time is unknown, with a deadline; a stopped control's is inactive", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  const { ctx } = project(fake, [{ match: "systemctl is-active forge-orchestrator", code: 124, timedOut: true }]);
+  assert.equal(await cmdTeam(ctx, ["status"], { json: true }), 0);
+  assert.equal(JSON.parse(ctx.out_lines[0]).members[0].orchestrator, "unknown");
+  const at = ctx.calls.findIndex((c) => c.join(" ").endsWith("systemctl is-active forge-orchestrator"));
+  assert.ok((ctx.execOptions[at]?.timeoutMs ?? 0) > 0);
+  fake.instances.get("agent-forge")!.get("agent-control")!.status = "Stopped";
+  const stopped = project(fake).ctx;
+  assert.equal(await cmdTeam(stopped, ["status"], { json: true }), 0);
+  assert.equal(JSON.parse(stopped.out_lines[0]).members[0].orchestrator, "inactive");
+  assert.equal(JSON.parse(stopped.out_lines[0]).members[1].orchestrator, undefined);
+});
+
+test("status warns of a free executor whose clone has tracked changes, naming it and the clone; a busy one is not looked at", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-executor-1", { status: "Running" });
+  fake.addInstance("agent-forge", "agent-executor-2", { status: "Running", config: { "user.forge.mission": JSON.stringify(HELD) } });
+  const { ctx } = project(fake, [{ match: "/workspace/api -c core.fsmonitor=false", stdout: " M a.ts\n" }]);
+  assert.equal(await cmdTeam(ctx, ["status"]), 0);
+  const status = ctx.calls.map((c) => c.join(" ")).filter((c) => c.includes("status --porcelain --untracked-files=no"));
+  assert.ok(status.every((c) => c.includes("exec agent-executor-1 ")) && status.length === 2, status.join("\n"));
+  assert.deepEqual(ctx.err_lines.filter((l) => l.startsWith("WARNING")), [
+    "WARNING: agent-executor-1 is free but /workspace/api has uncommitted changes: it gets no mission until they are committed or discarded.",
+  ]);
+});
+
+test("for-repo of a project prints the repository's name; task-base its branches' sub-tasks and bases; upload-pack serves its team mirror", async () => {
+  const { ctx } = project();
+  assert.equal(await cmdTeam(ctx, ["for-repo", "o/api"]), 0);
+  assert.deepEqual(ctx.out_lines, ["api"]);
+  assert.equal(await cmdTeam(project().ctx, ["for-repo", "o/none"]), 1);
+
+  mkdirSync(join(home, ".local", "share", "agent-forge", "api"), { recursive: true });
+  const rec = (repository: string, subtask: string, base: string) =>
+    ({ branch: `agent/${subtask}`, repository, ticket: subtask.split(".")[0], subtask, base, executor: null });
+  writeFileSync(join(home, ".local", "share", "agent-forge", "api", "branches.json"), JSON.stringify({ version: 1, records: [
+    rec("web", "T-1.2", "agent/T-1.1"), rec("api", "T-2.1", "origin/main"), rec("web", "T-1.1", "origin/main"), rec("web", "T-1.3", "--upload-pack=x"),
+  ] }));
+  const bases = project().ctx;
+  assert.equal(await cmdTeam(bases, ["task-base", "web"]), 0);
+  assert.deepEqual(bases.out_lines, ["T-1.1\torigin/main", "T-1.2\tagent/T-1.1"]);
+  await assert.rejects(() => cmdTeam(project().ctx, ["task-base", "nope"]), /nope is not a repository of the project/);
+
+  const pack = project().ctx;
+  assert.equal(await cmdTeam(pack, ["upload-pack", "api", "/ignored"]), 0);
+  assert.deepEqual(pack.out_lines, []);
+  assert.deepEqual(pack.attachCalls[0].argv, ["git", "-c", "core.hooksPath=/dev/null", "upload-pack", join(home, "mirrors", "repo-api.agents.git")]);
+  await assert.rejects(() => cmdTeam(project().ctx, ["upload-pack", "nope"]), /nope is not a repository of the project/);
+});
+
+test("sync <repository> of a project refreshes that repository's origin mirror from GitHub", async () => {
+  const { ctx } = project();
+  assert.equal(await cmdTeam(ctx, ["sync", "api"]), 0);
+  const fetches = ctx.calls.map((c) => c.join(" ")).filter((c) => c.includes(" fetch --prune "));
+  assert.equal(fetches.length, 1);
+  assert.ok(fetches[0].includes(`--git-dir=${join(home, "mirrors", "repo-api.git")}`) && fetches[0].includes("o/API"), fetches[0]);
+  assert.deepEqual(ctx.out_lines, ["Synced api."]);
+});
+
+test("without a project, every subcommand says to declare one; for-repo answers nothing, exit 1", async () => {
+  writeFileSync(join(home, "agent-forge", "config.json"), "{}");
+  await assert.rejects(() => cmdTeam(fakeContext(), ["converge"]), /no project in .*config\.json: declare "project" there first/);
+  const ctx = fakeContext();
+  assert.equal(await cmdTeam(ctx, ["for-repo", "o/web"]), 1);
+  assert.deepEqual(ctx.out_lines, []);
+  await assert.rejects(() => cmdTeam(fakeContext(), ["inbox"]), /Usage: forge team converge/);
+  await assert.rejects(() => cmdTeam(fakeContext(), ["answer", "1"]), /Usage: forge team converge/);
+});
+
+// Les limites promises (celle des exécuteurs, sinon celle du profil) contre la RAM moins la réserve de l'hôte.
 const GIB = 2 ** 30;
 
-test("converge warns, without refusing, when the members' limits add up to more than the RAM minus the reserve", async () => {
-  // Deux membres sans limite de rôle : 75 % de 4 GiB chacun, soit 6 GiB.
-  const { ctx } = setup();
-  const code = await cmdTeam(ctx, ["converge"], { hostMemory: 4 * GIB });
-  assert.equal(code, 0);
-  const warning = ctx.err_lines.find((l) => l.startsWith("WARNING: the 2 members' memory limits add up to 6.0 GiB"));
+test("converge warns, without refusing, when the containers' limits add up to more than the RAM minus the reserve", async () => {
+  // Le contrôle et deux exécuteurs sans limite propre : 75 % de 4 GiB chacun, soit 9 GiB.
+  const fake = FakeIncus.withRuntime();
+  for (const n of ["agent-control", "agent-executor-1", "agent-executor-2"]) fake.addInstance("agent-forge", n, { status: "Running" });
+  const { ctx } = project(fake);
+  assert.equal(await cmdTeam(ctx, ["converge"], { hostMemory: 4 * GIB }), 0);
+  const warning = ctx.err_lines.find((l) => l.startsWith("WARNING: the 3 containers' memory limits add up to 9.0 GiB"));
   assert.ok(warning?.includes("4.0 GiB of RAM, 0.0 GiB kept for the host"), ctx.err_lines.join("\n"));
 });
 
-test("converge counts a role's own limit before the profile's, and reads the reserve the host keeps", async () => {
+test("converge counts the executors' own limit, the profile's for the control, and the reserve the host keeps", async () => {
   writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    teams: { web: { repo: "o/web", roles: { dev: { count: 2, capabilities: ["repo", "publish"], memory: "1GiB" } } } },
+    limits: { memory: "1GiB" }, project: { ...PROJECT.project, executors: { count: 2, memory: "512MiB" } },
   }));
   const reserve = { match: "systemctl show -p MemoryMin --value", stdout: `${GIB / 2}\n` };
   const fake = FakeIncus.withRuntime();
-  for (const n of ["agent-web-dev-1", "agent-web-dev-2"]) fake.addInstance("agent-forge", n, { status: "Running" });
+  for (const n of ["agent-control", "agent-executor-1", "agent-executor-2"]) fake.addInstance("agent-forge", n, { status: "Running" });
   // 2 GiB promis ; 4 GiB moins 2 × 0,5 GiB (system.slice, user.slice) = 3 GiB : rien à dire.
-  const fits = fakeContext({ incus: fake, rules: [...RULES, reserve] });
+  const fits = fakeContext({ incus: fake, rules: [reserve, ...RULES] });
   await cmdTeam(fits, ["converge"], { hostMemory: 4 * GIB });
   assert.ok(!fits.err_lines.some((l) => l.includes("memory limits")), fits.err_lines.join("\n"));
   // Sur 2,5 GiB de RAM, il ne reste que 1,5 GiB.
-  const tight = fakeContext({ incus: fake, rules: [...RULES, reserve] });
+  const tight = fakeContext({ incus: fake, rules: [reserve, ...RULES] });
   await cmdTeam(tight, ["converge"], { hostMemory: 2.5 * GIB });
   assert.ok(tight.err_lines.some((l) => l.includes("add up to 2.0 GiB, more than the 1.5 GiB")), tight.err_lines.join("\n"));
 });
 
-// `forge team answer` : l'humain répond à une question du Lead.
-const LIVE: ExecRule = { match: "-- hc get agent", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}' };
-const SENT: ExecRule = { match: "hc send", stdout: '{"turn":3,"status":"working","started":true}' };
+// ---------------------------------------------------------------- la main de l'humain
 
-function answerSetup(session: ExecRule = LIVE) {
-  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    teams: { web: { repo: "o/web", roles: { lead: { capabilities: ["repo", "ask-human"] } } } },
-  }));
-  writeJournal(ASK);
+const JOURNAL = () => join(home, ".local", "share", "agent-forge", "api", "journal.jsonl");
+const journalLines = () => readFileSync(JOURNAL(), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+// Une sous-tâche jamais commencée : ni dans le miroir d'équipe, ni dans le clone.
+const FRESH: ExecRule[] = [
+  { match: "rev-parse --verify --quiet refs/remotes/team/agent/T-3.1", code: 1 },
+  { match: "rev-parse --verify --quiet refs/heads/agent/T-3.1", code: 1 },
+  LIVE_IDLE,
+];
+const instruction = (text: string) => async () => text;
+
+test("assign: the human gives an executor a sub-task, its instruction from stdin, journaled as human with id 0", async () => {
   const fake = FakeIncus.withRuntime();
-  fake.addInstance("agent-forge", lead, { status: "Running" });
-  const ctx = fakeContext({ incus: fake, rules: [...RULES, session, SENT] });
-  const typed = () => ctx.calls.filter((c) => c.includes("send")).map((c) => c.at(-1));
-  const last = () => JSON.parse(readFileSync(join(home, ".local", "share", "agent-forge", "api", "journal.jsonl"), "utf8").trim().split("\n").at(-1)!);
-  return { fake, ctx, typed, last };
-}
-const answer = (o: object) => async () => JSON.stringify(o);
-
-test("answer types the summary to a live session, records it and closes the question; a second one is refused", async () => {
-  const { ctx, typed, last } = answerSetup();
-  assert.equal(await cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Garde le français" }) }), 0);
-  assert.deepEqual(typed(), ["[forge] answer 7 from human: Garde le français"]);
-  assert.deepEqual(ctx.out_lines, [`Answered #7 (delivered to ${lead}).`]);
-  const e = last();
-  assert.deepEqual([e.id, e.caller, e.op, e.to, e.question, e.summary, e.outcome, e.error], [0, "human", "answer", lead, 7, "Garde le français", "ok", null]);
-  await assert.rejects(() => cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Encore" }) }), /already answered/);
-  await assert.rejects(() => cmdTeam(ctx, ["answer", "99"], { stdin: answer({ summary: "Non" }) }), /no question 99/);
-  assert.equal(typed().length, 1);
+  fake.addInstance("agent-forge", "agent-executor-1", { status: "Running" });
+  const { ctx } = project(fake, FRESH);
+  assert.equal(await cmdTeam(ctx, ["assign", "agent-executor-1", "T-3.1"], { repository: "api", stdin: instruction("Corrige le login") }), 0);
+  assert.deepEqual(ctx.out_lines.at(-1), "Assigned T-3.1 to agent-executor-1 (api, from origin/main).");
+  const held = JSON.parse(fake.instances.get("agent-forge")!.get("agent-executor-1")!.config["user.forge.mission"]);
+  assert.deepEqual(held, { kind: "dev", ticket: "T-3", subtask: "T-3.1", repository: "api", branch: "agent/T-3.1", base: "origin/main" });
+  assert.ok(ctx.calls.some((c) => c.join(" ").includes("/workspace/api") && c.join(" ").includes("switch -c agent/T-3.1 origin/main")));
+  // La consigne n'est jamais dans un argv.
+  assert.ok(!ctx.calls.some((c) => c.some((a) => a.includes("Corrige le login"))));
+  const [line] = journalLines();
+  assert.deepEqual([line.id, line.caller, line.op, line.to, line.task, line.outcome, line.text],
+    [0, "human", "assign", "agent-executor-1", "T-3.1", "ok", "Corrige le login"]);
 });
 
-test("answer --json prints one line: the question, its asker and whether the answer was delivered", async () => {
-  const { ctx } = answerSetup();
-  assert.equal(await cmdTeam(ctx, ["answer", "7"], { json: true, stdin: answer({ summary: "Oui" }) }), 0);
-  assert.deepEqual(ctx.out_lines.map((l) => JSON.parse(l)), [{ id: 7, to: lead, delivered: true }]);
-  const away = answerSetup({ match: "-- hc get agent", stdout: '{"state":"finished","exit_code":0,"status":null}' });
-  await cmdTeam(away.ctx, ["answer", "7"], { json: true, stdin: answer({ summary: "Oui" }) });
-  assert.deepEqual(away.ctx.out_lines.map((l) => JSON.parse(l)), [{ id: 7, to: lead, delivered: false }]);
-});
-
-test("an answer's body goes to a file the typed line names, byte for byte", async () => {
-  const { fake, ctx, typed } = answerSetup();
-  await cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Voir le détail", body: "x\u001b[201~" }) });
-  assert.equal(fake.files.get(`agent-forge/${lead}/home/aiuser/.forge/messages/a7.md`)!.content, "x\u001b[201~");
-  assert.equal(typed()[0], "[forge] answer 7 from human: Voir le détail (detail: /home/aiuser/.forge/messages/a7.md)");
-});
-
-for (const [state, rule] of [["none", { match: "-- hc get agent", code: 1 }], ["lost", { match: "-- hc get agent", stdout: '{"argv":["/bin/bash"],"keep":true,"state":"live","status":null}' }]] as const) {
-  test(`an answer to a session in state ${state} types nothing, is recorded, closes the question and says so`, async () => {
-    const { ctx, typed, last } = answerSetup(rule);
-    assert.equal(await cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Oui" }) }), 0);
-    assert.deepEqual(typed(), []);
-    assert.equal(last().error, `not delivered: ${lead} has no live session`);
-    assert.match(ctx.out_lines[0], /has no live session, the answer is recorded but not delivered/);
-    await assert.rejects(() => cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Oui" }) }), /already answered/);
-  });
-}
-
-test("a summary the API would refuse and a body holding the Claude token are refused before anything is recorded or typed", async () => {
-  const { ctx, typed } = answerSetup();
-  const before = readFileSync(join(home, ".local", "share", "agent-forge", "api", "journal.jsonl"), "utf8");
-  await assert.rejects(() => cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "voir @x" }) }), /not allowed in a summary/);
-  await assert.rejects(() => cmdTeam(ctx, ["answer", "7"], { stdin: answer({ summary: "Oui", body: "le token tok-test" }) }), /secret/);
-  assert.deepEqual(typed(), []);
-  assert.equal(readFileSync(join(home, ".local", "share", "agent-forge", "api", "journal.jsonl"), "utf8"), before);
-});
-
-// Le .env d'un rôle : poussé (mode 600, uid 1001), retiré quand le rôle le perd, refusé s'il est ouvert aux autres.
-test("converge pushes a role's .env, removes it when the role loses it, and tells a live pilot whose .env changed", async () => {
-  const envFile = join(home, "lead.env");
-  writeFileSync(envFile, "DEMO_GREETING=bonjour\n", { mode: 0o600 });
-  const config = (env: boolean) => JSON.stringify({
-    pilot: { capabilities: ["assign"], talkTo: ["web"], ...(env ? { env: envFile } : {}) },
-    teams: { web: { repo: "o/web", roles: { lead: { capabilities: ["repo"], ...(env ? { env: envFile } : {}) }, dev: { count: 1, capabilities: ["repo", "publish"] } } } },
-  });
-  writeFileSync(join(home, "agent-forge", "config.json"), config(true));
+test("assign reads the repository and the base from the branch's record, and refuses what the API would", async () => {
+  mkdirSync(join(home, ".local", "share", "agent-forge", "api"), { recursive: true });
+  writeFileSync(join(home, ".local", "share", "agent-forge", "api", "branches.json"), JSON.stringify({ version: 1, records: [
+    { branch: "agent/T-3.1", repository: "web", ticket: "T-3", subtask: "T-3.1", base: "origin/release", executor: "agent-executor-2" },
+  ] }));
   const fake = FakeIncus.withRuntime();
-  for (const n of ["agent-pilot", "agent-web-lead", "agent-web-dev-1"]) fake.addInstance("agent-forge", n, { status: "Running" });
-  const base = fakeContext({ incus: fake, rules: RULES });
-  const ctx = { ...base, exec: async (argv: string[], o?: ExecOptions) => argv.join(" ").endsWith("-- hc get agent")
-    ? { code: 0, stderr: "", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"idle"}}' } : base.exec(argv, o) };
-  const envOf = (n: string) => fake.files.get(`agent-forge/${n}/home/aiuser/.config/forge/env`);
-  await cmdTeam(ctx, ["converge"]);
-  assert.deepEqual([envOf("agent-web-lead")?.content, envOf("agent-web-lead")?.mode, envOf("agent-web-lead")?.uid], ["DEMO_GREETING=bonjour\n", "600", "1001"]);
-  assert.equal(envOf("agent-web-dev-1"), undefined, "a role without env has none");
-  assert.ok(base.err_lines.some((l) => l.includes("agent-pilot") && l.includes("environment changed")));
+  fake.addInstance("agent-forge", "agent-executor-1", { status: "Running" });
+  const { ctx } = project(fake, FRESH);
+  assert.equal(await cmdTeam(ctx, ["assign", "agent-executor-1", "T-3.1"], { stdin: instruction("Reprends") }), 0);
+  assert.ok(ctx.out_lines.includes("Assigned T-3.1 to agent-executor-1 (web, from origin/release)."), ctx.out_lines.join("\n"));
 
-  // Le rôle perd son env : le fichier est retiré au converge suivant.
-  writeFileSync(join(home, "agent-forge", "config.json"), config(false));
-  base.calls.length = 0;
-  await cmdTeam(ctx, ["converge"]);
-  assert.ok(base.calls.some((c) => c.join(" ").includes("agent-web-lead") && c.join(" ").endsWith("rm -f /home/aiuser/.config/forge/env")));
+  // Plusieurs dépôts et aucune fiche : il faut dire lequel.
+  await assert.rejects(() => cmdTeam(project().ctx, ["assign", "agent-executor-1", "T-4.1"], { stdin: instruction("x") }),
+    /several repositories: say which one with --repository \(web, api\)/);
+  await assert.rejects(() => cmdTeam(project().ctx, ["assign", "agent-executor-9", "T-3.1"], { stdin: instruction("x") }),
+    /agent-executor-9 is not an executor of this project/);
+  await assert.rejects(() => cmdTeam(project().ctx, ["assign", "agent-executor-1", "fix-login"], { repository: "web", stdin: instruction("x") }),
+    /mission.ticket is not a ticket id/);
+  await assert.rejects(() => cmdTeam(project().ctx, ["assign", "agent-executor-1", "T-4.1"], { repository: "web", stdin: instruction(" ") }),
+    /instruction is empty/);
+  await assert.rejects(() => cmdTeam(project().ctx, ["status"], { repository: "web" }), /--repository and --base only go with assign/);
+  // Les refus des arguments sont journalisés sous l'humain, comme les autres.
+  const refused = journalLines().filter((l) => l.outcome === "refused");
+  assert.deepEqual(refused.map((l) => [l.caller, l.op, l.to]).slice(0, 2),
+    [["human", "assign", "agent-executor-9"], ["human", "assign", "agent-executor-1"]]);
+  assert.match(refused[1].error, /mission.ticket is not a ticket id/);
 });
 
-test("converge stops before any container when a .env is open to others", async () => {
-  const envFile = join(home, "lead.env");
-  writeFileSync(envFile, "A=1\n", { mode: 0o644 });
-  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    teams: { web: { repo: "o/web", roles: { lead: { capabilities: ["repo"], env: envFile } } } },
-  }));
-  const { ctx } = setup();
-  await assert.rejects(() => cmdTeam(ctx, ["converge"]), (e: Error) => e.message.includes(envFile) && /group or others/.test(e.message));
-  assert.ok(!ctx.calls.some((c) => c.includes("launch")));
-});
-
-test("question --json prints one object: the asker, the state, the summary and the body, without control characters", async () => {
-  writeJournal({ ...ASK, text: "Ligne un\nLigne deux\u001b[2J" });
-  const { ctx } = setup();
-  assert.equal(await cmdTeam(ctx, ["question", "7"], { json: true }), 0);
-  assert.equal(ctx.out_lines.length, 1);
-  assert.deepEqual(JSON.parse(ctx.out_lines[0]), {
-    id: 7, from: lead, time: ASK.time, state: "open", summary: "Quel séparateur ?", body: "Ligne un\nLigne deux[2J",
-  });
-});
-
-test("question shows a question's summary and detail without control characters; an unknown id is refused", async () => {
-  writeJournal({ ...ASK, text: "Ligne un\nLigne deux\u001b[2J" });
-  const { ctx } = setup();
-  assert.equal(await cmdTeam(ctx, ["question", "7"]), 0);
-  assert.deepEqual(ctx.out_lines.slice(1), ["Quel séparateur ?", "", "Ligne un\nLigne deux[2J"]);
-  assert.match(ctx.out_lines[0], /^#7 from agent-web-lead, 2 min ago \(open\)$/);
-  await assert.rejects(() => cmdTeam(ctx, ["question", "99"]), /no question 99/);
-});
-
-test("converging one team gives a running read-repos pilot that team's mirror, without touching its session", async () => {
-  writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    pilot: { capabilities: ["assign", "read-repos"], talkTo: ["web"] },
-    teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo", "publish"] } } } },
-  }));
+test("assign to a busy executor is refused by the host and journaled refused; release frees it, journaled as human", async () => {
   const fake = FakeIncus.withRuntime();
-  fake.addInstance("agent-forge", "agent-pilot", { status: "Running" });
-  fake.addInstance("agent-forge", "agent-web-dev-1", { status: "Running" });
-  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "test -d /workspace/depots/", code: 1 }] });
-  await cmdTeam(ctx, ["converge", "web"]);
-  assert.equal(fake.expandedDevices("agent-forge", "agent-pilot")["origin-web"]?.path, "/forge/origins/web.git");
-  assert.ok(!ctx.calls.some((c) => c.join(" ").includes("hc run")), "the pilot's session is left as it is");
-});
-
-const lfsConfig = (lfs: boolean) => writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-  teams: { web: { repo: "o/web", roles: { dev: { capabilities: ["repo"], lfs } } } },
-}));
-
-test("sync fetches the LFS objects after the mirror when a role reads them, and not otherwise", async () => {
-  for (const lfs of [true, false]) {
-    lfsConfig(lfs);
-    const { ctx } = setup();
-    assert.equal(await cmdTeam(ctx, ["sync", "web"]), 0);
-    const calls = ctx.calls.map((c) => c.join(" "));
-    const fetch = calls.findIndex((c) => c.includes(" fetch --prune "));
-    const lfsFetch = calls.findIndex((c) => c.includes(" lfs fetch "));
-    assert.equal(lfsFetch >= 0, lfs, calls.join("\n"));
-    if (lfs) assert.ok(lfsFetch > fetch && fetch >= 0);
-  }
-});
-
-test("sync fails when the LFS fetch does, naming the repository", async () => {
-  lfsConfig(true);
-  const fake = FakeIncus.withRuntime();
-  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: " lfs fetch ", code: 2, stderr: "denied\n" }] });
-  await assert.rejects(() => cmdTeam(ctx, ["sync", "web"]), /fetching the LFS objects of o\/web failed: denied/);
-});
-
-test("converge notes a container whose LFS mode differs from its role's, once, and silently accepts a match", async () => {
-  lfsConfig(true);
-  for (const [mark, noted] of [[undefined, true], ["false", true], ["true", false]] as const) {
-    const fake = FakeIncus.withRuntime();
-    fake.addInstance("agent-forge", "agent-web-dev", { status: "Running", config: mark ? { "user.forge.lfs": mark } : {} });
-    const ctx = fakeContext({ incus: fake, rules: RULES });
-    await cmdTeam(ctx, ["converge"]);
-    const notes = ctx.err_lines.filter((l) => l.includes("agent-web-dev was created with lfs"));
-    assert.equal(notes.length, noted ? 1 : 0, ctx.err_lines.join("\n"));
-  }
-});
-
-test("sync on a host without git-lfs says so, before any fetch", async () => {
-  lfsConfig(true);
-  const fake = FakeIncus.withRuntime();
-  const ctx = fakeContext({ incus: fake, rules: [...RULES, { match: "git lfs version", code: 1 }] });
-  await assert.rejects(() => cmdTeam(ctx, ["sync", "web"]), /git-lfs is not installed/);
-  assert.ok(!ctx.calls.some((c) => c.includes("fetch")));
+  fake.addInstance("agent-forge", "agent-executor-1", { status: "Running", config: { "user.forge.mission": JSON.stringify(HELD) } });
+  const { ctx } = project(fake, FRESH);
+  await assert.rejects(() => cmdTeam(ctx, ["assign", "agent-executor-1", "T-3.1"], { repository: "web", stdin: instruction("x") }),
+    /agent-executor-1 holds T-1.2: release it first/);
+  assert.equal(await cmdTeam(ctx, ["release", "agent-executor-1"]), 0);
+  assert.equal(fake.instances.get("agent-forge")!.get("agent-executor-1")!.config["user.forge.mission"], undefined);
+  assert.deepEqual(journalLines().map((l) => [l.id, l.caller, l.op, l.outcome]), [[0, "human", "assign", "refused"], [0, "human", "release", "ok"]]);
 });

@@ -1,15 +1,15 @@
 # agent-forge
 
-Run teams of Claude Code agents in sealed Incus system containers, one container
+Run Claude Code agents on tickets, in sealed Incus system containers, one container
 per agent, on a hardened host that you reach from your own machine with
 [Herdr App](https://herdr.dev).
 
 ```
 your machine                     host (a VM)                          containers
 ┌──────────────────────┐  ssh    ┌───────────────────────────┐        ┌──────────────────────┐
-│ Herdr App, hc        │───────▶ │ forge, Incus              │ incus  │ agent-<team>-<role>  │
-│ git, ssh (your key)  │         │ Claude token, team mirror │──────▶ │ Claude Code, hc,     │
-│ Ansible (provisions) │◀─────── │ ~/workspaces/<container>  │  exec  │ Docker, Chrome       │
+│ Herdr App, hc        │───────▶ │ forge, Incus              │ incus  │ agent-control,       │
+│ git, ssh (your key)  │         │ Claude token, mirrors     │──────▶ │ agent-executor-<n>:  │
+│ Ansible (provisions) │◀─────── │ ~/workspaces/<container>  │  exec  │ Claude Code, hc, …   │
 └──────────────────────┘  fetch  └───────────────────────────┘        └──────────────────────┘
 ```
 
@@ -20,11 +20,12 @@ your machine                     host (a VM)                          containers
   and fetches with your forwarded SSH agent; agents commit locally and never
   push. You fetch their work from your machine (`forge fetch`), review it, then
   `forge ship` signs it, pushes it and opens the PR.
-- **Teams** are declared in the host's configuration: a repository and its
-  roles (a lead, developers, a reviewer…), each role one container or several,
-  each with its capabilities. Every agent is a machine in Herdr App, with its
-  own terminal that survives your laptop closing. You give a task to an agent
-  with `forge team assign`.
+- **A project** is declared in the host's configuration: its repositories, a
+  number of executors and a folder of tickets, written as Markdown files. An
+  orchestrator, in its own control container, hands each ready sub-task of a
+  ticket to a free executor as a mission, on a branch of its own. Every
+  container is a machine in Herdr App, with its own terminal that survives
+  your laptop closing.
 
 The [security model](#security-model) says what this protects against and
 what it does not.
@@ -139,7 +140,7 @@ In between it does, in order:
 9. turns Herdr App's telemetry off, if you say yes: it is a setting of your
    machine's app, not of the host; and, if the layout Herdr App shows is one it
    ships, copies it so that the forge bar can anchor there (see
-   [the forge mod](#see-the-team-answer-its-questions));
+   [the forge mod](#see-the-project-take-a-hand));
 10. prints a summary and opens herdr (the TUI).
 
 What step 3 writes and replays, under `~/.config/agent-forge/hosts/<name>/`
@@ -249,111 +250,129 @@ said yes. Herdr App's machines named `forge-local-…` go with
 `hc machine rm <name>`. A remote VM is deleted at your provider. `~/.lima/_config` and `~/.ansible` belong to
 Lima and Ansible, which may use them for other things.
 
-### 3. Build a team
+### 3. Set up a project
 
-A team lives in the host's `~/.config/agent-forge/config.json`, next to the
-settings of [Configuration](#configuration): a repository and its roles. forge
-ships a small reference team, a pilot, a lead, two developers and a reviewer on one
-repository, whose role prompts are in `teams/reference/prompts`:
+A host serves one **project**: its repositories, a number of execution
+containers (the **executors**), and a folder of tickets. It lives in the host's
+`~/.config/agent-forge/config.json`, next to the settings of
+[Configuration](#configuration):
 
 ```json
 {
-  "pilot": { "memory": "1GiB", "prompt": "reference", "capabilities": ["assign", "read-repos"], "talkTo": ["web"] },
-  "teams": {
-    "web": {
-      "repo": "acme/widgets",
-      "prompts": "reference",
-      "roles": {
-        "lead": { "memory": "1GiB", "capabilities": ["repo", "read-team", "assign", "ask-human"], "talkTo": ["pilot", "team"] },
-        "dev": { "count": 2, "memory": "2GiB", "capabilities": ["repo", "publish"], "talkTo": ["lead"] },
-        "reviewer": { "memory": "1GiB", "capabilities": ["repo", "read-team"], "talkTo": ["lead"] }
-      }
-    }
+  "project": {
+    "repositories": {
+      "web": { "repo": "acme/widgets" },
+      "api": { "repo": "acme/widgets-api" }
+    },
+    "executors": { "count": 2, "memory": "2GiB" },
+    "tickets": { "base": "~/.local/share/agent-forge/tickets", "prefix": "T" }
   }
 }
 ```
 
-`"prompts": "reference"` and the pilot's `"prompt": "reference"` are opt-in:
-without them nothing changes. The reference roles are `lead`, `dev` and `reviewer` (and the
-pilot); any other role name is refused at `converge` with that list. To compose
-your own team, point `prompts` at a directory of `<role>.md` files, with the
-roles you want.
-
-In the reference team the pilot reads every team's repository, read-only
-(`read-repos`: clones under `/workspace/depots/<team>`), and designs a request
-with the human before handing it to a lead. It links the repositories, which
-is how it designs a feature that spans several of them, and its memory spans
-them too: one host serves one client, never put two clients' repositories on
-the same host. The lead splits it, has the
-reviewer read each developer's branch, and releases the developer when the
-reviewer finds nothing blocking. A team without a `reviewer` role still works:
-its lead reviews with a sub-agent itself. Each reference member also gets
-skills and sub-agents in its container, in `~/.claude/skills` and
-`~/.claude/agents`; forge owns these directories and replaces their content whenever the
-reference kit changes, so skills you add there by hand are lost at that point. The pilot's and the leads'
-memories live on the host, under `~/memories/<container>` (in the forge user's
-home), so they survive a container's recreation; developers and the reviewer
-keep none. On an existing reference pilot or lead, the container-local memory
-is hidden under that mount (not deleted), and an existing pilot's `~/notes.md`
-is no longer read: its prompt tells it to move the content to `/workspace/notes.md`.
-
-That is five containers: `agent-pilot`, `agent-web-lead`, `agent-web-dev-1`,
-`agent-web-dev-2` and `agent-web-reviewer`. Every role has a `memory` because a role without one gets the
-profile's 75% of the host's memory, and a few of those add up to more than the
-host has: these 7 GiB fit a VM of 8 GiB minus what the host keeps for itself
-(640 MiB by default), and `forge team converge` warns when a team does not.
-Create them from your machine:
+That is three containers: `agent-control`, the **control container**, where
+the orchestrator runs as its own user (`forge-orch`) and keeps the ticket base;
+and `agent-executor-1` and `agent-executor-2`, which each hold a clone of every
+repository under `/workspace/<repository>`. One host serves one client: never
+put two clients' repositories in the same project. Give the executors a
+`memory`: without one, each container gets the profile's 75% of the host's
+memory, and a few of those add up to more than the host has. These 2 × 2 GiB,
+plus the control container's profile limit, are what `forge team converge`
+adds up, and it warns when they exceed the host's memory minus what the host
+keeps for itself (640 MiB by default). Create them from your machine:
 
 ```bash
 forge team up
 ```
 
-It checks that your `hc` is the pinned version, converges the teams on the host
-(creating the missing containers, with your forwarded SSH agent for the
-repository's mirror, and starting the stopped ones), then adds each container
-as a machine of Herdr App, named `<host>-<container without agent->` (for
-example `forge-local-web-dev-1`). Open Herdr App: every agent is a machine, and
-a terminal opens in it. A machine of a container that left the configuration
-is removed at the next `forge team up`; machines you added yourself are never
-touched. `forge team up` is also what starts the host's agents again after the
-VM was stopped.
+It checks that your `hc` is the pinned version, converges the project on the
+host (the mirrors of each repository, with your forwarded SSH agent; the
+missing containers, created; the stopped ones, started; every container's
+files, the orchestrator included, brought up to date), then adds each
+container as a machine of Herdr App, named `<host>-<container without agent->`
+(for example `forge-local-executor-1`). Open Herdr App: every container is a
+machine, and an executor's terminal shows its current mission. A machine of a
+container that left the configuration is removed at the next `forge team up`;
+machines you added yourself are never touched. `forge team up` is also what
+starts the host's containers again after the VM was stopped. `forge team
+converge` never deletes a container: lowering `count` leaves the extra
+executors, reported, for you to delete once their work is fetched.
 
-A role's **capabilities** decide what its containers get:
+Each repository has two bare mirrors on the host: the **origin mirror**, a copy
+of GitHub that `forge team sync <repository>` refreshes (it needs your SSH
+agent), and the **agents' mirror**, which holds the branches the executors
+hand back. Inside an executor, `origin` is the first and `team` the second,
+both read-only.
 
-- `repo`: a clone of the team's repository in `/workspace`, and the team's read-only
-  mirror of it as `origin`;
-- `publish`: the agent works on branches `agent/<task>`, which `forge fetch`
-  brings to your machine;
-- `read-repos` (the pilot only): every team's repository, read-only, cloned
-  under `/workspace/depots/<team>`; no branch leaves it;
-- `read-team`: a read-only remote `team` with the branches of the developers,
-  to read and compare;
-- `assign`, `ask-human`: what the agent may ask of the team through
-  [`forge-team`](#agents-talk-to-each-other);
-- `services`: accepted and not acted on yet. There is no `tickets` capability
-  (a config that names it is refused): forge knows nothing of ticket managers, and
-  a token a template's roles need goes in the role's
-  [`.env`](#a-role-has-its-own-env).
+Executor settings: `count` (1 to 16), `memory`, `cpu`, `strict` (their egress
+is [strict](#strict-egress-mode)), `plugins` (Claude Code plugins,
+`<name>@claude-plugins-official`) and `env` (a [`.env`](#executors-have-a-env)
+file). A repository takes `lfs` (see [Large files](#rules-for-getting-work-back)).
+`gitIdentity` (`{"name": …, "email": …}`) is the commits' identity, the host's
+otherwise.
 
-Other role settings: `count`, `talkTo`, `strict` (the container's egress is
-[strict](#strict-egress-mode)), `memory`, `cpu`, `plugins`, `env`, and `lfs` (on a
-role with `repo`: the container reads the repository's Git LFS files, see
-[Large files](#rules-for-getting-work-back)). A team also takes
-`prompts` (a directory of `<role>.md` files appended to each role's
-instructions), `gitIdentity` (the commits' identity, the host's otherwise) and
-`designs` (a folder of the repository, such as `docs/designs`, where the first
-sub-task of a request commits the Pilot's design; forge tells the team and the
-Pilot, who reads the earlier ones for context. Without it, designs stay with
-the Pilot).
+#### Write tickets
 
-#### A role has its own `.env`
+The ticket base is a folder on the host (`project.tickets.base`), mounted into
+the control container. It is plain Markdown: one folder per ticket, named by
+its id (`<prefix>-<n>`, such as `T-1`), with a `ticket.md` and one file per
+sub-task under `subtasks/`. Each file is a header of `key: value` lines, a
+blank line, then the text:
 
-`"env": "<path on the host>"` on a role (or on `pilot`) names a dotenv file;
-`forge team converge` pushes it into each of the role's containers
-(`/home/aiuser/.config/forge/env`, mode 600) and removes it from a role that
-loses the key. `forge-agent`, which starts the agent, exports its variables to
-the agent's process only, never to the container's other programs. Use it for a
-template's API token or a tool's settings.
+```
+T-1/ticket.md
+id: T-1
+title: Reject an empty password
+status: dev
+priority: 2
+repositories: web:main
+
+The login form accepts an empty password. …
+
+T-1/subtasks/1.md
+id: T-1.1
+repository: web
+position: 1
+rank: 1
+status: ready
+kind: implementation
+fixes:
+reason:
+branch:
+pr:
+
+Refuse an empty password in the form's validation, with a test.
+```
+
+A ticket's `status` is one of `todo`, `spec`, `dev`, `qa`, `human-review`,
+`pr-review`, `done`, `cancelled`; `priority` goes from 1 (most urgent) to 4,
+0 for none; `repositories` lists `<repository>:<base branch>`. A sub-task's
+`status` is `ready`, `in-dev` or `done`; `position` is its place in its
+repository's stack, `rank` its place in the ticket.
+
+The orchestrator looks at the tickets in `dev`, most urgent first. For each, it
+takes the sub-task of lowest `rank` that is not `done`; when that one is
+`ready` and an executor is free, it sets it `in-dev` and hands it to the
+executor as a **mission**: a fresh Claude Code session in the repository's
+clone, on a branch `agent/<sub-task>` (`agent/T-1.1`). The first sub-task of a
+repository starts from the ticket's base branch (`origin/main`); the next one
+is stacked on the branch of the one before it (`agent/T-1.1`). The executor
+commits, has its branch reviewed by a sub-agent, then runs `forge-team done`:
+the host checks that the branch has commits beyond its base, copies it to the
+agents' mirror and records it; the orchestrator sets the sub-task `done`,
+frees the executor, and moves on. When every sub-task of the ticket is `done`,
+the ticket goes to `qa`. Several tickets advance in parallel, one executor
+each. Writing the tickets with an agent (the Pilot), the agents' questions,
+QA and the pull requests come in later parts.
+
+#### Executors have a `.env`
+
+`"env": "<path on the host>"` on `project.executors` names a dotenv file;
+`forge team converge` pushes it into each executor
+(`/home/aiuser/.config/forge/env`, mode 600) and removes it when the key goes.
+`forge-agent`, which starts the agent, exports its variables to the agent's
+process only, never to the container's other programs. Use it for a tool's
+token or settings.
 
 ```
 # one KEY=VALUE per line; `#` comments; an optional `export `
@@ -365,138 +384,103 @@ pair of surrounding quotes is removed), with no `$` expansion, no escapes and no
 multi-line value, so `$(…)` stays literal. `CLAUDE_CODE_OAUTH_TOKEN`, `HOME`,
 `PATH`, `USER` and every `FORGE_…` name are refused. The file must exist and not
 be readable by group or others (`chmod 600`), or `converge` stops. **Its values
-reach the agent and every command it runs, in clear**: give a secret only to the
-roles that need it. They are not in the list of secrets forge refuses in
-messages.
+reach the agent and every command it runs, in clear.**
 
-Give an agent a task, with the instruction on stdin; the agent starts a new
-Claude Code session in its own terminal:
+#### See the project, take a hand
 
 ```bash
-forge team assign agent-web-dev-1 fix-login <<'EOF'
-The login form accepts an empty password. Fix it, with a test.
+forge team status          # each container: its mission, its session; the orchestrator's state (--json for a program)
+```
+
+The orchestrator decides alone. When you need to step in, `forge team assign`
+and `forge team release` are your hand on an executor, without the
+orchestrator and without its checks on the tickets (the host still refuses a
+busy executor, or a sub-task another executor holds):
+
+```bash
+forge team assign agent-executor-1 T-1.1 --repository web <<'EOF'
+Refuse an empty password in the form's validation, with a test.
 EOF
-forge team status          # each agent's task, session and wait, the Inbox, the mirror's age (--json for a program)
-forge team release agent-web-dev-1
+forge team release agent-executor-1
 ```
 
-A task that needs another one's code starts from its branch rather than from
-`origin/main`: `forge team assign agent-web-dev-1 use-login --from fix-login`
-(an agent with `assign` does the same with `forge-team`). The target must be
-the developer who has `fix-login`, since the branch comes from its clone;
-`use-login` is then a stacked task, which `forge ship` delivers as a pull
-request on `agent/fix-login`.
-
-#### See the team, answer its questions
-
-An agent with `ask-human` can leave a question for you (`forge-team ask`). It
-waits in the **Inbox**, which `forge team status` lists (`#<id> <agent> <age>:
-<summary>`; a question with a detail says so, and `forge team question <id>` shows it). From your
-machine:
-
-```bash
-forge team watch                       # the team, the Inbox and the mirror's age, redrawn every 5 s; Ctrl-C ends it
-forge answer 7 "Keep the French"       # the summary is typed to the agent, after forge's own prefix
-forge answer 7 "See the detail" < answer.md   # a body on stdin goes to a file the agent reads
-```
-
-An answer is typed only into a live `forge-agent` session. If the agent's
-session is gone (released, restarted), the answer is recorded, the question
-closed, and the command says it was not delivered. The displays ask the host
-one call at a time, with a timeout, and say how long it has been unreachable:
-they never pile up SSH sessions on a small host.
+`--repository <name>` and `--base <ref>` (`origin/<branch>`, or
+`agent/<sub-task>` to stack) say where the sub-task works and what its branch
+starts from. Each one left out comes from the branch's record when the
+sub-task was handed out before; else the repository is the project's only one
+(with several, `--repository` is required) and the base is `origin/main`.
+Both commands are journaled under the caller `human`, refusals included. A
+release stops the session; the branch and the clone stay, and a later mission
+of the same sub-task resumes them.
 
 `forge install` also copies a **forge mod** into Herdr App's mods directory
 (`~/.config/herdr-app/mods/forge/`, replaced at each run). It is a one-line bar
-at the bottom of Herdr App (a mod runs only where it is shown): how many agents
-work and how many questions wait, a notification for each new question, and the
-spaces of the agents named after them. A click on the bar or on a notification
-opens the **inbox**, a window of the mod: the questions of every host on the
-left, newest first; the one you select on the right, with its detail; and a box
-to answer it in place (⌘↩ sends). A one-line answer is the summary typed to the
-agent; a longer one goes in the body, summarised by its first line. The inbox
-says whether the answer was delivered or only recorded, and its Team button
-opens `forge team watch` for that host.
+at the bottom of Herdr App (a mod runs only where it is shown): how many
+executors work, wait or are free on each installed host, an orchestrator that
+is not active, a host that does not answer; it also names each agent's space
+after its container. It reads `forge team summary --json`, one call at a time,
+at most every 30 seconds.
 The bar needs a layout of its own: Herdr App ships its layouts (`main`, …) and
 takes no new block in them. When the layout shown is one of those, `forge install`
 offers to copy it (`herdr-app do layout.clone '{"name":"main","as":"forge"}'`,
 asked while Herdr App runs): the copy is yours, and the app never updates it
 again. Restart Herdr App if the bar does not appear by itself.
-It exposes three commands, `forge.inbox`, `forge.watch` and `forge.sync`
-(`forge team sync` for each team, in a terminal). forge never edits your `keys.json` (any edit makes
-that file yours, and Herdr App stops updating its defaults): to bind them, add
-the lines below to it by hand, with the keys you like:
-
-```json
-{ "global": { "ctrl-alt-shift-i": "forge.inbox", "ctrl-alt-shift-w": "forge.watch", "ctrl-alt-shift-s": "forge.sync" } }
-```
-
-A notification passes no argument to the mod: its click opens the inbox on the
-question notified last. `forge.watch` opens the watch of the first host that
-answers; for another host, use the inbox's Team button or run
-`forge team watch --host <name>` in a terminal.
 Check the mod with `herdr-app check ~/.config/herdr-app/mods/forge`.
-
-A developer takes one task at a time, on a new branch `agent/<task>` from
-`origin/main`, and a task name belongs to one developer. An agent that has
-finished its turn still keeps its task until you `release` it, and a clone with
-uncommitted changes refuses a new task. `forge team sync web` refreshes the
-team's mirror of GitHub (it needs your SSH agent).
 
 `forge open` still opens the herdr TUI on the host, for as long as it is kept.
 
 ### 4. Get the work back
 
-On your machine, in your own clone of the repository (not in the VM):
+On your machine, in your own clone of one of the project's repositories (not in
+the VM):
 
 ```bash
 forge fetch
 ```
 
-The first run asks the host which team holds the repository, adds a git remote
-named after it (`forge-web`) that points at the host's team mirror, and says so,
-then fetches the developers' `agent/*` branches through it, without tags. The
-host serves the mirror, a repository forge fills with the branches the
-developers own, and never runs git in an agent's workspace. `forge fetch` also
-refreshes `origin` and lists each task with its commit count and the branch it
-started from:
+The first run asks the host which repository of the project this clone is,
+adds a git remote named after it (`forge-web`) that points at the host's
+agents' mirror, and says so, then fetches the `agent/*` branches the executors
+handed back, without tags. The host serves the mirror and never runs git in an
+agent's workspace. `forge fetch` also refreshes `origin` and lists each
+sub-task with its commit count and the branch it started from:
 
 ```
 Fetching forge-web…
 Fetching origin…
-agent/fix-login  3 commits on origin/main
+agent/T-1.1  3 commits on origin/main
+agent/T-1.2  2 commits on agent/T-1.1
 ```
 
-If the host has no team for the repository, it says so, naming the host. A
+If the project has no such repository, it says so, naming the host. A
 single-agent remote from before teams (`agent-acme-widgets`) is left in the
 clone, and said once.
 
 Review the branch against that base, then ship it:
 
 ```bash
-git log -p origin/main..forge-web/agent/fix-login
-forge ship fix-login
+git log -p origin/main..forge-web/agent/T-1.1
+forge ship T-1.1
 ```
 
-A stacked task is reviewed against the task it started from, the base that
-`forge fetch` lists: for `agent/fix-tests  2 commits on agent/fix-login`, that
-is `git log -p forge-web/agent/fix-login..forge-web/agent/fix-tests`.
+A stacked sub-task is reviewed against the one it started from:
+`git log -p forge-web/agent/T-1.1..forge-web/agent/T-1.2`.
 
-`forge ship <task>` re-signs the agent's commits that are not on GitHub yet
-with your own git signing configuration, pushes `agent/<task>` and opens its
-pull request (or finds the one that exists). It fetches again first, then
-lists every commit it will sign, task by task, and asks once before signing:
-the agent may have committed since your review. It replays the commits in a
-temporary worktree, so your checkout is never touched, and runs no git hook
-there: the tree is the agent's. It never force-pushes: if GitHub's
-`agent/<task>` moved since the fetch, it stops and asks you to run `forge
+`forge ship <sub-task>` re-signs the agent's commits that are not on GitHub yet
+with your own git signing configuration, pushes `agent/<sub-task>` and opens
+its pull request (or finds the one that exists). It fetches again first, then
+lists every commit it will sign, sub-task by sub-task, and asks once before
+signing: the agent may have committed since your review. It replays the
+commits in a temporary worktree, so your checkout is never touched, and runs no
+git hook there: the tree is the agent's. It never force-pushes: if GitHub's
+`agent/<sub-task>` moved since the fetch, it stops and asks you to run `forge
 ship` again, and a conflict stops it at the commit it names. Each signature
-may need a touch of your key. A task whose pull request is already merged
+may need a touch of your key. A sub-task whose pull request is already merged
 ships new commits only after a confirmation, as a new pull request.
 
-A task whose recorded base is another task's branch ships its whole chain,
-bottom first: shipping `b`, based on `agent/a`, pushes `agent/a` then
-`agent/b`, and `b`'s pull request targets `agent/a`.
+A stacked sub-task ships its whole chain, bottom first: shipping `T-1.2`,
+based on `agent/T-1.1`, pushes `agent/T-1.1` then `agent/T-1.2`, and the pull
+request of `T-1.2` targets `agent/T-1.1`.
 
 `forge ship` needs the GitHub CLI, installed and logged in on your machine
 (`gh auth login`). `--host <name>` picks the forge host when you have several.
@@ -504,8 +488,9 @@ bottom first: shipping `b`, based on `agent/a`, pushes `agent/a` then
 ### The local VM day to day
 
 - `limactl stop forge-local` / `limactl start forge-local`. Agents stop with
-  the VM; after a start, `forge team up` starts the containers again, and you
-  `forge team assign` the tasks again (a started agent has a new session).
+  the VM; after a start, `forge team up` starts the containers again, and the
+  orchestrator hands the missions out again (a lost session is resumed on its
+  branch).
 - To start over: fetch every branch you want first (workspaces live in the
   VM), then `limactl delete forge-local`. The next `forge install` offers to
   forget the old VM and installs a new one.
@@ -541,7 +526,7 @@ The same install, on a VM that you create:
    answers. An admin account with a sudo password, or other playbook options:
    see "Installing by hand" in `ansible/README.md`.
 
-`forge team up --host forge-acme` builds its teams, `forge open --host forge-acme` opens herdr on it, and
+`forge team up --host forge-acme` builds its project, `forge open --host forge-acme` opens herdr on it, and
 `forge fetch --host forge-acme` fetches its work (step
 [4](#4-get-the-work-back)). With several hosts installed, `forge open` asks which one. `forge install`
 with no option goes to `forge-local` when it is listed, and asks which host
@@ -551,13 +536,12 @@ only when just remote hosts are listed.
 
 ### Herdr App
 
-Each agent is a machine of Herdr App, named by `forge team up`. Its terminal is
-the agent's own `hc` session on the host: it keeps running when you close the
-app, and in remote mode while your laptop sleeps (in local mode, while the VM
-runs). Herdr App reaches a container through `forge hc-via`, which runs
-`forge hc-exec` on the host over your shared SSH connection: a byte pipe that
-carries no secret, and that serves only the containers the host's
-configuration declares.
+Each container is a machine of Herdr App, named by `forge team up`. An
+executor's terminal is its own `hc` session on the host: it keeps running when
+you close the app, and in remote mode while your laptop sleeps (in local mode,
+while the VM runs). Herdr App reaches a container through `forge hc-via`, which
+runs `forge hc-exec` on the host over your shared SSH connection: a byte pipe
+that carries no secret, and that serves only the project's containers.
 
 ### Commands
 
@@ -568,19 +552,18 @@ link):
 |---|---|
 | `forge install [--remote <address>] [--host <name>]` | Install or update a host: the local VM by default, a new remote VM with `--remote`, an installed host with `--host` |
 | `forge open [--host <name>]` | Open the herdr TUI on a host |
-| `forge team up [<team>] [--host <name>]` | Converge the teams on the host (with your SSH agent forwarded), then add each container as a Herdr App machine |
-| `forge team assign <container> [<task>] [--from <task>]`, `release <container>`, `status [--json] [--quick]`, `sync <team>` | The same commands as on the host, over SSH; `assign` reads the instruction on stdin |
-| `forge team watch [--host <name>]` | The team, its Inbox and the mirror's age, redrawn every 5 s |
-| `forge answer <id> "<summary>" [--host <name>]` | Answer an agent's question; a body piped on stdin goes to a file the agent reads |
-| `forge fetch [--host <name>]` | In your clone: fetch the developers' branches from the team mirror and list the tasks (needs no `gh`) |
-| `forge ship <task> [--host <name>]` | In your clone: re-sign, push and open the PR; needs `gh auth login` |
+| `forge team up [--host <name>]` | Converge the project on the host (with your SSH agent forwarded), then add each container as a Herdr App machine |
+| `forge team assign <executor> <sub-task> [--repository <name>] [--base <ref>]`, `release <executor>`, `status [--json]`, `sync <repository>` | The same commands as on the host, over SSH; `assign` reads the instruction on stdin |
+| `forge team summary --json` | Every installed host's executors, one line of JSON (what the Herdr App bar reads) |
+| `forge fetch [--host <name>]` | In your clone: fetch the executors' branches from the agents' mirror and list the sub-tasks (needs no `gh`) |
+| `forge ship <sub-task> [--host <name>]` | In your clone: re-sign, push and open the PR; needs `gh auth login` |
 
 Run on the host, over `ssh`:
 
 | Command | What it does |
 |---|---|
-| `forge team converge [<team>]` | Create the missing containers of the configured teams (and the pilot), start the stopped ones, refresh the team mirror, and list every agent; a container the configuration no longer declares is reported and left alone |
-| `forge team assign`, `release`, `status`, `sync`, `answer` | Give an agent a task, free it, show each agent's task and session and the Inbox, refresh the mirrors, record an answer (`forge answer` from your machine is the way in; `--quick` skips the team mirror's refresh) |
+| `forge team converge` | Create the missing containers of the project, start the stopped ones, bring every container's files and the orchestrator up to date, and list them; a container the configuration no longer declares is reported and left alone |
+| `forge team assign`, `release`, `status`, `sync` | Give an executor a sub-task (your hand, without the orchestrator), free it, show each container's mission and session and the orchestrator's state, refresh a repository's origin mirror |
 | `forge list` | Every container: repository, mode, egress, state, image build |
 | `forge stop [<owner/repo>] [--force]` | Stop a container; refused while a task has uncommitted changes, unless `--force`. Commits are not checked: fetch them first |
 | `forge delete [<owner/repo>] [--force]` | Delete a single-agent container, with the same guard. Its workspace and the host's mirror stay |
@@ -592,42 +575,35 @@ Run on the host, over `ssh`:
 A bracketed argument left out is asked for, as a numbered menu.
 
 `forge start`, `forge attach`, `forge resume` and `forge finish`, and the herdr
-tabs, popups and key bindings that went with them, are gone: the teams replace
-them. A host set up before keeps its single-agent containers, which `forge list`,
+tabs, popups and key bindings that went with them, are gone, and so are the
+teams that replaced them (see [Release notes](#release-notes-the-ticket-driven-model)).
+A host set up before keeps its single-agent containers, which `forge list`,
 `stop`, `delete` and `egress` still manage; `forge setup` removes the old
 key-bindings block once from the host's herdr config.
 
-### Agents talk to each other
+### Executors and the host
 
-An agent whose role has a `talkTo` list, or the capability `assign` or
-`ask-human`, gets a channel to the host: a Unix socket, `/var/lib/forge/api.sock`
-in its container, which only `aiuser` can open and root's directory protects.
-The command `forge-team` (pushed with the container's files) speaks on it. The
-host side is `forge api serve`, a systemd user service of the forge user that
-Ansible installs and `forge team converge` restarts.
+Each container of the project gets a channel to the host: a Unix socket,
+`/var/lib/forge/api.sock` in its container, in a directory of root. In an
+executor only `aiuser` (the agent) can open it; in the control container only
+the orchestrator's user, `forge-orch`, can, and the agent's own user cannot read
+the orchestrator's state or the ticket base. The host side is `forge api
+serve`, a systemd user service of the forge user that Ansible installs and
+`forge team converge` restarts.
+
+The orchestrator assigns, releases and reads the executors' state through it.
+An executor has two verbs, through the command `forge-team`:
 
 | Command | What it does |
 |---|---|
-| `forge-team message <container> "<summary>"` | Send a message to a container of the agent's `talkTo`; the body, if any, on stdin |
-| `forge-team assign <container> [<task>] [--from <task>]` | Give a task, the instruction on stdin (`--from`: its branch starts from another task of the same developer); the agent needs `assign`, and the same rules as `forge team assign` apply (free target, owned task) |
-| `forge-team release <container>` | Free an agent: only the one that gave the task (or you) can |
-| `forge-team ask "<summary>"` | A question for you, the detail on stdin; the agent needs `ask-human` |
-| `forge-team status` | The agents it may talk to: task, session state, and what each waits on |
-
-A message has a **summary** and an optional **body**. The summary is one line of
-200 characters at most, made of letters, digits and common punctuation: it is
-typed into the recipient's terminal, after forge's own prefix, so Herdr App
-shows `[forge] message 7 from agent-web-dev-1: Done, branch agent/fix-login`.
-Anything else goes in the body, which is written to a file of the recipient's
-container (`/home/aiuser/.forge/messages/<id>.md`, named at the end of the line)
-and never reaches a terminal. A message is refused when the recipient has no
-live session; it is delivered at once, even in the middle of the recipient's
-turn.
+| `forge-team done` | The mission is finished: the host checks that `agent/<sub-task>` has commits beyond its base, copies it to the agents' mirror and records it |
+| `forge-team status` | The mission the executor holds, or none |
 
 The host knows who calls by the socket the request arrived on, never by what
-it says. Every request, accepted or refused with its reason, is a line of
-`~/.local/share/agent-forge/api/journal.jsonl` (readable by the forge user
-only). A text that holds the Claude token is refused.
+it says. Every request that changes something, accepted or refused with its
+reason, is a line of `~/.local/share/agent-forge/api/journal.jsonl` (readable
+by the forge user only), and so are `forge team assign` and `release`, under
+the caller `human`. A mission that holds the Claude token is refused.
 
 ### Rules for getting work back
 
@@ -638,19 +614,19 @@ only). A text that holds the Claude token is refused.
 - **Review agent code before running it on your machine.** Checking out an
   agent branch and running its scripts (`npm install`, test runners) runs the
   agent's code there.
-- **Large files:** a role with `"lfs": true` gets the repository's Git LFS
-  files as real content: the host fetches the objects of the tip of every
-  branch into the team mirror with your forwarded SSH agent (`forge team converge`
+- **Large files:** a repository with `"lfs": true` gives the executors its Git
+  LFS files as real content: the host fetches the objects of the tip of every
+  branch into the origin mirror with your forwarded SSH agent (`forge team converge`
   and `forge team sync`; it needs the `git-lfs` package, which the playbook
   installs), and the container reads them from that mirror, with no network
   and no credential. The first fetch can be large, and every copy counts: the
   mirror's `lfs/objects`, then the container's `.git/lfs/objects` and its
   working tree. The content is there for the tip of each branch; an older commit or
-  a tag can give pointers. A role without `lfs` gets pointers. Adding or changing an LFS file
+  a tag can give pointers. A repository without `lfs` gives pointers. Adding or changing an LFS file
   is not supported yet (the objects would not reach GitHub through
-  `forge ship`). `lfs` is read when the container is created: changing it on an
-  existing one makes `converge` say so, and the container is recreated (its
-  workspace is kept, and forge pulls its LFS content).
+  `forge ship`). A clone takes `lfs` when it is made: changing it later does not
+  convert an existing clone (delete the executor, and its workspace, once its
+  work is fetched, then `forge team converge`).
 - **Submodules:** not set up inside containers. The host mirrors the
   repository alone, so `git submodule update --init` fails for a relative URL
   (`../other.git` resolves to `/forge/other.git`, which does not exist), for
@@ -659,8 +635,8 @@ only). A text that holds the Claude token is refused.
   public HTTPS URL may work, egress permitting. Scripts that rely on a missing
   submodule fail in the container; the agent has to work around them.
 
-Inside the container, `origin` is a read-only mirror the host refreshes (with
-`forge team sync`): the agent can `git fetch origin`, never push.
+Inside an executor, `origin` is a read-only mirror the host refreshes (with
+`forge team sync <repository>`): the agent can `git fetch origin`, never push.
 
 ### Strict egress mode
 
@@ -676,8 +652,8 @@ reaches nothing.
   too). `forge setup` creates it with Claude Code's own domains active and
   common ones (GitHub, npm, PyPI, Docker Hub) commented out, each with what
   it lets a hijacked agent do. Edit it, then run `forge setup` to apply it.
-- A role with `"strict": true` in the team's configuration gets containers that
-  are strict from their first boot.
+- `"strict": true` on `project.executors` makes the executors strict from
+  their first boot.
 - `forge egress <owner/repo> strict` or `open` switches a stopped container
   (`forge stop` first); `forge egress` alone shows it.
 - `forge egress log` shows what was allowed and refused: use it to find the
@@ -688,7 +664,7 @@ reaches nothing.
   newer. Zabbly's lts-7.0 channel, which the playbook installs from, has
   published 7.0.2 since October 2026, so a host provisioned now has it. On an
   older host, `forge setup` prints a notice and skips the strict objects, and
-  a strict role is refused:
+  a strict executor is refused:
 
   ```
   NOTICE: Incus 7.0.1 is too old for strict mode, which needs 7.0.2 or later on the 7.0 LTS line ...
@@ -749,19 +725,67 @@ Both files live on the host and are optional; `forge setup` reads them.
     set; `memory` a size or a percentage of the host's; `rootDisk` is a guard
     rail, not a hard limit.
 
-  - `teams` and `pilot` (optional, `{}` and `null` by default): the teams of
-    [step 3](#3-build-a-team). A team name is lowercase letters, digits and
-    single dashes, a role name lowercase letters and digits; a container is
-    `agent-<team>-<role>` (with `-<n>` for a role with `count`), 63 characters at
-    most. The capabilities are `repo`, `publish`, `read-team`, `assign`,
-    `ask-human` and `services`; a role's `talkTo` names roles of its
-    team, `team` or `pilot` (the pilot's names teams). `forge team converge`
-    never deletes a container: lowering a `count` or removing a role leaves the
-    extra containers, reported, for you to delete.
+  - `project` (optional, `null` by default): the project of
+    [step 3](#3-set-up-a-project).
+    - `repositories`: at least one, keyed by a name of lowercase letters,
+      digits and single dashes (`web`, `api-2`), each `{"repo": "owner/repo",
+      "lfs": false}`;
+    - `executors`: `count` (1 to 16, required), `memory` (a size; the
+      profile's limit otherwise), `cpu`, `strict`, `plugins`, `env`;
+    - `tickets`: `base` (an absolute path or `~/…` on the host, a folder of its
+      own, default `~/.local/share/agent-forge/tickets`; forge refuses one that
+      holds your home, its config, its mirrors, workspaces or memories) and
+      `prefix` (the tickets' id prefix, default `T`);
+    - `gitIdentity`: `{"name": …, "email": …}`, the commits' identity.
+
+    `forge team converge` never deletes a container: lowering `count` leaves
+    the extra executors, reported, for you to delete.
+
+    A config that still declares `teams` or `pilot` is refused: they are gone
+    (see the [release notes](#release-notes-the-ticket-driven-model)).
 
   An unknown key or an invalid value stops forge with the file and the key.
 - **`~/.config/agent-forge/egress-allowlist`**: see
   [Strict egress mode](#strict-egress-mode).
+
+## Release notes: the ticket-driven model
+
+The teams of agents (a lead, developers, a reviewer, a pilot that talked to the
+leads) are replaced, in place, by a project driven by tickets: a control
+container whose orchestrator reads a ticket base, and generic executors that
+take one sub-task at a time. Nothing keeps both alive.
+
+- **Gone:** the `teams` and `pilot` keys (a config that holds them is refused,
+  with the path to follow); the roles and their capabilities and `talkTo`; the
+  API's `message`, `ask-human` and team `assign`/`release` verbs, and
+  `forge-team message|assign|release|ask`; the Inbox, `forge answer`,
+  `forge team question|answer|watch|inbox` and the Herdr App mod's inbox,
+  notifications and `forge.inbox`, `forge.watch` and `forge.sync` commands (the
+  bar stays); `forge task-base <container>`; the reference roles `lead`, `dev`
+  and `reviewer`, with the `split-request` and `review-branch` skills.
+- **Kept:** `forge team up`, `converge`, `status` and `sync` (now
+  `sync <repository>`), `forge fetch` and `forge ship` (a task is now a
+  sub-task, such as `T-1.2`); `forge team assign` and `release`, as your hand
+  on an executor; `forge notify` (the memory watchdog's notice, typed into an
+  executor's session). The API's journal keeps its file and its ids.
+
+To move a host from teams to a project:
+
+1. **Ship every task first, with the old forge.** From each repository's
+   clone, `forge fetch`, then `forge ship <task>` for every task you want to
+   keep, and pull any work still uncommitted in a container. The team mirrors
+   and the team containers are not read by the new model.
+2. **Change the config on the host.** Remove `teams` and `pilot` from
+   `~/.config/agent-forge/config.json`, declare a `project`, and delete the
+   team containers (`incus --project agent-forge delete <container> --force`;
+   their workspaces under `~/workspaces` stay until you remove them).
+3. **Update forge** (`git pull`, then `forge install`, see
+   [Updating](#updating)): it runs `forge setup` and builds the image, now
+   with `forge-orch`.
+4. **Create the project's containers:** `forge team up`.
+
+Until `teams` and `pilot` are gone from the config, every host command
+(`forge setup`, `forge install`, the API service) stops on that refusal.
 
 ## Security model
 
@@ -771,8 +795,9 @@ Both files live on the host and are optional; `forge setup` reads them.
 | A container reaches your LAN, the cloud metadata service, the host or another container | The `forge-egress` network ACL rejects private, link-local, CGNAT and multicast ranges; IPv6 is off on the bridge |
 | An agent sends code or tokens out | Accepted in the default open mode. Strict mode limits egress to your allowlist |
 | An agent publishes to GitHub | No GitHub credential in containers, and `origin` is a read-only mirror; only `forge ship`, on your machine, pushes |
-| An agent drives other agents' terminals | Each container has its own `hc` core; the host's `forge hc-exec` serves only the containers the configuration declares, from your SSH session, never from a container |
-| An agent abuses the channel to the host | Five verbs and no more, each checked against the capabilities of the container whose socket the request came through; a summary from a short list of characters, so it cannot imitate forge's prefix or press a key; a body only as a file, never in a terminal or an argv of the host; a text that holds the Claude token refused; every call in a journal |
+| An agent drives other agents' terminals | Each container has its own `hc` core; the host's `forge hc-exec` serves only the project's containers, from your SSH session, never from a container |
+| An agent abuses the channel to the host | An executor's socket answers two verbs, `done` and `status`; only the control container's, owned by the orchestrator's user, can assign or release; every request read field by field, a mission that holds the Claude token refused, every change in a journal |
+| An agent edits the tickets | The ticket base is mounted in the control container only, under the orchestrator's user's home, which the agent's user cannot enter |
 | An agent reads your Claude token | The token is a file in the agent's own container (mode 600, a directory only the agent can read) and in your host's home, exported to the agent's process alone; it covers model requests only and is revocable in claude.ai. An agent can use it, so treat it as the agent's |
 | SSH brute force on the host | Keys only, fail2ban (not in local mode), a connection rate limit (`public`), an optional source restriction |
 | Your forwarded agent is abused on the host | Containers never receive it; a hardware key asks for a touch per use |
@@ -820,14 +845,15 @@ Known limits:
 - **`herdr --remote` fails the first time:** run it in a real terminal; it
   asks before installing herdr on the host.
 - **A clone stops on `smudge filter lfs failed`** (a repository with Git LFS
-  files, on a role without `lfs`): the container was provisioned by an older
+  files, without `lfs`): the container was provisioned by an older
   forge, whose git-lfs configuration downloads LFS objects the mirror does not
   hold. Fix it once on
   the host with
   `incus --project agent-forge exec <container> -- su - aiuser -c 'git lfs install --skip-repo --skip-smudge'`,
   or recreate the container (the workspace is kept).
-- **A repository whose default branch is not `main`:** new tasks start from
-  `origin/main`, so such a repository is not supported yet.
+- **A repository whose default branch is not `main`:** give it as the base of
+  the ticket's repository (`repositories: web:develop`): a ticket's first
+  sub-task starts from `origin/<base>`.
 - **`forge setup` warns that forge runs directly on this machine:** you ran it
   outside a VM. Use the Lima VM: nothing would stand between an escaped agent
   and your machine.

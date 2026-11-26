@@ -1,11 +1,10 @@
-// Les sessions d'un membre d'équipe tournent dans le core hc de son container
+// La session d'un exécuteur tourne dans le core hc de son container
 // (DX 5, §5.8) : forge les pilote par `incus exec` avec un argv, jamais par un
 // shell. Le texte d'une consigne arrive comme fichier, jamais dans un argv.
 import type { Context, ExecResult } from "./context.ts";
-import { ForgeError, mustSucceed } from "./context.ts";
+import { ForgeError, inTime, mustSucceed } from "./context.ts";
 import { execAsAgentArgv, incus, pushText } from "./incus.ts";
 import { egressAfterStart, egressBeforeStart } from "./strict.ts";
-import type { Member } from "./team.ts";
 
 // Le nom du terminal hc de l'agent, le même dans chaque container.
 export const SESSION = "agent";
@@ -38,8 +37,10 @@ export function hcArgv(container: string, args: string[]): string[] {
 
 // `lost` : un terminal `agent` vivant dont le programme n'est pas forge-agent
 // (hc en garde un et le relance en shell après un redémarrage de la VM) : ce
-// n'est pas une session, rien n'y est livré.
-export type SessionState = "none" | "idle" | "working" | "done" | "exited" | "lost" | "unknown";
+// n'est pas une session, rien n'y est livré. `blocked` : l'agent attend une
+// réponse à son écran (l'écran de confiance de Claude Code, une question) ;
+// il vit, mais n'avance plus sans l'humain.
+export type SessionState = "none" | "idle" | "working" | "done" | "blocked" | "exited" | "lost" | "unknown";
 
 // Une session vivante est un terminal `agent` dont le programme est forge-agent
 // et qui a un statut d'agent.
@@ -48,12 +49,21 @@ export const isLive = (s: SessionState) => s === "idle" || s === "working" || s 
 // `hc get agent` : un code non nul veut dire qu'il n'y a pas de terminal. Un
 // terminal dont le programme est sorti reste listé par hc (`"state":"finished"`,
 // sans statut) : c'est une session morte, `exited`, pas un état inconnu.
-export async function sessionState(ctx: Context, container: string): Promise<SessionState> {
-  return (await sessionInfo(ctx, container)).state;
+// `timeoutMs` : un `hc get` qui ne répond pas à temps vaut `unknown`, jamais
+// `none` (l'API de projet, dont le statut ne doit pas se figer).
+export async function sessionState(ctx: Context, container: string, opts: { timeoutMs?: number } = {}): Promise<SessionState> {
+  return (await sessionInfo(ctx, container, opts.timeoutMs)).state;
 }
 
-async function sessionInfo(ctx: Context, container: string): Promise<{ state: SessionState; exitCode: unknown }> {
-  const r = await ctx.exec(hcArgv(container, ["get", SESSION]));
+// Avec ou sans délai : un appel sans `timeoutMs` garde la forme d'avant.
+const execMaybeTimed = (ctx: Context, argv: string[], timeoutMs: number | undefined): Promise<ExecResult> =>
+  timeoutMs === undefined ? ctx.exec(argv) : ctx.exec(argv, { timeoutMs });
+
+async function sessionInfo(
+  ctx: Context, container: string, timeoutMs?: number,
+): Promise<{ state: SessionState; exitCode: unknown; timedOut?: boolean }> {
+  const r = await execMaybeTimed(ctx, hcArgv(container, ["get", SESSION]), timeoutMs);
+  if (r.timedOut) return { state: "unknown", exitCode: null, timedOut: true };
   if (r.code !== 0) return { state: "none", exitCode: null };
   try {
     const t = JSON.parse(r.stdout) as { state?: unknown; exit_code?: unknown; argv?: unknown; status?: { state?: unknown } | null };
@@ -62,26 +72,10 @@ async function sessionInfo(ctx: Context, container: string): Promise<{ state: Se
     const program = Array.isArray(t.argv) && typeof t.argv[0] === "string" ? t.argv[0].split("/").pop() : undefined;
     if (program !== "forge-agent") return { state: "lost", exitCode: null };
     const state = t.status?.state;
-    return { state: state === "idle" || state === "working" || state === "done" ? state : "unknown", exitCode: null };
+    const known = state === "idle" || state === "working" || state === "done" || state === "blocked";
+    return { state: known ? state : "unknown", exitCode: null };
   } catch {
     return { state: "unknown", exitCode: null };
-  }
-}
-
-// Un forge-agent qui vient de démarrer n'a pas encore annoncé de statut
-// (`unknown`) : on attend qu'il en annonce un, une dizaine de regards d'une
-// seconde, comme `deliverMessage` attend un hc qui démarre. Les autres états
-// non vivants (`none`, `exited`, `lost`) se tranchent tout de suite.
-const LIVE_LOOKS = 10;
-const LIVE_STEP_MS = 1000;
-
-export async function awaitLiveSession(ctx: Context, container: string): Promise<boolean> {
-  const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  for (let look = 1; ; look++) {
-    const state = await sessionState(ctx, container);
-    if (isLive(state)) return true;
-    if (state !== "unknown" || look === LIVE_LOOKS) return false;
-    await sleep(LIVE_STEP_MS);
   }
 }
 
@@ -92,17 +86,20 @@ export async function awaitLiveSession(ctx: Context, container: string): Promise
 const STARTUP_LOOKS = 6;
 const STARTUP_STEP_MS = 500;
 
-async function requireStarted(ctx: Context, container: string): Promise<void> {
+async function requireStarted(ctx: Context, container: string, timeoutMs?: number): Promise<void> {
   const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   for (let i = 0; i < STARTUP_LOOKS; i++) {
     await sleep(STARTUP_STEP_MS);
-    const s = await sessionInfo(ctx, container);
+    const s = await sessionInfo(ctx, container, timeoutMs);
+    if (s.timedOut) throw new ForgeError(`hc get in ${container} timed out after ${(timeoutMs ?? 0) / 1000} s`);
     if (s.state === "exited") {
       const code = typeof s.exitCode === "number" ? String(s.exitCode) : "unknown";
       throw new ForgeError(`${container}'s agent stopped as soon as it started (exit code ${code}). ` +
         "Read its screen in the forge space of its Herdr App machine, or with hc read <machine>/agent from your machine.");
     }
-    if (s.state === "idle" || s.state === "working" || s.state === "done") return;
+    // `blocked` : l'agent a démarré et attend à son écran ; l'orchestrateur et
+    // `forge team status` le signalent.
+    if (s.state === "idle" || s.state === "working" || s.state === "done" || s.state === "blocked") return;
   }
 }
 
@@ -111,18 +108,26 @@ async function requireStarted(ctx: Context, container: string): Promise<void> {
 // lit et la donne à claude comme premier message. `task` est le nom de la
 // branche, ou null pour une tâche sans branche ; le marqueur `--forge-task` suit
 // la forme `<container>-<tâche>` que `forge list` et `forge stop` lisent.
-export async function startSession(ctx: Context, m: Member, task: string | null, instruction: string): Promise<void> {
+// `cwd` : le dossier où l'agent travaille, le clone d'un dépôt
+// (/workspace/<nom>) pour un exécuteur, /workspace par défaut.
+// `timeoutMs` : chaque appel hc ou incus qui suit l'egress a ce délai (l'API,
+// dans sa file) ; dépassé, c'est un refus qui nomme l'étape.
+export async function startSession(
+  ctx: Context, m: { name: string }, task: string | null, instruction: string, opts: { cwd?: string; timeoutMs?: number } = {},
+): Promise<void> {
+  const t = opts.timeoutMs;
+  const hc = (step: string, args: string[]) => inTime(`${step} in ${m.name}`, t, execMaybeTimed(ctx, hcArgv(m.name, args), t));
   const mode = await egressBeforeStart(ctx, m.name);
   await egressAfterStart(ctx, m.name, mode);
   // Leur échec est sans importance : il n'y avait peut-être pas de session.
-  await ctx.exec(hcArgv(m.name, ["kill", SESSION]));
-  await ctx.exec(hcArgv(m.name, ["rm", SESSION]));
-  await clearMessages(ctx, m.name);
-  await mustSucceed("push the instruction",
-    pushText(ctx, m.name, INSTRUCTION_PATH, instruction, { uid: 1001, gid: 1001, mode: "600" }));
+  await hc("hc kill", ["kill", SESSION]);
+  await hc("hc rm", ["rm", SESSION]);
+  await clearMessages(ctx, m.name, { timeoutMs: t });
+  await mustSucceed("push the instruction", inTime(`push the instruction to ${m.name}`, t,
+    pushText(ctx, m.name, INSTRUCTION_PATH, instruction, { uid: 1001, gid: 1001, mode: "600" }, { timeoutMs: t })));
   const marker = `${m.name}-${task ?? "session"}`;
-  await mustSucceed("hc run", ctx.exec(hcArgv(m.name, [
-    "run", "--bg", "--name", SESSION, "--cwd", "/workspace",
+  await mustSucceed("hc run", hc("hc run", [
+    "run", "--bg", "--name", SESSION, "--cwd", opts.cwd ?? "/workspace",
     // Herdr App ne montre que les terminaux étiquetés par un espace et un
     // onglet ; des ids qu'il ne connaît pas deviennent un espace et un onglet
     // neufs. Les mêmes ids à chaque tâche : la session suivante retombe au
@@ -131,8 +136,8 @@ export async function startSession(ctx: Context, m: Member, task: string | null,
     // L'ordre que forge-agent lit : --forge-task, puis --instruction-file, puis
     // les arguments de claude.
     "forge-agent", "--forge-task", marker, "--instruction-file", INSTRUCTION_PATH, "--permission-mode", "auto",
-  ])));
-  await requireStarted(ctx, m.name);
+  ]));
+  await requireStarted(ctx, m.name, t);
 }
 
 export const MESSAGES_DIR = "/home/aiuser/.forge/messages";
@@ -144,71 +149,22 @@ const SEND_WAIT_MS = 1000;
 // Les messages ne valent que pour la session qui les a reçus : `assign` et
 // `release` vident le dossier. Un échec est sans importance (il peut ne pas
 // exister) : il ne doit pas arrêter une assignation.
-export async function clearMessages(ctx: Context, container: string): Promise<void> {
-  await execAsAgentArgv(ctx, container, ["find", MESSAGES_DIR, "-mindepth", "1", "-delete"]);
+export async function clearMessages(ctx: Context, container: string, opts: { timeoutMs?: number } = {}): Promise<void> {
+  await inTime(`clearing the messages of ${container}`, opts.timeoutMs,
+    execAsAgentArgv(ctx, container, ["find", MESSAGES_DIR, "-mindepth", "1", "-delete"], opts));
 }
 
-// Vrai d'un membre jamais assigné comme d'un membre libéré (`release` arrête sa
-// session).
-export const NO_SESSION = "has no live session: a member has one from the moment someone assigns it a task until it is released (forge-team assign, with that capability)";
+// Vrai d'un exécuteur jamais assigné comme d'un exécuteur libéré (`release`
+// arrête sa session).
+export const NO_SESSION = "has no live session: an executor has one from the moment it is given a mission until it is released";
 
 // Arrête la session sans retirer le terminal : l'humain peut relire la session
 // terminée dans Herdr App, et le prochain `assign` la remplace (startSession).
-export async function stopSession(ctx: Context, container: string): Promise<boolean> {
-  return (await ctx.exec(hcArgv(container, ["kill", SESSION]))).code === 0;
-}
-
-// Un message de l'API (DX 5, §5.4) : le corps, s'il y en a un, devient un
-// fichier du container du destinataire ; la session ne reçoit qu'une ligne, que
-// forge seul écrit : son préfixe, un identifiant de journal, le nom de
-// l'expéditeur (tiré de la socket) et le résumé, que le protocole a vérifié
-// contre sa liste de caractères. Aucun corps ne passe par un argv ni par un
-// terminal. L'avis est tapé tout de suite, même pendant un tour : Claude Code
-// le reçoit à sa prochaine frontière d'outil, dans le tour en cours.
-// Quand l'expéditeur est un agent que le destinataire a lui-même assigné,
-// l'avis le dit (`retained` : sa tâche) et nomme qui libérer : un rappel écrit
-// par forge, au moment où l'agent doit agir. Ce ne sont que des noms de
-// container et de tâche que forge a déjà validés, jamais un texte d'agent
-// avant le résumé.
-export async function deliverMessage(
-  ctx: Context, container: string, from: string, id: number, summary: string, body: string | null,
-  retained: { task: string | null } | null = null,
-): Promise<{ turn: number }> {
-  const path = `${MESSAGES_DIR}/${id}.md`;
-  const onTask = retained === null ? "" :
-    `, on the task you assigned it (${retained.task ?? "without a branch"}; forge-team release ${from} once it is finished)`;
-  return { turn: await typeWithBody(ctx, container, `[forge] message ${id} from ${from}${onTask}: ${summary}`, path, body) };
-}
-
-// La réponse de l'humain à une question de l'agent (`forge team answer`), livrée
-// comme un message : le résumé derrière le préfixe de forge, le corps dans un
-// fichier `a<question>.md`. Seulement à une session forge-agent vivante : sans
-// elle, rien n'est tapé (« no-session »). Un autre échec de livraison se lève,
-// et la question reste ouverte pour qu'on la réessaie.
-export async function deliverAnswer(
-  ctx: Context, container: string, question: number, summary: string, body: string | null,
-): Promise<"delivered" | "no-session"> {
-  if (!(await awaitLiveSession(ctx, container))) return "no-session";
-  try {
-    await typeWithBody(ctx, container, `[forge] answer ${question} from human: ${summary}`, `${MESSAGES_DIR}/a${question}.md`, body);
-  } catch (e) {
-    // La session s'est arrêtée entre le regard et l'envoi.
-    if (e instanceof ForgeError && e.message.includes(NO_SESSION)) return "no-session";
-    throw e;
-  }
-  return "delivered";
-}
-
-// Le corps, s'il y en a un, devient un fichier du container (uid d'aiuser, mode
-// 600) ; la ligne tapée le nomme, derrière ce que forge a écrit.
-async function typeWithBody(ctx: Context, container: string, line: string, path: string, body: string | null): Promise<number> {
-  if (body !== null) {
-    const pushed = await pushText(ctx, container, path, body, { uid: 1001, gid: 1001, mode: "600" });
-    if (pushed.code !== 0) {
-      throw new ForgeError(`delivery to ${container} failed: ${firstLine(pushed.stderr) || `exit code ${pushed.code}`}`);
-    }
-  }
-  return typeNotice(ctx, container, `${line}${body === null ? "" : ` (detail: ${path})`}`);
+// `timeoutMs` : dépassé, un refus qui nomme l'étape (l'appelant décide s'il le
+// tient pour un simple avertissement).
+export async function stopSession(ctx: Context, container: string, opts: { timeoutMs?: number } = {}): Promise<boolean> {
+  const r = await inTime(`hc kill in ${container}`, opts.timeoutMs, execMaybeTimed(ctx, hcArgv(container, ["kill", SESSION]), opts.timeoutMs));
+  return r.code === 0;
 }
 
 // Tape une ligne que forge a écrite dans la session `agent` du container : un

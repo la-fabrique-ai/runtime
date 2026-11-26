@@ -1,11 +1,11 @@
-// The memory the members' limits promise, against what the host has (#143).
+// The memory the project's containers' limits promise, against what the host has (#143).
 // A container only has to reach its limit for the host to feel it: limits that
 // add up to more than the RAM leave the host to the kernel's OOM killer, which
 // does not pick containers. Pure arithmetic, plus one read of the reserve.
 import { totalmem } from "node:os";
 import type { Context } from "./context.ts";
 import type { ForgeConfig } from "./config.ts";
-import { members } from "./team.ts";
+import { projectMembers } from "./project.ts";
 
 // The slices Ansible protects with MemoryMin (role forge_memory_watchdog): sshd
 // and Incus live in system.slice, the forge user's session and `forge` in user.slice.
@@ -38,15 +38,18 @@ export async function hostReserveBytes(ctx: Context): Promise<number> {
 
 const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(1)} GiB`;
 
-// The warning, or null when the limits fit. Every declared member counts: the
-// containers share one host whichever team converge was asked for.
+// The warning, or null when the limits fit. Every container of the project
+// counts: an executor has `project.executors.memory`, or the profile's limit
+// (limits.memory) like the control container.
 export function memoryWarning(cfg: ForgeConfig, reserveBytes: number, ramBytes: number = totalmem()): string | null {
-  const all = members(cfg);
-  const promised = all.reduce((sum, m) => sum + limitBytes(m.memory ?? cfg.limits.memory, ramBytes), 0);
+  if (cfg.project === null) return null;
+  const all = projectMembers(cfg.project);
+  const limitOf = (kind: string) => (kind === "executor" ? cfg.project!.executors.memory : null) ?? cfg.limits.memory;
+  const promised = all.reduce((sum, m) => sum + limitBytes(limitOf(m.kind), ramBytes), 0);
   const room = Math.max(0, ramBytes - reserveBytes);
   if (promised <= room) return null;
-  return `WARNING: the ${all.length} members' memory limits add up to ${gib(promised)}, more than the ${gib(room)} this host ` +
+  return `WARNING: the ${all.length} containers' memory limits add up to ${gib(promised)}, more than the ${gib(room)} this host ` +
     `has for them (${gib(ramBytes)} of RAM, ${gib(reserveBytes)} kept for the host). Containers that all fill their limit ` +
-    `at once leave the host out of memory. A role with no "memory" gets the profile's limit (limits.memory, ${cfg.limits.memory}): ` +
-    "lower a role's \"memory\" or the profile's limit, or use a bigger host.";
+    `at once leave the host out of memory. Without project.executors.memory, an executor gets the profile's limit ` +
+    `(limits.memory, ${cfg.limits.memory}), as the control container does: lower one of them, lower executors.count, or use a bigger host.`;
 }

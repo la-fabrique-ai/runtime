@@ -716,14 +716,15 @@ async function herdrAppTelemetry(ctx: Context): Promise<string> {
 }
 
 // The forge mod (herdr/mods/forge): copied on every run into Herdr App's mods
-// directory. The mod is forge's own, so its files are replaced; nothing else in
-// that directory is touched, and keys.json never is: any edit makes that file the
-// person's and stops Herdr App's default updates of it (the README gives the
-// lines to bind forge.watch and forge.sync by hand).
+// directory. The mod's directory is forge's own: it is replaced whole, so a file
+// an older forge shipped (the inbox) goes with it. Nothing else in the mods
+// directory is touched, and keys.json never is: any edit makes that file the
+// person's and stops Herdr App's default updates of it.
 function installForgeMod(): string {
   const source = join(repoRoot(), "herdr", "mods", "forge");
   const target = join(herdrAppModsDir(), "forge");
   try {
+    rmSync(target, { recursive: true, force: true });
     mkdirSync(target, { recursive: true });
     cpSync(source, target, { recursive: true, force: true });
   } catch (e) {

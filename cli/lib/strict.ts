@@ -14,6 +14,7 @@ import {
   PROXY_PORT, effectiveEgress, egressNames, proxyInstance, type EgressMode, type EgressNames,
 } from "./objects.ts";
 import { configPath } from "./paths.ts";
+import { shellQuote } from "./shell.ts";
 
 // All three are root's, under /etc. forge writes them as root at every start,
 // after the agent has run: never as root through a path the agent owns (its
@@ -45,8 +46,6 @@ export function proxyEnv(plan: ProxyPlan): Record<string, string> {
     NODE_USE_ENV_PROXY: "1",
   };
 }
-
-const shellQuote = (v: string): string => `'${v.replaceAll("'", "'\\''")}'`;
 
 // Login shells (su - aiuser, ssh) read /etc/profile.d.
 export function profileScript(env: Record<string, string>): string {

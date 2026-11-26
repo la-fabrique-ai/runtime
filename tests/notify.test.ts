@@ -6,14 +6,14 @@ import { join } from "node:path";
 import { fakeContext } from "./lib/fake-context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
 import { cmdNotify, cleanProcessName, memoryKillNotice } from "../cli/lib/commands/notify.ts";
-import { OPS } from "../cli/lib/api/protocol.ts";
+import { parseMissionRequest } from "../cli/lib/api/missions.ts";
 
 let home: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "forge-notify-"));
   mkdirSync(join(home, "agent-forge"), { recursive: true });
   writeFileSync(join(home, "agent-forge", "config.json"), JSON.stringify({
-    teams: { web: { repo: "o/web", roles: { dev: { count: 1, capabilities: ["repo", "publish"] } } } },
+    project: { repositories: { web: { repo: "o/web" } }, executors: { count: 1 } },
   }));
   process.env.XDG_CONFIG_HOME = home;
   process.env.XDG_DATA_HOME = join(home, "data");
@@ -24,7 +24,7 @@ afterEach(() => {
   delete process.env.XDG_DATA_HOME;
 });
 
-const DEV = "agent-web-dev-1";
+const DEV = "agent-executor-1";
 const journal = () => join(home, "data", "agent-forge", "api", "journal.jsonl");
 const OPTS = { pid: "4242", rssKib: "9750000", stdin: async () => "eslint" };
 const LIVE = '{"argv":["forge-agent"],"state":"live","status":{"state":"working"}}';
@@ -58,10 +58,10 @@ test("notify does nothing, without an error, for a session that is not live", as
   assert.equal(sends(none).length, 0);
 });
 
-test("notify only serves declared team members, never forge-proxy", async () => {
+test("notify only serves the project's containers, never forge-proxy", async () => {
   const ctx = setup(LIVE);
   await assert.rejects(() => cmdNotify(ctx, "forge-proxy", "memory-kill", OPTS), /container must be agent-<name>/);
-  await assert.rejects(() => cmdNotify(ctx, "agent-other", "memory-kill", OPTS), /not declared in the config/);
+  await assert.rejects(() => cmdNotify(ctx, "agent-other", "memory-kill", OPTS), /not a container of the project/);
   assert.equal(sends(ctx).length, 0);
 });
 
@@ -80,7 +80,9 @@ test("the name is read from stdin and cleaned there, whatever it holds", async (
 });
 
 test("notify is not a verb of the API", () => {
-  assert.ok(!(OPS as readonly string[]).includes("notify"));
+  for (const kind of ["control", "executor"] as const) {
+    assert.throws(() => parseMissionRequest('{"op":"notify"}', kind, []), /notify is not a verb/);
+  }
 });
 
 test("notify refuses what it cannot read", async () => {

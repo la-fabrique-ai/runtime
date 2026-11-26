@@ -1,428 +1,313 @@
-// forge team converge | assign | release | status | sync (DX 5, §5.3, §5.5) :
-// les équipes d'agents, du côté de l'hôte. Les équipes viennent de la config de
-// forge ; chaque membre est un container, que `converge` provisionne.
+// forge team converge | status | sync | assign | release | for-repo |
+// task-base | upload-pack, du côté de l'hôte : un projet (forge à tickets),
+// c'est-à-dire un container de contrôle, N exécuteurs, et par dépôt un miroir
+// d'origine et un miroir des agents. Les missions viennent de l'orchestrateur
+// du contrôle, par l'API ; `assign` et `release` sont la main de l'humain sur un
+// exécuteur, sans l'orchestrateur.
 import type { Context } from "../context.ts";
 import { ForgeError } from "../context.ts";
 import { restartApiService } from "../api/access.ts";
-import { readEnvFile } from "../dotenv.ts";
-import { handedOutSecrets } from "./api.ts";
-import { findQuestion, inbox, Journal, journalPath, memberWaitingOn, readEntries, type Question } from "../api/journal.ts";
-import { BODY_MAX, checkSummary, checkText, INSTRUCTION_MAX, REQUEST_MAX } from "../api/protocol.ts";
+import { Journal, journalPath } from "../api/journal.ts";
+import { cloneStates, humanAssign, humanRelease, MISSION_KEY, readHeld } from "../api/missions.ts";
+import { INSTRUCTION_MAX } from "../api/protocol.ts";
+import { readBranchRecords } from "../branch-records.ts";
 import type { ForgeConfig } from "../config.ts";
 import { loadConfig } from "../config.ts";
-import { baseKey, provisioningMarker } from "../containers.ts";
+import { provisioningMarker } from "../containers.ts";
+import { readEnvFile } from "../dotenv.ts";
+import { sessionState, type SessionState } from "../hc-session.ts";
 import { forgeProject, listInstances, type Instance } from "../incus.ts";
-import { fetchMirrorLfs, originMirrorAge, refreshMirror } from "../mirror.ts";
+import { fetchMirrorLfs, refreshMirror } from "../mirror.ts";
+import type { HeldMission } from "../orchestrator/host.ts";
 import { configPath } from "../paths.ts";
-import { ensureRunning } from "../session.ts";
-import { deliverAnswer, sessionState, startSession, type SessionState } from "../hc-session.ts";
-import { assign, busyState, release } from "../tasks.ts";
-import { ageLabel, mirrorLine } from "../age.ts";
 import { printableText } from "../printable.ts";
+import { ensureRepoMirrors, projectMembers, repoOriginMirror, repoTeamMirror, type ProjectMember } from "../project.ts";
+import type { ProjectConfig } from "../project-config.ts";
+import {
+  convergeControl, convergeExecutor, orchestratorState, provisionControl, provisionExecutor, type OrchestratorState,
+} from "../project-provision.ts";
 import { columnWidths, formatRow } from "../table.ts";
-import { members, teamWantsLfs, type Member } from "../team.ts";
-import { ensureMemberMounts, installMemberFiles, originMirrorPath, provisionMember } from "../team-provision.ts";
-import { requireHostLfs } from "./provision.ts";
-import { refreshTeamMirror } from "../team-mirror.ts";
-import { teamMirrorPath } from "../mirror.ts";
 import { hostReserveBytes, memoryWarning } from "../team-memory.ts";
-import { containerConfig, safeRef } from "./task-base.ts";
+import { validateGitRef } from "../validate.ts";
+import { handedOutSecrets } from "./api.ts";
+import { requireHostLfs } from "./provision.ts";
 
-const USAGE = `Usage: forge team converge [<team>]
-       forge team assign <container> [<task>] [--from <task>]   (the instruction is read from stdin)
-       forge team release <container>
-       forge team question <question id> [--json]   (the summary and the detail of a question of the Inbox)
-       forge team answer <question id> [--json]   (the answer is read from stdin, as JSON: {"summary": "…", "body": "…"})
+const USAGE = `Usage: forge team converge
        forge team status [--json] [--quick]
-       forge team sync <team>
-       forge team for-repo <owner/repo> | task-base <team> | upload-pack <team>   (read by forge fetch and forge ship)`;
-
+       forge team sync <repository>
+       forge team assign <executor> <sub-task> [--repository <name>] [--base <ref>]   (the instruction is read from stdin)
+       forge team release <executor>
+       forge team for-repo <owner/repo> | task-base <repository> | upload-pack <repository>   (read by forge fetch and forge ship)`;
 
 // `hostMemory` : la RAM de l'hôte, en octets ; les tests la fixent.
-export type TeamOptions = { json?: boolean; quick?: boolean; from?: string; stdin?: () => Promise<string>; hostMemory?: number };
+export type TeamOptions = {
+  json?: boolean; quick?: boolean; repository?: string; base?: string; stdin?: () => Promise<string>; hostMemory?: number;
+};
 
-async function readStdinUpTo(max: number, what: string, usage: string): Promise<string> {
+// Ce que `forge team status --json` dit d'un membre d'un projet.
+export type ProjectMemberStatus = {
+  name: string; kind: ProjectMember["kind"]; present: boolean;
+  mission: HeldMission | null; // celle d'un exécuteur ; toujours null pour le contrôle
+  session: SessionState; // "none" quand il est absent ou arrêté
+  // Le contrôle seul : l'état du service forge-orchestrator ; "inactive"
+  // quand le container est absent ou arrêté.
+  orchestrator?: OrchestratorState;
+};
+export type ProjectStatus = { members: ProjectMemberStatus[] };
+
+const SUBCOMMANDS = ["converge", "status", "sync", "assign", "release", "for-repo", "task-base", "upload-pack"];
+
+export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = {}): Promise<number> {
+  const [sub, a, b] = args;
+  if (!SUBCOMMANDS.includes(sub ?? "")) throw new ForgeError(USAGE);
+  if (opts.json && sub !== "status") throw new ForgeError(`--json only goes with status: forge team status --json\n${USAGE}`);
+  if (opts.quick && sub !== "status") throw new ForgeError(`--quick only goes with status: forge team status --quick\n${USAGE}`);
+  if ((opts.repository !== undefined || opts.base !== undefined) && sub !== "assign") {
+    throw new ForgeError(`--repository and --base only go with assign\n${USAGE}`);
+  }
+  const cfg = loadConfig(configPath());
+  // Lu par une machine (forge fetch) : sans projet, pas de message sur stdout.
+  if (cfg.project === null) {
+    if (sub === "for-repo") return 1;
+    throw new ForgeError(`no project in ${configPath()}: declare "project" there first (see the README).`);
+  }
+  const p = cfg.project;
+  switch (sub) {
+    case "converge": return converge(ctx, p, cfg, a, opts);
+    case "status": return status(ctx, p, opts.json === true);
+    case "sync": return sync(ctx, p, a);
+    case "assign": return assignCommand(ctx, p, a, b, opts);
+    case "release": return releaseCommand(ctx, p, a);
+    case "for-repo": return forRepo(ctx, p, a);
+    case "task-base": return taskBase(ctx, p, a);
+    default: return uploadPack(ctx, p, a);
+  }
+}
+
+async function readStdin(): Promise<string> {
   // Un terminal ne donne pas de consigne : le dire plutôt qu'attendre sans rien afficher.
-  if (process.stdin.isTTY) throw new ForgeError(`the ${what} is read from stdin: ${usage}`);
+  if (process.stdin.isTTY) throw new ForgeError("the instruction is read from stdin: forge team assign <executor> <sub-task> < instruction.md");
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of process.stdin) {
     size += (chunk as Buffer).length;
-    if (size > max) throw new ForgeError(`the ${what} is longer than ${max} bytes.`);
+    if (size > INSTRUCTION_MAX) throw new ForgeError(`the instruction is longer than ${INSTRUCTION_MAX} bytes.`);
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks).toString("utf8");
 }
 
-const readStdin = () => readStdinUpTo(INSTRUCTION_MAX, "instruction", "forge team assign <container> <task> < instruction.md");
-// Le JSON de la réponse peut multiplier un texte par six en l'échappant : le plafond de l'API.
-const readAnswer = () => readStdinUpTo(REQUEST_MAX, "answer", "forge answer <question id> \"<summary>\" from your machine");
-
-export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = {}): Promise<number> {
-  const [sub, a, b] = args;
-  if (opts.json && !["status", "question", "answer"].includes(sub ?? "")) {
-    throw new ForgeError(`--json only goes with status, question and answer: forge team status --json\n${USAGE}`);
-  }
-  if (opts.quick && sub !== "status") throw new ForgeError(`--quick only goes with status: forge team status --quick\n${USAGE}`);
-  if (opts.from !== undefined && sub !== "assign") {
-    throw new ForgeError(`--from only goes with assign: forge team assign <container> <task> --from <task>\n${USAGE}`);
-  }
-  if (!["converge", "assign", "release", "answer", "question", "status", "sync", "for-repo", "task-base", "upload-pack"].includes(sub ?? "")) {
-    throw new ForgeError(USAGE);
-  }
-  const cfg = loadConfig(configPath());
-  // Lu par une machine (forge fetch) : sans équipe, pas de message sur stdout.
-  if (sub === "for-repo") return forRepo(ctx, cfg, a);
-  if (Object.keys(cfg.teams).length === 0 && cfg.pilot === null) {
-    throw new ForgeError(`no team in ${configPath()}: declare "teams" (and optionally "pilot") there first.`);
-  }
-  switch (sub) {
-    case "converge": return converge(ctx, cfg, a, opts);
-    case "assign": return assignCommand(ctx, cfg, a, b, opts.from ?? null, opts.stdin ?? readStdin);
-    case "release": return releaseCommand(ctx, cfg, a);
-    case "question": return questionCommand(ctx, a, opts.json === true);
-    case "answer": return answerCommand(ctx, cfg, a, opts.stdin ?? readAnswer, opts.json === true);
-    case "status": return status(ctx, cfg, opts);
-    case "task-base": return taskBase(ctx, cfg, a);
-    case "upload-pack": return uploadPack(ctx, cfg, a);
-    default: return sync(ctx, cfg, a);
-  }
-}
-
-function requireTeam(cfg: ForgeConfig, team: string | undefined): string {
-  if (team === undefined || !(team in cfg.teams)) {
-    throw new ForgeError(`${team === undefined ? "a team name is required" : `${team} is not a declared team`} ` +
-      `(declared: ${Object.keys(cfg.teams).join(", ") || "none"}).\n${USAGE}`);
-  }
-  return team;
-}
-
-async function converge(ctx: Context, cfg: ForgeConfig, team: string | undefined, opts: TeamOptions): Promise<number> {
-  if (team !== undefined) requireTeam(cfg, team);
-  const wanted = members(cfg).filter((m) => team === undefined || m.team === team);
-  // Un .env illisible, ouvert aux autres ou mal formé arrête tout, avant le premier container.
-  for (const m of wanted) if (m.env !== null) readEnvFile(m.env);
-  const existing = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
-  // Dites en dernier : stderr et stdout n'arrivent pas dans l'ordre par SSH, et
-  // une NOTE au milieu des lignes du membre suivant se lit mal.
-  const notes: string[] = [];
-  for (const m of wanted) {
-    const instance = existing.get(m.name);
-    let changed = false;
-    if (!instance) {
-      await provisionMember(ctx, cfg, m);
-    } else if (await provisioningMarker(ctx, m.name) !== null) {
-      ctx.err(`WARNING: ${m.name} is half-provisioned: left as is. Delete it (incus --project ${forgeProject()} delete ${m.name} --force) and run converge again.`);
-      continue;
-    } else {
-      if (instance.status !== "Running") await ensureRunning(ctx, m.name);
-      // Un container déjà là reçoit les fichiers de la version courante de forge
-      // et du prompt de son rôle, comme un neuf : sans cela, une mise à jour
-      // n'atteindrait que les containers créés après elle.
-      // Le clone se fait une fois : un rôle qui change de mode LFS ne change pas
-      // le container déjà là. forge le dit, il ne reconvertit rien.
-      if ((instance.config?.["user.forge.lfs"] ?? "false") !== String(m.lfs)) {
-        notes.push(`NOTE: ${m.name} was created with lfs ${!m.lfs}, its role now says lfs ${m.lfs}. ` +
-          `Delete it (incus --project ${forgeProject()} delete ${m.name} --force; its workspace survives) and run converge again.`);
-      }
-      ctx.out(`Updating ${m.name}...`);
-      await ensureMemberMounts(ctx, cfg, m);
-      changed = (await installMemberFiles(ctx, m)).instructionsChanged;
-    }
-    if (m.role === "pilot" && m.reference !== null && !m.capabilities.includes("read-repos")) {
-      notes.push(`NOTE: ${m.name} uses the reference prompt, which designs from the code: ` +
-        'add "read-repos" to pilot.capabilities, then run converge again.');
-    }
-    // Le Pilote a une session permanente : elle repart si elle manque ou si elle
-    // est morte (startSession retire d'abord l'ancien terminal).
-    if (m.role === "pilot") {
-      const state = await sessionState(ctx, m.name);
-      if (["none", "exited", "lost"].includes(state)) {
-        await startSession(ctx, m, null, "");
-        ctx.out(`Started ${m.name}'s session.`);
-      } else if (changed) {
-        // Elle ne relit pas ses instructions, et la tuer perdrait la conversation
-        // avec l'humain : forge le dit, l'humain choisit le moment.
-        notes.push(`NOTE: ${m.name}'s instructions or environment changed, but its running session keeps the old ones. ` +
-          "To restart it (the conversation is lost): stop its `agent` terminal in Herdr App (or `hc kill <the Pilot's machine>/agent`), " +
-          "then run forge team up again.");
-      }
-    }
-  }
-  // Converger une seule équipe écarte le Pilote (sans équipe) : il lirait pourtant
-  // le dépôt de cette équipe. S'il tourne et déclare read-repos (le clone passe par
-  // un exec), ses montages (idempotents) reçoivent le miroir et le clone de
-  // l'équipe. Jamais créé ni démarré ici.
-  if (team !== undefined) {
-    for (const m of members(cfg)) {
-      if (m.team === null && m.capabilities.includes("read-repos") && existing.get(m.name)?.status === "Running") {
-        await ensureMemberMounts(ctx, cfg, m);
-      }
-    }
-  }
-  // Le service ne connaît que les membres de la config qu'il a lue au démarrage.
-  await restartApiService(ctx);
-  for (const t of Object.keys(cfg.teams).filter((x) => team === undefined || x === team)) {
-    const r = await refreshTeamMirror(ctx, cfg, t);
-    for (const name of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${name}.`);
-  }
-  await printMembers(ctx, cfg, wanted, team);
-  // Un avertissement, jamais un refus : les limites ne sont pas toutes atteintes en même temps.
-  const overbooked = memoryWarning(cfg, await hostReserveBytes(ctx), opts.hostMemory);
-  if (overbooked !== null) ctx.err(overbooked);
-  for (const note of notes) ctx.err(note);
-  return 0;
-}
-
-// Une ligne par membre déclaré, puis une par container d'équipe que la config
-// ne déclare plus : converge ne supprime jamais un container.
-async function printMembers(ctx: Context, cfg: ForgeConfig, wanted: Member[], team: string | undefined): Promise<void> {
-  const instances = await listInstances(ctx);
-  const rows: string[][] = [];
-  for (const m of wanted) {
-    const busy = await busyState(ctx, m.name);
-    rows.push([m.name, m.role, instances.find((i) => i.name === m.name)?.status ?? "Missing", taskLabel(busy?.task ?? null)]);
-  }
-  const widths = columnWidths(rows);
-  for (const row of rows) ctx.out(formatRow(row, widths));
-  const declared = new Set(members(cfg).map((m) => m.name));
-  for (const i of instances) {
-    const t = i.config["user.forge.team"];
-    if (t !== undefined && !declared.has(i.name) && (team === undefined || t === team)) {
-      ctx.out(`${i.name}: not in the config, left as is`);
-    }
-  }
-}
-
-const taskLabel = (task: string | null) => task ?? "free";
-
+// La main de l'humain sur un exécuteur (spec §6.10) : une mission `dev` de la
+// sous-tâche, sa consigne lue sur stdin. Le dépôt et la base viennent des
+// options, sinon de la fiche de la branche (une sous-tâche déjà confiée), sinon
+// du seul dépôt du projet et de origin/main. Ni l'orchestrateur ni les tickets
+// ne sont consultés ; l'hôte garde ses propres refus (un exécuteur occupé, une
+// sous-tâche tenue ailleurs).
 async function assignCommand(
-  ctx: Context, cfg: ForgeConfig, to: string | undefined, task: string | undefined, from: string | null, stdin: () => Promise<string>,
+  ctx: Context, p: ProjectConfig, to: string | undefined, subtask: string | undefined, opts: TeamOptions,
 ): Promise<number> {
-  if (to === undefined) throw new ForgeError(`a container name is required.\n${USAGE}`);
-  const text = (await stdin()).trim();
-  if (text === "") throw new ForgeError("the instruction is empty: give it on stdin (forge team assign <container> <task> < instruction.md).");
-  await assign(ctx, cfg, { to, task: task ?? null, from, text, by: "human" });
-  ctx.out(`Assigned ${task ?? "a task"} to ${to}.`);
+  if (to === undefined || subtask === undefined) throw new ForgeError(`an executor and a sub-task are required.\n${USAGE}`);
+  const record = readBranchRecords().find((r) => r.branch === `agent/${subtask}`);
+  const repos = Object.keys(p.repositories);
+  const repository = opts.repository ?? record?.repository ?? (repos.length === 1 ? repos[0] : undefined);
+  if (repository === undefined) {
+    throw new ForgeError(`the project has several repositories: say which one with --repository (${repos.join(", ")})`);
+  }
+  const base = opts.base ?? record?.base ?? "origin/main";
+  if (opts.base !== undefined) validateGitRef(base);
+  const instruction = await (opts.stdin ?? readStdin)();
+  const mission = {
+    kind: "dev", ticket: subtask.slice(0, Math.max(0, subtask.indexOf("."))), subtask, repository,
+    branch: `agent/${subtask}`, base, instruction,
+  };
+  await humanAssign(ctx, p, Journal.open(journalPath()), handedOutSecrets(ctx), to, mission);
+  ctx.out(`Assigned ${subtask} to ${to} (${repository}, from ${base}).`);
   return 0;
 }
 
-async function releaseCommand(ctx: Context, cfg: ForgeConfig, to: string | undefined): Promise<number> {
-  if (to === undefined) throw new ForgeError(`a container name is required.\n${USAGE}`);
-  await release(ctx, cfg, { to, by: "human" });
+async function releaseCommand(ctx: Context, p: ProjectConfig, to: string | undefined): Promise<number> {
+  if (to === undefined) throw new ForgeError(`an executor is required.\n${USAGE}`);
+  await humanRelease(ctx, p, Journal.open(journalPath()), to);
   ctx.out(`Released ${to}.`);
   return 0;
 }
 
-// Le résumé et le corps d'une question, pour que l'humain puisse y répondre. Le
-// texte vient d'un agent : il passe par printableText (le saut de ligne reste).
-// Avec --json, un seul objet sur une ligne : ce que lit la boîte du mod de Herdr App.
-async function questionCommand(ctx: Context, idArg: string | undefined, json: boolean): Promise<number> {
-  if (idArg === undefined || !/^[0-9]{1,15}$/.test(idArg)) throw new ForgeError(`a question number is required.\n${USAGE}`);
-  const id = Number(idArg);
-  const entries = readEntries(journalPath());
-  const ask = entries.find((e) => e.id === id && e.op === "ask-human" && e.outcome === "ok");
-  if (ask === undefined) throw new ForgeError(`no question ${id}: forge team status lists the open ones`);
-  const state = findQuestion(entries, id) === "answered" ? "answered" : "open";
-  if (json) {
-    ctx.out(JSON.stringify({
-      id, from: printableText(ask.caller), time: ask.time, state,
-      summary: printableText(ask.summary ?? ""), body: ask.text === null ? null : printableText(ask.text),
-    }));
-    return 0;
+function requireRepository(p: ProjectConfig, name: string | undefined): string {
+  if (name === undefined || !Object.hasOwn(p.repositories, name)) {
+    throw new ForgeError(`${name === undefined ? "a repository name is required" : `${name} is not a repository of the project`} ` +
+      `(declared: ${Object.keys(p.repositories).join(", ")}).\n${USAGE}`);
   }
-  ctx.out(`#${id} from ${printableText(ask.caller)}, ${ageLabel(Date.now() - Date.parse(ask.time))} ago (${state})`);
-  ctx.out(printableText(ask.summary ?? ""));
-  if (ask.text !== null) {
-    ctx.out("");
-    ctx.out(printableText(ask.text));
-  }
-  return 0;
+  return name;
 }
 
-// La réponse de l'humain à une question de la boîte (`forge answer`, de son
-// poste). Ce n'est pas un verbe de l'API : seul l'hôte la lance, aucun agent ne
-// peut l'appeler. Une réponse qui ne peut pas être livrée (la session de l'agent
-// n'est plus là) est quand même consignée, et la question se ferme : l'humain
-// l'apprend ici, il ne la pose pas deux fois.
-async function answerCommand(
-  ctx: Context, cfg: ForgeConfig, idArg: string | undefined, stdin: () => Promise<string>, json: boolean,
-): Promise<number> {
-  if (idArg === undefined || !/^[0-9]{1,15}$/.test(idArg)) throw new ForgeError(`a question number is required.\n${USAGE}`);
-  const id = Number(idArg);
-  const journal = Journal.open(journalPath());
-  const question = findQuestion(journal.entries(), id);
-  if (question === null) throw new ForgeError(`no question ${id} in the Inbox: forge team status lists the open ones`);
-  if (question === "answered") throw new ForgeError(`question ${id} is already answered`);
-  const { summary, body } = parseAnswer(await stdin(), handedOutSecrets(ctx));
-  const delivery = await deliverAnswer(ctx, question.from, id, summary, body);
-  journal.append({
-    caller: "human", op: "answer", to: question.from, task: null, outcome: "ok",
-    error: delivery === "delivered" ? null : `not delivered: ${question.from} has no live session`,
-    summary, text: body, question: id,
-  }, new Date(), 0);
-  // Avec --json, ce que la boîte du mod de Herdr App montre après l'envoi.
-  if (json) ctx.out(JSON.stringify({ id, to: question.from, delivered: delivery === "delivered" }));
-  else ctx.out(delivery === "delivered"
-    ? `Answered #${id} (delivered to ${question.from}).`
-    : `Answered #${id}: ${question.from} has no live session, the answer is recorded but not delivered.`);
-  return 0;
+// La mission que tient un exécuteur (MISSION_KEY), lue comme l'API la lit ;
+// "unreadable" pour une valeur abîmée, qui n'est ni libre ni lisible.
+const heldMission = (i: Instance | undefined) => readHeld(i?.config[MISSION_KEY]);
+
+function missionLabel(m: ProjectMember, held: HeldMission | null | "unreadable"): string {
+  if (m.kind === "control") return "-";
+  if (held === "unreadable") return "unreadable";
+  return held === null ? "free" : `${held.subtask} (${held.repository})`;
 }
 
-// `{"summary": …, "body"?: …}` : les règles de l'API sur un résumé et un corps,
-// les mêmes secrets refusés, avant que rien ne soit écrit ou tapé.
-function parseAnswer(raw: string, secrets: readonly string[]): { summary: string; body: string | null } {
-  let o: unknown;
-  try {
-    o = JSON.parse(raw);
-  } catch {
-    throw new ForgeError("the answer on stdin is not valid JSON: {\"summary\": \"…\", \"body\": \"…\"}");
+// Les miroirs de chaque dépôt (l'agent SSH transmis), puis chaque membre :
+// absent, il est provisionné ; à moitié provisionné, laissé tel quel ; présent,
+// il reçoit les fichiers, devices et clones de la version courante. converge ne
+// supprime jamais un container, et ne remplit pas les miroirs des agents : c'est
+// le `done` de l'API qui y range une branche.
+async function converge(ctx: Context, p: ProjectConfig, cfg: ForgeConfig, team: string | undefined, opts: TeamOptions): Promise<number> {
+  if (team !== undefined) {
+    throw new ForgeError(`a project converges as a whole: forge team converge, without a team (got ${printableText(team)}).\n${USAGE}`);
   }
-  if (typeof o !== "object" || o === null || Array.isArray(o)) throw new ForgeError("the answer on stdin must be a JSON object");
-  const { summary, body, ...extra } = o as Record<string, unknown>;
-  if (Object.keys(extra).length > 0) throw new ForgeError("the answer has a summary and an optional body, nothing else");
-  if (typeof summary !== "string") throw new ForgeError("the answer's summary must be a string");
-  if (body !== undefined && (typeof body !== "string" || body === "")) throw new ForgeError("the answer's body must be a non-empty string: leave it out");
-  checkSummary(summary, secrets);
-  if (body !== undefined) checkText(body as string, BODY_MAX, "body", secrets);
-  return { summary, body: (body as string | undefined) ?? null };
-}
+  // Un .env illisible, ouvert aux autres ou mal formé arrête tout, avant le premier container.
+  if (p.executors.env !== null) readEnvFile(p.executors.env);
+  if (Object.values(p.repositories).some((r) => r.lfs)) await requireHostLfs(ctx);
+  await ensureRepoMirrors(ctx, p);
 
-// Ce que l'hôte sait d'un membre : l'objet que `forge team status --json` donne
-// aux affichages (watch, le mod de Herdr App, `team up`).
-export type MemberStatus = {
-  name: string; team: string | null; role: string; present: boolean;
-  task: string | null; // la branche, ou NO_BRANCH ; null quand il est libre
-  assignedBy: string | null;
-  session: SessionState; // "none" quand il est absent ou arrêté
-  waitingOn: string | null; // null sauf session idle ou done
-};
-export type TeamStatus = {
-  members: MemberStatus[];
-  inbox: Question[];
-  mirrors: { team: string; originAgeSeconds: number | null }[];
-};
-
-// `--quick` : sans rafraîchir le miroir d'équipe, que ses clients interrogent
-// toutes les quelques secondes (§5.4). Sinon, le miroir d'équipe se rafraîchit
-// d'abord (§5.5) : un échec est un avertissement sur stderr, jamais un échec de status.
-async function status(ctx: Context, cfg: ForgeConfig, opts: TeamOptions): Promise<number> {
-  if (opts.quick !== true) {
-    for (const t of Object.keys(cfg.teams)) {
-      try {
-        const r = await refreshTeamMirror(ctx, cfg, t);
-        for (const name of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${name}.`);
-      } catch (e) {
-        ctx.err(`WARNING: could not refresh the team mirror of ${t}: ${e instanceof Error ? e.message : String(e)}`);
-      }
+  const existing = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
+  const wanted = projectMembers(p);
+  for (const m of wanted) {
+    if (!existing.has(m.name)) {
+      await (m.kind === "control" ? provisionControl : provisionExecutor)(ctx, cfg, m);
+      continue;
     }
+    if (await provisioningMarker(ctx, m.name) !== null) {
+      ctx.err(`WARNING: ${m.name} is half-provisioned: left as is. Delete it (incus --project ${forgeProject()} delete ${m.name} --force) and run converge again.`);
+      continue;
+    }
+    ctx.out(`Updating ${m.name}...`);
+    await (m.kind === "control" ? convergeControl : convergeExecutor)(ctx, cfg, m);
   }
-  const instances = new Map((await listInstances(ctx)).map((i: Instance) => [i.name, i]));
-  const journal = readEntries(journalPath());
-  const members_: MemberStatus[] = [];
-  for (const m of members(cfg)) {
-    const running = instances.get(m.name)?.status === "Running";
-    const busy = instances.has(m.name) ? await busyState(ctx, m.name) : null;
-    const session = running ? await sessionState(ctx, m.name) : "none";
-    members_.push({
-      name: m.name, team: m.team, role: m.role, present: instances.has(m.name),
-      task: busy?.task ?? null, assignedBy: busy === null || busy.assignedBy === "" ? null : busy.assignedBy,
-      session, waitingOn: memberWaitingOn(journal, m.name, session),
-    });
+  // Le service ne connaît que les membres de la config qu'il a lue au démarrage.
+  await restartApiService(ctx);
+
+  const instances = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
+  printTable(ctx, wanted.map((m) => [m.name, m.kind, instances.get(m.name)?.status ?? "Missing", missionLabel(m, heldMission(instances.get(m.name)))]));
+  // Un exécuteur en trop (count abaissé) reste : son clone peut porter du travail.
+  const declared = new Set(wanted.map((m) => m.name));
+  for (const i of instances.values()) {
+    const role = i.config["user.forge.role"];
+    if ((role === "executor" || role === "control") && !declared.has(i.name)) ctx.out(`${i.name}: not in the config, left as is`);
   }
-  const now = new Date();
-  const result: TeamStatus = {
-    members: members_, inbox: inbox(journal),
-    mirrors: Object.keys(cfg.teams).map((team) => ({ team, originAgeSeconds: originMirrorAge(team, now) })),
-  };
-  if (opts.json) {
-    ctx.out(JSON.stringify(result));
-    return 0;
-  }
-  // Ce qui vient d'un agent (un résumé) passe par printableText, comme partout où il atteint un terminal.
-  const head = ["NAME", "ROLE", "TASK", "SESSION", "WAITING"];
-  const table = members_.map((r) => [r.name, r.role, taskLabel(r.task), r.session, r.waitingOn ?? "-"].map(printableText));
+  // Un avertissement, jamais un refus : les limites ne sont pas toutes atteintes en même temps.
+  const overbooked = memoryWarning(cfg, await hostReserveBytes(ctx), opts.hostMemory);
+  if (overbooked !== null) ctx.err(overbooked);
+  return 0;
+}
+
+function printTable(ctx: Context, rows: string[][], head = ["NAME", "KIND", "STATUS", "MISSION"]): void {
+  const table = rows.map((r) => r.map(printableText));
   const widths = columnWidths([head, ...table]);
   ctx.out(formatRow(head, widths));
   for (const row of table) ctx.out(formatRow(row, widths));
-  if (result.inbox.length > 0) {
-    ctx.out("INBOX");
-    for (const q of result.inbox) {
-      ctx.out(`#${q.id} ${printableText(q.from)} ${ageLabel(now.getTime() - Date.parse(q.time))}: ${printableText(q.summary)}`);
+}
+
+// Aucun miroir à rafraîchir en mode projet : `--quick` ne retire rien.
+async function status(ctx: Context, p: ProjectConfig, json: boolean): Promise<number> {
+  const instances = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
+  const members: ProjectMemberStatus[] = [];
+  const rows: string[][] = [];
+  for (const m of projectMembers(p)) {
+    const inst = instances.get(m.name);
+    const held = m.kind === "executor" ? heldMission(inst) : null;
+    if (held === "unreadable") ctx.err(`WARNING: ${m.name} has an unreadable ${MISSION_KEY}: release it.`);
+    const session = inst?.status === "Running" ? await sessionState(ctx, m.name) : "none";
+    // L'agent attend à son écran (l'écran de confiance de Claude Code, une
+    // question) : la mission n'avance plus sans l'humain.
+    if (m.kind === "executor" && held !== null && held !== "unreadable" && session === "blocked") {
+      ctx.err(`WARNING: ${m.name} holds ${held.subtask} but its agent is blocked, waiting for an answer on its screen: read it with hc read <machine>/agent`);
     }
+    // Un exécuteur libre dont un clone a des changements suivis refuserait
+    // toute mission : l'API le dit `unknown` à l'orchestrateur, qui ne lui en
+    // donne plus ; l'humain, lui, l'apprend ici.
+    if (m.kind === "executor" && held === null && inst?.status === "Running") {
+      for (const c of await cloneStates(ctx, m.name, p)) {
+        if (c.state === "clean") continue;
+        ctx.err(c.state === "dirty"
+          ? `WARNING: ${m.name} is free but /workspace/${c.repository} has uncommitted changes: it gets no mission until they are committed or discarded.`
+          : `WARNING: ${m.name} is free but git status in /workspace/${c.repository} failed or did not answer: it gets no mission until it does.`);
+      }
+    }
+    const row: ProjectMemberStatus = { name: m.name, kind: m.kind, present: inst !== undefined, mission: held === "unreadable" ? null : held, session };
+    let label = missionLabel(m, held);
+    if (m.kind === "control") {
+      row.orchestrator = inst?.status === "Running" ? await orchestratorState(ctx, m.name) : "inactive";
+      label = `orchestrator ${row.orchestrator}`;
+    }
+    members.push(row);
+    rows.push([m.name, m.kind, inst?.status ?? "Missing", session, label]);
   }
-  for (const m of result.mirrors) {
-    ctx.out(mirrorLine(m.team, m.originAgeSeconds));
+  if (json) {
+    ctx.out(JSON.stringify({ members } satisfies ProjectStatus));
+    return 0;
   }
+  printTable(ctx, rows, ["NAME", "KIND", "STATUS", "SESSION", "MISSION"]);
   return 0;
 }
 
-// Le miroir d'origine de l'équipe (GitHub, par l'agent SSH transmis), puis le
-// miroir d'équipe.
-async function sync(ctx: Context, cfg: ForgeConfig, team: string | undefined): Promise<number> {
-  const name = requireTeam(cfg, team);
-  // Before any fetch: without the package the LFS step would fail with a message about git, not about the host.
-  if (teamWantsLfs(cfg, name)) await requireHostLfs(ctx);
-  const origin = await refreshMirror(ctx, originMirrorPath(name), cfg.teams[name].repo);
-  if (origin.code !== 0) {
-    throw new ForgeError(`refreshing the mirror of ${cfg.teams[name].repo} failed: ${origin.stderr.trim() || `exit code ${origin.code}`}\n` +
-      `Did your SSH agent reach the host? Run forge team sync ${name} from your machine: it forwards the agent.`);
+// Le miroir d'origine d'un dépôt, depuis GitHub par l'agent SSH transmis.
+async function sync(ctx: Context, p: ProjectConfig, name: string | undefined): Promise<number> {
+  const repo = requireRepository(p, name);
+  const { repo: ownerRepo, lfs } = p.repositories[repo];
+  // Avant tout fetch : sans le paquet, l'étape LFS échouerait sur un message de git.
+  if (lfs) await requireHostLfs(ctx);
+  const hint = `Did your SSH agent reach the host? Run forge team sync ${repo} from your machine: it forwards the agent.`;
+  const r = await refreshMirror(ctx, repoOriginMirror(repo), ownerRepo);
+  if (r.code !== 0) throw new ForgeError(`refreshing the mirror of ${ownerRepo} failed: ${r.stderr.trim() || `exit code ${r.code}`}\n${hint}`);
+  if (lfs) {
+    const l = await fetchMirrorLfs(ctx, repoOriginMirror(repo), ownerRepo);
+    if (l.code !== 0) throw new ForgeError(`fetching the LFS objects of ${ownerRepo} failed: ${l.stderr.trim() || `exit code ${l.code}`}\n${hint}`);
+    if (l.warning) ctx.err(`WARNING: ${l.warning}`);
   }
-  if (teamWantsLfs(cfg, name)) {
-    const lfs = await fetchMirrorLfs(ctx, originMirrorPath(name), cfg.teams[name].repo);
-    if (lfs.code !== 0) {
-      throw new ForgeError(`fetching the LFS objects of ${cfg.teams[name].repo} failed: ${lfs.stderr.trim() || `exit code ${lfs.code}`}\n` +
-        `Did your SSH agent reach the host? Run forge team sync ${name} from your machine: it forwards the agent.`);
-    }
-    if (lfs.warning) ctx.err(`WARNING: ${lfs.warning}`);
-  }
-  const r = await refreshTeamMirror(ctx, cfg, name);
-  for (const failed of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${failed}.`);
-  ctx.out(`Synced ${name}.`);
+  ctx.out(`Synced ${repo}.`);
   return 0;
 }
 
-// Le laptop demande quelle équipe tient un dépôt : le nom sur stdout, ou rien et 1.
-async function forRepo(ctx: Context, cfg: ForgeConfig, ownerRepo: string | undefined): Promise<number> {
+// Le laptop demande quel dépôt du projet est son clone : le nom sur stdout
+// (le remote forge-<nom> du clone), ou rien et 1.
+async function forRepo(ctx: Context, p: ProjectConfig, ownerRepo: string | undefined): Promise<number> {
   if (ownerRepo === undefined) throw new ForgeError(`an owner/repo is required.\n${USAGE}`);
-  const found = Object.entries(cfg.teams).find(([, t]) => t.repo.toLowerCase() === ownerRepo.toLowerCase());
+  const found = Object.entries(p.repositories).find(([, r]) => r.repo.toLowerCase() === ownerRepo.toLowerCase());
   if (!found) return 1;
   ctx.out(found[0]);
   return 0;
 }
 
-// Une ligne `<tâche>\t<base>` par tâche que les développeurs de l'équipe
-// possèdent, triées ; stdout est lu par une machine. Une base qui n'est pas une
-// ref sûre est lue comme inconnue (task-base.ts).
-async function taskBase(ctx: Context, cfg: ForgeConfig, team: string | undefined): Promise<number> {
-  const name = requireTeam(cfg, team);
-  const owned = new Map<string, string>();
-  for (const m of members(cfg).filter((x) => x.team === name && x.capabilities.includes("publish"))) {
-    const config = await containerConfig(ctx, m.name);
-    for (const key of Object.keys(config)) {
-      if (!key.startsWith(baseKey(""))) continue;
-      const base = safeRef(config[key]);
-      const task = key.slice(baseKey("").length);
-      if (base && !owned.has(task)) owned.set(task, base);
-    }
+// Une ligne `<sous-tâche>\t<base>` par branche `agent/<sous-tâche>` du dépôt,
+// triées, depuis les enregistrements de branches : la forme que lisent fetch et
+// ship (la tâche sans `agent/`, la base `origin/<b>` ou `agent/<x>`). Une base
+// qui n'est pas une ref sûre est écartée (safeRef).
+// Une valeur qui n'est pas une ref sûre se lit comme « inconnue » : le
+// consommateur ne doit jamais recevoir de quoi injecter une option ou un
+// séparateur de commande.
+function safeRef(value: unknown): string {
+  if (typeof value !== "string") return "";
+  try {
+    validateGitRef(value);
+    return value;
+  } catch {
+    return "";
   }
-  for (const task of [...owned.keys()].sort()) ctx.out(`${task}\t${owned.get(task)}`);
+}
+
+async function taskBase(ctx: Context, p: ProjectConfig, name: string | undefined): Promise<number> {
+  const repo = requireRepository(p, name);
+  const bases = new Map<string, string>();
+  for (const r of readBranchRecords()) {
+    if (r.repository !== repo || !r.branch.startsWith("agent/")) continue;
+    const base = safeRef(r.base);
+    if (base) bases.set(r.branch.slice("agent/".length), base);
+  }
+  for (const task of [...bases.keys()].sort()) ctx.out(`${task}\t${bases.get(task)}`);
   return 0;
 }
 
-// Invoqué par le `git fetch` du laptop (remote.<c>.uploadpack = "forge team
-// upload-pack <team>") : le miroir d'équipe est rafraîchi, puis servi. stdout
-// porte le protocole git : rien n'y est écrit avant l'attach, les avertissements
-// vont sur stderr. Le chemin que git ajoute est ignoré.
-async function uploadPack(ctx: Context, cfg: ForgeConfig, team: string | undefined): Promise<number> {
-  const name = requireTeam(cfg, team);
-  try {
-    const r = await refreshTeamMirror(ctx, cfg, name);
-    for (const failed of r.failed) ctx.err(`WARNING: could not refresh the team mirror from ${failed}.`);
-  } catch (e) {
-    ctx.err(`WARNING: could not refresh the team mirror of ${name}: ${e instanceof Error ? e.message : String(e)}`);
-  }
+// Invoqué par le `git fetch` du laptop (remote.forge-<nom>.uploadpack) : le
+// miroir des agents du dépôt, tel que les `done` l'ont rempli. stdout porte le
+// protocole git : rien n'y est écrit avant l'attach. Le chemin que git ajoute est ignoré.
+async function uploadPack(ctx: Context, p: ProjectConfig, name: string | undefined): Promise<number> {
+  const repo = requireRepository(p, name);
   const protocol = process.env.GIT_PROTOCOL;
   const env = protocol !== undefined && /^version=[0-9]$/.test(protocol) ? { GIT_PROTOCOL: protocol } : undefined;
-  return ctx.attach(["git", "-c", "core.hooksPath=/dev/null", "upload-pack", teamMirrorPath(name)], env ? { env } : undefined);
+  return ctx.attach(["git", "-c", "core.hooksPath=/dev/null", "upload-pack", repoTeamMirror(repo)], env ? { env } : undefined);
 }

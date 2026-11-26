@@ -5,20 +5,19 @@ import { readFileSync } from "node:fs";
 import { configHelpers, SIZE } from "./config-fields.ts";
 import { ForgeError } from "./context.ts";
 import { PRIVATE_RANGES, cidrWithin, isHostAddress, parseCidr } from "./ipv4.ts";
-import { parsePilot, parseTeams, type PilotConfig, type TeamConfig } from "./team-config.ts";
+import { parseProject, type ProjectConfig } from "./project-config.ts";
 
 export type Limits = { cpu: number | string | null; memory: string; processes: number; rootDisk: string };
 export type ForgeConfig = {
   network: { ipv4Address: string }; storagePool: string; limits: Limits;
-  teams: Record<string, TeamConfig>; pilot: PilotConfig | null;
+  project: ProjectConfig | null;
 };
 
 export const DEFAULT_CONFIG: ForgeConfig = {
   network: { ipv4Address: "10.77.0.1/24" },
   storagePool: "default",
   limits: { cpu: null, memory: "75%", processes: 10000, rootDisk: "50GiB" },
-  teams: {},
-  pilot: null,
+  project: null,
 };
 
 const PERCENT = /^([1-9][0-9]?|100)%$/;
@@ -47,18 +46,14 @@ export function parseConfig(path: string, raw: unknown): ForgeConfig {
   const { invalid, fields } = configHelpers(path);
 
   const config = structuredClone(DEFAULT_CONFIG);
-  const top = fields(raw, "", ["network", "storagePool", "limits", "teams", "pilot"]);
-
-  if (top.teams !== undefined) config.teams = parseTeams(path, top.teams);
-  if (top.pilot !== undefined) {
-    config.pilot = parsePilot(path, top.pilot);
-    // The Pilot talks to teams: a name that is not a declared team is a typo.
-    for (const t of config.pilot?.talkTo ?? []) {
-      if (!(t in config.teams)) {
-        throw invalid("pilot.talkTo", `a list of declared team names (${Object.keys(config.teams).join(", ") || "none declared"})`, t);
-      }
-    }
+  // Les équipes (DX 5) ont laissé la place au projet : une config qui les
+  // déclare encore est refusée, avec le chemin à suivre, plutôt que lue à moitié.
+  if (typeof raw === "object" && raw !== null && !Array.isArray(raw) && ("teams" in raw || "pilot" in raw)) {
+    throw new ForgeError(`${path}: teams and pilot are gone (the ticket-driven model): declare a project, see the release notes`);
   }
+  const top = fields(raw, "", ["network", "storagePool", "limits", "project"]);
+
+  if (top.project !== undefined) config.project = parseProject(path, top.project);
 
   if (top.network !== undefined) {
     const network = fields(top.network, "network", ["ipv4Address"]);

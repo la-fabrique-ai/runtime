@@ -5,9 +5,8 @@ import type { Context } from "../context.ts";
 import { ForgeError } from "../context.ts";
 import { loadConfig } from "../config.ts";
 import { Journal, journalPath } from "../api/journal.ts";
-import { needsApi, serveApi } from "../api/server.ts";
+import { listeners, serveApi } from "../api/server.ts";
 import { configPath } from "../paths.ts";
-import { members } from "../team.ts";
 import { requireClaudeToken } from "./provision.ts";
 
 const USAGE = "Usage: forge api serve";
@@ -35,7 +34,8 @@ export async function cmdApi(ctx: Context, sub: string | undefined): Promise<num
   const stop = new AbortController();
   process.once("SIGTERM", () => stop.abort());
   process.once("SIGINT", () => stop.abort());
-  ctx.out(`forge api: serving ${members(cfg).filter(needsApi).length} socket(s)`);
-  await serveApi({ ctx, cfg, journal, secrets, now: () => new Date() }, stop.signal);
+  const deps = { ctx, cfg, journal, secrets, now: () => new Date() };
+  ctx.out(`forge api: serving ${listeners(deps).length} socket(s)`);
+  await serveApi(deps, stop.signal);
   return 0;
 }
