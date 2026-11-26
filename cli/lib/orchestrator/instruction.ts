@@ -88,12 +88,14 @@ export function devInstruction(
       `agent/${subtask.id}, based on ${c.base}, in /workspace/${subtask.repository}`,
       "",
       "## If you are blocked",
-      "Ask one precise question: forge-team ask (the question on stdin). The answer arrives in this terminal. " +
-        "If forge tells you the question waits for the human: commit your work, then run forge-team done --wip.",
+      "Ask the spec-reader sub-agent one precise question first: it reads the mission files and the code. " +
+        "If it settles the question, follow its answer. If it says the spec does not settle it, commit your work, " +
+        "then run: forge-team ask (the question on stdin; --recommended-file <file> for the answer you would give). " +
+        "Your work goes back, this container is released, and the sub-task resumes later with the human's answer.",
       "",
       "## When you are done",
-      "commit, write what you did, what you checked and what stays doubtful in a file, " +
-        "then run: forge-team done --report-file <that file>",
+      "commit, write in a file what you did, what you checked, what stays doubtful, and each question settled " +
+        "without the human (the question, the answer, its source), then run: forge-team done --report-file <that file>",
       "",
     ].join("\n");
   };

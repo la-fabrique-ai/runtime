@@ -116,7 +116,7 @@ test("devInstruction porte les fichiers de mission pr√©sents et les questions d√
   assert.ok(out.includes("## Mission files") && out.includes("/etc/forge/mission/spec.md"));
   assert.ok(!out.includes("answers.md"));
   assert.ok(out.includes("## Questions already answered") && out.includes("Which limit?") && out.includes("100 per page"));
-  assert.ok(out.includes("## If you are blocked") && out.includes("forge-team ask") && out.includes("forge-team done --wip"));
+  assert.ok(out.includes("## If you are blocked") && out.includes("spec-reader") && out.includes("forge-team ask") && !out.includes("--wip"));
   assert.ok(out.includes("forge-team done --report-file <that file>"));
   const bare = devInstruction(cand(), false, none);
   assert.ok(!bare.includes("## Mission files") && !bare.includes("## Questions already answered"));
