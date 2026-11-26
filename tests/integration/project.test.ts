@@ -147,6 +147,12 @@ test("a project: the control's socket and home, assign, done, a stacked sub-task
   const fromExecutor = await asAiuser(EX1, ["forge-team", "status"]);
   assert.match(must("forge-team status in an executor", fromExecutor).stdout, /^mission: none$/m);
 
+  // Claude Code demande la confiance pour tout dossier non accepté : le clone,
+  // où assign lance la session, l'est dans le vrai ~/.claude.json d'aiuser.
+  const claudeJson = JSON.parse(must("read aiuser's .claude.json", await asAiuser(EX1, ["cat", "/home/aiuser/.claude.json"])).stdout);
+  const trusted = claudeJson.projects?.[`/workspace/${REPO}`];
+  assert.deepEqual([trusted?.hasTrustDialogAccepted, trusted?.hasCompletedProjectOnboarding], [true, true], JSON.stringify(claudeJson.projects));
+
   // Sous-tâche 1 : une branche neuve depuis origin/main, une session.
   let r = await orch({ op: "assign", to: EX1, mission: mission("T-1.1", "origin/main") });
   assert.equal(r.ok, true, JSON.stringify(r));

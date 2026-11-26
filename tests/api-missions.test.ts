@@ -1,6 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ import { handleMission, MISSION_KEY, parseMissionRequest } from "../cli/lib/api/
 import { readBranchRecords } from "../cli/lib/branch-records.ts";
 import { socketHost, type HeldMission, type MissionSpec } from "../cli/lib/orchestrator/host.ts";
 import { CONTROL, executorName, projectMembers, repoTeamMirror } from "../cli/lib/project.ts";
+import { TRUST_SCRIPT, trustedDirs } from "../cli/lib/project-provision.ts";
 
 const cfg = parseConfig("/c.json", {
   project: {
@@ -165,6 +167,31 @@ test("assign of a first sub-task: git switch -c from origin/main in /workspace/w
   assert.deepEqual(readBranchRecords(), [{ branch: "agent/T-1.1", repository: "web", ticket: "T-1", subtask: "T-1.1", base: "origin/main", executor: E1 }]);
   const e = d.journal.entries()[0];
   assert.deepEqual([e.op, e.to, e.outcome, e.text, e.mission], ["assign", E1, "ok", "Fais la sous-tâche 1", held()]);
+});
+
+// Le défaut de la recette R1 : la session démarrait dans un dossier que le
+// ~/.claude.json de l'exécuteur n'acceptait pas, et restait à l'écran de
+// confiance de Claude Code. Le .claude.json qu'un exécuteur reçoit
+// (container/claude.json, puis le script de confiance de project-provision)
+// doit accepter chaque dossier où assign lance une session.
+test("the .claude.json an executor gets trusts every folder assign starts a session in", async () => {
+  const cwds: string[] = [];
+  for (const [to, repository, subtask] of [[E1, "web", "T-1.1"], [E2, "api", "T-2.1"]] as const) {
+    setup([absent(`refs/remotes/team/agent/${subtask}`), absent(`refs/heads/agent/${subtask}`)]);
+    const r = await call(CONTROL, { op: "assign", to, mission: spec({ repository, subtask, ticket: subtask.split(".")[0], branch: `agent/${subtask}` }) });
+    assert.deepEqual(r, { ok: true });
+    const run = ctx.calls.find((c) => c.includes("hc") && c.includes("run"))!;
+    cwds.push(run[run.indexOf("--cwd", run.indexOf("hc")) + 1]);
+  }
+  assert.deepEqual(cwds, ["/workspace/web", "/workspace/api"]);
+  const file = join(home, "claude.json");
+  copyFileSync(join(import.meta.dirname, "..", "container", "claude.json"), file);
+  const trust = spawnSync(process.execPath, ["-e", TRUST_SCRIPT, file, ...trustedDirs(cfg.project!)], { encoding: "utf8" });
+  assert.equal(trust.status, 0, trust.stderr);
+  const projects = JSON.parse(readFileSync(file, "utf8")).projects;
+  for (const cwd of cwds) {
+    assert.deepEqual([projects[cwd]?.hasTrustDialogAccepted, projects[cwd]?.hasCompletedProjectOnboarding], [true, true], cwd);
+  }
 });
 
 test("assign of a branch that is in the team mirror: git switch -C from team/<branch>", async () => {
