@@ -102,6 +102,8 @@ test("the repository's kits: the control and the executor, every skill and sub-a
   const roles = JSON.parse(readFileSync(join(referenceDir(), "roles.json"), "utf8")) as Record<string, { skills: string[]; agents: string[] }>;
   assert.deepEqual(Object.keys(roles).sort(), ["control", "executor"]);
   assert.deepEqual(referenceKit("control").skills, ["design", "split", "checkpoint"]);
+  // Décision 35 : le doute d'un développeur va d'abord à ce sous-agent.
+  assert.ok(referenceKit("executor").agents.includes("spec-reader"));
   assert.throws(() => referenceKit("pilot"), /no reference kit for role pilot/);
   for (const kit of Object.values(roles)) {
     for (const s of kit.skills) assert.ok(existsSync(join(referenceDir(), "skills", s, "SKILL.md")), s);
