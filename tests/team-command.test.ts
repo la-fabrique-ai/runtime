@@ -17,6 +17,8 @@ beforeEach(() => {
   mkdirSync(join(home, ".config", "agent-forge"), { recursive: true });
   writeFileSync(join(home, ".config", "agent-forge", "claude-token"), "tok-test\n");
   process.env.XDG_CONFIG_HOME = home;
+  // Un XDG_DATA_HOME de la machine l'emporterait sur FORGE_HOME.
+  delete process.env.XDG_DATA_HOME;
   process.env.FORGE_HOME = home;
   process.env.FORGE_REPO_DIR = process.cwd();
   process.env.FORGE_WORKSPACES = join(home, "workspaces");

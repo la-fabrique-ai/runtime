@@ -98,9 +98,13 @@ test("an executor serves the clone named by the path, /workspace/<declared repos
     project: { repositories: { web: { repo: "o/web" } }, executors: { count: 1 }, tickets: { base: "~/tickets" } },
   }));
   process.env.FORGE_HOME = home;
+  // Les runners de CI définissent XDG_CONFIG_HOME, qui l'emporterait sur FORGE_HOME.
+  const xdg = process.env.XDG_CONFIG_HOME;
+  delete process.env.XDG_CONFIG_HOME;
   try {
     await executorServes();
   } finally {
+    if (xdg !== undefined) process.env.XDG_CONFIG_HOME = xdg;
     delete process.env.FORGE_HOME;
     rmSync(home, { recursive: true, force: true });
   }
@@ -120,12 +124,15 @@ async function executorServes(): Promise<void> {
 test("without a readable project, only the path form counts: a trailing or double dash is refused", async () => {
   const home = mkdtempSync(join(tmpdir(), "forge-upload-pack-"));
   process.env.FORGE_HOME = home;
+  const xdg = process.env.XDG_CONFIG_HOME;
+  delete process.env.XDG_CONFIG_HOME;
   try {
     assert.equal(await cmdUploadPack(fakeContext({ rules: executor }), "agent-x", undefined, "/workspace/web-2"), 0);
     for (const bad of ["/workspace/web-", "/workspace/a--b"]) {
       await assert.rejects(() => cmdUploadPack(fakeContext({ rules: executor }), "agent-x", undefined, bad), /\/workspace\/<repository>/, bad);
     }
   } finally {
+    if (xdg !== undefined) process.env.XDG_CONFIG_HOME = xdg;
     delete process.env.FORGE_HOME;
     rmSync(home, { recursive: true, force: true });
   }
