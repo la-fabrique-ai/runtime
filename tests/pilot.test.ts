@@ -133,3 +133,19 @@ test("from the laptop, the command sent over SSH is forge pilot T-3 --fresh", wi
   await cmdPilotLaptop(ctx, ["T-3"], { fresh: true });
   assert.ok(lines(ctx).some((c) => c.endsWith("'forge' 'pilot' 'T-3' '--fresh'")), lines(ctx).join("\n"));
 }));
+
+test("forge pilot brings the control's clones up to date as aiuser, after the mirrors; a failure is a warning", withProject(async () => {
+  const ctx = setup([state("idle"), SENT]);
+  await cmdPilot(ctx, ["T-3"], {});
+  const l = lines(ctx);
+  const mirror = l.findLastIndex((c) => c.startsWith("git ") && c.includes("repo-api.git"));
+  for (const repo of ["web", "api"]) {
+    const fetch = l.findIndex((c) => c.includes(`exec ${CONTROL} --user 1001`) && c.endsWith(`git -C /workspace/${repo} fetch origin`));
+    const checkout = l.findIndex((c) => c.includes(`exec ${CONTROL} --user 1001`) && c.endsWith(`git -C /workspace/${repo} checkout --detach origin/HEAD`));
+    assert.ok(fetch > mirror && checkout > fetch, `${repo}\n${l.join("\n")}`);
+  }
+  const failing = setup([state("idle"), SENT, { match: "git -C /workspace/web fetch origin", code: 1, stderr: "fatal: nope" }]);
+  assert.equal(await cmdPilot(failing, ["T-3"], {}), 0);
+  assert.ok(failing.err_lines.some((x) => x.startsWith("WARNING:") && x.includes("/workspace/web")), failing.err_lines.join("\n"));
+  assert.ok(lines(failing).some((c) => c.includes("-- hc send ")));
+}));
