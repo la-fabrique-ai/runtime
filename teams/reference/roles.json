@@ -1,4 +1,4 @@
 {
-  "pilot":    { "skills": ["design", "checkpoint"], "agents": ["scout"], "memory": true },
+  "control":  { "skills": ["design", "split", "checkpoint"], "agents": ["scout"], "memory": true },
   "executor": { "skills": ["tdd", "diagnose", "verify-before-report"], "agents": ["scout", "branch-reviewer"], "memory": false }
 }

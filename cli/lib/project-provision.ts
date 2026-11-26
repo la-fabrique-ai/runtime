@@ -1,8 +1,8 @@
 // Le provisioning des containers d'un projet (forge à tickets) : le container
 // de contrôle, où l'orchestrateur tiendra la base des tickets, et les
 // exécuteurs, qui ont un clone de chaque dépôt (/workspace/<nom>). Les fichiers
-// que forge pose dans chacun sont ceux d'agent-files.ts ; le contrôle n'a ni
-// clone ni session dans la partie 1.
+// que forge pose dans chacun sont ceux d'agent-files.ts. Le contrôle a aussi
+// son workspace et un clone de chaque dépôt, pour le Pilote, qui les lit.
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -54,6 +54,10 @@ const NO_ORCH = "the image has no forge-orch user: run forge image build";
 // comprendre ce que font les exécuteurs.
 export const executorKit = (): ReferenceKit => referenceKit("executor");
 const executorPrompt = (): string => join(referenceDir(), "prompts", "executor.md");
+// Le contrôle : le Pilote et les sessions de question (le rôle `control`,
+// teams/reference/prompts/control.md).
+export const controlKit = (): ReferenceKit => referenceKit("control");
+const controlPrompt = (): string => join(referenceDir(), "prompts", "control.md");
 
 function requireProject(cfg: ForgeConfig): ProjectConfig {
   if (cfg.project === null) throw new ForgeError("no project in the configuration");
@@ -98,15 +102,15 @@ export function ticketsBase(p: ProjectConfig): string {
   return base;
 }
 
-// Ce que les aides d'agent-files.ts lisent d'un container du projet : le kit,
-// le prompt, les plugins et le .env des exécuteurs ; rien de tout cela pour le contrôle.
+// Ce que les aides d'agent-files.ts lisent d'un container du projet : le kit
+// et le prompt de son rôle ; les plugins et le .env pour un exécuteur seulement.
 function agentFiles(p: ProjectConfig, m: ProjectMember): AgentFiles {
   const executor = m.kind === "executor";
   const e = p.executors;
   return {
     name: m.name, strict: executor && e.strict, plugins: executor ? e.plugins : [],
-    prompt: executor ? executorPrompt() : null, env: executor && e.env !== null ? hostPath(e.env) : null,
-    reference: executor ? executorKit() : null,
+    prompt: executor ? executorPrompt() : controlPrompt(), env: executor && e.env !== null ? hostPath(e.env) : null,
+    reference: executor ? executorKit() : controlKit(),
   };
 }
 
@@ -170,10 +174,11 @@ if (changed) {
 // ajouté au projet depuis).
 export const trustedDirs = (p: ProjectConfig): string[] => Object.keys(p.repositories).map(cloneDir);
 
-async function trustClones(ctx: Context, p: ProjectConfig, name: string): Promise<void> {
+// `extra` : d'autres dossiers où une session démarre (/workspace, pour le Pilote).
+async function trustClones(ctx: Context, p: ProjectConfig, name: string, extra: string[] = []): Promise<void> {
   ctx.out("Pre-accepting Claude Code's trust for each clone...");
   await mustSucceed(`pre-accept Claude Code's trust in ${name}`,
-    execAsAgentArgv(ctx, name, ["node", "-e", TRUST_SCRIPT, CLAUDE_JSON, ...trustedDirs(p)]));
+    execAsAgentArgv(ctx, name, ["node", "-e", TRUST_SCRIPT, CLAUDE_JSON, ...extra, ...trustedDirs(p)]));
 }
 
 // `workspace` : le marqueur du workspace a été posé au lancement (exécuteur).
@@ -223,7 +228,7 @@ export async function provisionExecutor(ctx: Context, cfg: ForgeConfig, m: Proje
   ctx.out("Mounting the workspace...");
   await mustSucceed("mount workspace", ctx.exec(incus("config", "device", "add", m.name, "workspace", "disk",
     `source=${workspaceDir}`, "path=/workspace")));
-  await ensureExecutorRepos(ctx, p, m.name);
+  await ensureRepos(ctx, p, m.name);
   await configureGit(ctx, m.name, identity);
   await pushAgentState(ctx, m.name);
   await trustClones(ctx, p, m.name);
@@ -244,7 +249,7 @@ export async function convergeExecutor(ctx: Context, cfg: ForgeConfig, m: Projec
     if (Object.values(added).some((r) => r.lfs)) await requireHostLfs(ctx);
     await ensureRepoMirrors(ctx, { ...p, repositories: added });
   }
-  await ensureExecutorRepos(ctx, p, m.name);
+  await ensureRepos(ctx, p, m.name);
   await trustClones(ctx, p, m.name);
   return installAgentFiles(ctx, agentFiles(p, m), AIUSER_SOCKET);
 }
@@ -260,7 +265,7 @@ const EXCLUDED = ["/.claude/bash-audit.log", "/.claude/settings.local.json"];
 // manquent, le clone s'il manque, et à chaque passage le remote `team` et
 // les exclusions (EXCLUDED), qu'un clone interrompu après coup n'aurait pas.
 // Git ne tourne que dans le container, en aiuser.
-async function ensureExecutorRepos(ctx: Context, p: ProjectConfig, name: string): Promise<void> {
+async function ensureRepos(ctx: Context, p: ProjectConfig, name: string): Promise<void> {
   const present = new Set(await deviceNames(ctx, name));
   // Les filtres d'abord : un clone LFS fait le smudge depuis le miroir.
   await mustSucceed(`git-lfs filters in ${name}`, execAsAgent(ctx, name, lfsFilters(p)));
@@ -329,24 +334,52 @@ export async function provisionControl(ctx: Context, cfg: ForgeConfig, m: Projec
     throw e;
   }
   await ensureTicketBase(ctx, p, m.name);
+  await ensureControlWorkspace(ctx, p, m.name);
   await configureGit(ctx, m.name, identity);
   await pushAgentState(ctx, m.name);
+  await trustClones(ctx, p, m.name, ["/workspace"]);
   await installAgentFiles(ctx, member, ORCH_SOCKET);
   await installOrchestrator(ctx, cfg, m);
   await finish(ctx, member, false);
 }
 
 // Le contrôle déjà là : l'image, la base des tickets (droits et ACL reposés à
-// chaque fois), ses fichiers et l'orchestrateur.
+// chaque fois), le workspace et les clones du Pilote (un contrôle de la
+// partie 1 n'en a pas : ils s'ajoutent, sans le recréer), ses fichiers et
+// l'orchestrateur.
 export async function convergeControl(ctx: Context, cfg: ForgeConfig, m: ProjectMember): Promise<{ instructionsChanged: boolean }> {
   const p = requireProject(cfg);
   ticketsBase(p);
   await ensureRunning(ctx, m.name);
   await requireOrchestratorImage(ctx, m.name);
   await ensureTicketBase(ctx, p, m.name);
+  await ensureControlWorkspace(ctx, p, m.name);
+  await trustClones(ctx, p, m.name, ["/workspace"]);
   const files = await installAgentFiles(ctx, agentFiles(p, m), ORCH_SOCKET);
   await installOrchestrator(ctx, cfg, m);
   return files;
+}
+
+// Le workspace du Pilote (/workspace, un dossier de l'hôte, ses notes y
+// survivent à la recréation du container) et un clone de chaque dépôt, tiré des
+// miroirs montés en lecture seule, comme chez un exécuteur. Idempotent.
+async function ensureControlWorkspace(ctx: Context, p: ProjectConfig, name: string): Promise<void> {
+  const present = new Set(await deviceNames(ctx, name));
+  if (!present.has("workspace")) {
+    const dir = join(workspacesDir(), name);
+    mkdirSync(dir, { recursive: true });
+    ctx.out("Mounting the workspace...");
+    await mustSucceed("mount workspace", ctx.exec(incus("config", "device", "add", name, "workspace", "disk",
+      `source=${dir}`, "path=/workspace")));
+  }
+  // Les miroirs des dépôts dont les devices manquent (SSH, agent de l'humain).
+  const added = Object.fromEntries(Object.entries(p.repositories)
+    .filter(([repo]) => !present.has(originDevice(repo)) || !present.has(teamDevice(repo))));
+  if (Object.keys(added).length > 0) {
+    if (Object.values(added).some((r) => r.lfs)) await requireHostLfs(ctx);
+    await ensureRepoMirrors(ctx, { ...p, repositories: added });
+  }
+  await ensureRepos(ctx, p, name);
 }
 
 async function requireOrchestratorImage(ctx: Context, name: string): Promise<void> {

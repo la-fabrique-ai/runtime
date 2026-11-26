@@ -98,12 +98,14 @@ test("a kit file missing from the repository stops before any push", async () =>
   }
 });
 
-test("the repository's kits: the Pilot and the executor, every skill and sub-agent they name exists", () => {
+test("the repository's kits: the control and the executor, every skill and sub-agent they name exists", () => {
   const roles = JSON.parse(readFileSync(join(referenceDir(), "roles.json"), "utf8")) as Record<string, { skills: string[]; agents: string[] }>;
-  assert.deepEqual(Object.keys(roles).sort(), ["executor", "pilot"]);
+  assert.deepEqual(Object.keys(roles).sort(), ["control", "executor"]);
+  assert.deepEqual(referenceKit("control").skills, ["design", "split", "checkpoint"]);
+  assert.throws(() => referenceKit("pilot"), /no reference kit for role pilot/);
   for (const kit of Object.values(roles)) {
     for (const s of kit.skills) assert.ok(existsSync(join(referenceDir(), "skills", s, "SKILL.md")), s);
     for (const a of kit.agents) assert.ok(existsSync(join(referenceDir(), "agents", `${a}.md`)), a);
   }
-  assert.throws(() => referenceKit("lead"), /no reference kit for role lead \(known: pilot, executor\)/);
+  assert.throws(() => referenceKit("lead"), /no reference kit for role lead \(known: control, executor\)/);
 });
