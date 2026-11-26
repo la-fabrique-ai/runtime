@@ -13,12 +13,12 @@
 import type { Context, ExecResult } from "../context.ts";
 import { ForgeError, inTime, mustSucceed } from "../context.ts";
 import { recordBranch } from "../branch-records.ts";
-import { clearMessages, hcArgv, sessionState, startSession, stopSession } from "../hc-session.ts";
-import { configGet, configSet, configUnset, execAsAgentArgv, listInstances } from "../incus.ts";
+import { clearMessages, hcArgv, isLive, MESSAGES_DIR, NO_SESSION, sessionState, startSession, stopSession, typeNotice } from "../hc-session.ts";
+import { configGet, configSet, configUnset, execAsAgentArgv, listInstances, pushText } from "../incus.ts";
 import { ensureBareTeamMirror, HOST_GIT_CWD } from "../mirror.ts";
 import type { ExecutorStatus, HeldMission, HostEvent, MissionSpec, SessionState } from "../orchestrator/host.ts";
 import { forgeCommand } from "../paths.ts";
-import { projectMembers, repoTeamMirror, type ProjectMember } from "../project.ts";
+import { CONTROL, projectMembers, repoTeamMirror, type ProjectMember } from "../project.ts";
 import { cloneDir } from "../project-provision.ts";
 import { REPO_NAME, type ProjectConfig } from "../project-config.ts";
 import { ensureRunning } from "../session.ts";
@@ -58,6 +58,8 @@ export type MissionRequest =
   | { op: "release"; to: string }
   | { op: "events"; after: number }
   | { op: "ask"; text: string }
+  | { op: "session"; question: number; instruction: string }
+  | { op: "answer"; to: string; question: number; kind: "answer" | "needs-human"; text: string }
   | { op: "done"; wip: boolean; report: string | null };
 
 type Kind = ProjectMember["kind"];
@@ -65,12 +67,13 @@ export type MissionVerb = MissionRequest["op"];
 
 // Les verbes de chaque socket : un exécuteur ne confie rien, le contrôle ne finit rien.
 const VERBS: Record<Kind, readonly MissionVerb[]> = {
-  control: ["status", "assign", "release", "events"],
+  control: ["status", "assign", "release", "events", "session", "answer"],
   executor: ["done", "status", "ask"],
 };
 // Les champs exacts de chaque verbe ; `op` est lu à part.
 const FIELDS: Record<MissionVerb, readonly string[]> = {
   status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: ["wip", "report"], ask: ["text"],
+  session: ["question", "instruction"], answer: ["to", "question", "kind", "text"],
 };
 const MISSION_FIELDS = ["kind", "ticket", "subtask", "repository", "branch", "base", "instruction"] as const;
 const HELD_FIELDS = MISSION_FIELDS.filter((k) => k !== "instruction");
@@ -127,6 +130,11 @@ function parseMission(v: unknown, secrets: readonly string[]): MissionSpec {
   };
 }
 
+function questionId(verb: string, v: unknown): number {
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) throw new ForgeError(`${verb}: question must be a positive integer`);
+  return v;
+}
+
 export function parseMissionRequest(line: string, from: Kind, secrets: readonly string[]): MissionRequest {
   if (Buffer.byteLength(line, "utf8") > REQUEST_MAX) {
     throw new ForgeError(`the request is longer than ${REQUEST_MAX} bytes: ${PUT_IN_A_FILE}`);
@@ -173,6 +181,22 @@ export function parseMissionRequest(line: string, from: Kind, secrets: readonly 
       const report = raw === null || raw.trim() === "" ? null : raw;
       if (report !== null) checkText(report, INSTRUCTION_MAX, "report", secrets);
       return { op: "done", wip, report };
+    }
+    case "session": {
+      const question = questionId(verb, json.question);
+      const instruction = json.instruction;
+      if (typeof instruction !== "string") throw new ForgeError("session: instruction must be a string");
+      checkText(instruction, INSTRUCTION_MAX, "instruction", secrets);
+      return { op: "session", question, instruction };
+    }
+    case "answer": {
+      const question = questionId(verb, json.question);
+      const kind = json.kind;
+      if (kind !== "answer" && kind !== "needs-human") throw new ForgeError('answer: kind must be "answer" or "needs-human"');
+      const text = json.text;
+      if (typeof text !== "string") throw new ForgeError("answer: text must be a string");
+      checkText(text, INSTRUCTION_MAX, "answer", secrets);
+      return { op: "answer", to: to(), question, kind, text };
     }
     case "ask": {
       const text = json.text;
@@ -245,7 +269,11 @@ function entryFields(caller: ProjectMember, req: MissionRequest | null, outcome:
     to: req !== null && "to" in req ? req.to : null,
     task: mission?.subtask ?? null,
     outcome, error, summary: null,
-    text: req?.op === "assign" ? req.mission.instruction : req?.op === "ask" ? req.text : req?.op === "done" ? req.report : null,
+    text: req === null ? null
+      : req.op === "assign" ? req.mission.instruction
+        : req.op === "session" ? req.instruction
+          : req.op === "ask" || req.op === "answer" ? req.text
+            : req.op === "done" ? req.report : null,
     ...(mission === undefined ? {} : { mission }),
     ...(req?.op === "done" && req.wip ? { wip: true } : {}),
   };
@@ -295,6 +323,16 @@ async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Prom
     case "ask": {
       const { text } = req;
       return exclusive(() => withMissionLock(() => ask(d, caller, text)));
+    }
+    case "session":
+      // Ne change aucune mission : hors de la file.
+      await startQuestionSession(d.ctx, req.question, req.instruction);
+      return { reply: () => ({ ok: true }) };
+    case "answer": {
+      requireExecutor(req.to);
+      const r = req;
+      const delivered = await exclusive(() => withMissionLock(() => answer(d.ctx, r)));
+      return { reply: () => ({ ok: true, delivered }) };
     }
   }
 }
@@ -614,6 +652,59 @@ async function ask(d: ApiDeps, caller: ProjectMember, text: string): Promise<Out
   await mustSucceed("record the question",
     inTime(`recording the question of ${caller.name}`, INCUS_MS, configSet(ctx, caller.name, QUESTION_KEY, String(entry.id), { timeoutMs: INCUS_MS })));
   return { entry, reply: (id) => ({ ok: true, id }) };
+}
+
+// La session de la question `n`, dans le container de contrôle : un terminal à
+// elle, sa consigne dans un fichier à elle ; `agent` (le Pilote) et ses
+// messages ne sont pas touchés.
+export const questionSession = (n: number): string => `question-${n}`;
+const QUESTIONS_DIR = "/home/aiuser/.forge/questions";
+
+async function startQuestionSession(ctx: Context, n: number, instruction: string): Promise<void> {
+  const session = questionSession(n);
+  await startSession(ctx, { name: CONTROL }, session, instruction, {
+    cwd: "/workspace", timeoutMs: INCUS_MS, session, instructionPath: `${QUESTIONS_DIR}/${n}.md`, keepMessages: true,
+  });
+}
+
+// Livre la réponse (ou l'escalade) de la question `n` à l'exécuteur qui
+// l'attend : le texte dans un fichier, une ligne que forge écrit tapée dans sa
+// session, la clé effacée. Une session qui n'est pas vivante efface aussi la
+// clé, sans rien livrer. Dans tous les cas, la session de la question est
+// terminée : c'est ainsi que l'orchestrateur termine une session dont la
+// question est partie.
+async function answer(
+  ctx: Context, a: { to: string; question: number; kind: "answer" | "needs-human"; text: string },
+): Promise<boolean> {
+  const { to, question: n } = a;
+  let delivered = false;
+  if (readQuestion(await configGet(ctx, to, QUESTION_KEY)) === n) {
+    if (isLive(await sessionState(ctx, to, { timeoutMs: INCUS_MS }))) {
+      const file = `${MESSAGES_DIR}/answer-${n}.md`;
+      await mustSucceed("push the answer", inTime(`push the answer to ${to}`, INCUS_MS,
+        pushText(ctx, to, file, a.text, { uid: 1001, gid: 1001, mode: "600" }, { timeoutMs: INCUS_MS })));
+      const line = a.kind === "answer"
+        ? `[forge] answer to your question ${n}: read ${file}`
+        : `[forge] your question ${n} waits for the human: read ${file}, commit your work, then run forge-team done --wip`;
+      try {
+        await typeNotice(ctx, to, line, { timeoutMs: INCUS_MS });
+        delivered = true;
+      } catch (e) {
+        // Une session finie entre-temps : rien n'est livré, la clé s'efface.
+        if (!(e instanceof ForgeError) || !e.message.includes(NO_SESSION)) throw e;
+      }
+    }
+    await mustSucceed("clear the question",
+      inTime(`clearing the question of ${to}`, INCUS_MS, configUnset(ctx, to, QUESTION_KEY, { timeoutMs: INCUS_MS })));
+  }
+  // La session de la question : arrêtée et retirée ; un échec est sans importance.
+  const session = questionSession(n);
+  for (const verb of ["kill", "rm"]) {
+    try {
+      await ctx.exec(hcArgv(CONTROL, [verb, session]), { timeoutMs: INCUS_MS });
+    } catch {}
+  }
+  return delivered;
 }
 
 // Une mission tenue, des clones sans changements suivis, au moins un commit

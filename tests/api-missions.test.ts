@@ -12,6 +12,7 @@ import type { ApiDeps } from "../cli/lib/api/missions.ts";
 import { Journal } from "../cli/lib/api/journal.ts";
 import { hostSocketPath, serveApi } from "../cli/lib/api/server.ts";
 import { handleMission, MISSION_KEY, parseMissionRequest, QUESTION_KEY } from "../cli/lib/api/missions.ts";
+import { SUMMARY_ALLOWED } from "../cli/lib/api/protocol.ts";
 import { readBranchRecords } from "../cli/lib/branch-records.ts";
 import { socketHost, type HeldMission, type MissionSpec } from "../cli/lib/orchestrator/host.ts";
 import { CONTROL, executorName, projectMembers, repoTeamMirror } from "../cli/lib/project.ts";
@@ -643,4 +644,62 @@ test("done with a report gives an event with that report; {op:done} alone still 
   setup([{ match: "rev-list --count", stdout: "1\n" }]);
   assert.equal((await call(E2, { op: "done" })).ok, true);
   assert.deepEqual(await call(E2, { op: "done", force: true }), { ok: false, error: 'done: unknown field: "force"' });
+});
+
+const SENT: ExecRule = { match: "-- hc send --json agent", stdout: '{"turn":3}' };
+const sentLines = () => ctx.calls.filter((c) => c.includes("send")).map((c) => c.at(-1)!);
+
+test("session: the control starts question-<n> in agent-control; an executor cannot", async () => {
+  const r = await call(CONTROL, { op: "session", question: 7, instruction: "[forge] question 7 on T-1.1 (ticket T-1)" });
+  assert.deepEqual(r, { ok: true });
+  assert.ok(joined().some((c) => c.includes(`exec ${CONTROL} `) && c.includes("-- hc run --bg --name question-7 ")), joined().join("\n"));
+  assert.ok(!joined().some((c) => c.endsWith("hc kill agent")));
+  assert.deepEqual(await call(E1, { op: "session", question: 7, instruction: "x" }), { ok: false, error: "session is not a verb of the executor container" });
+});
+
+test("answer to an executor waiting for question 7: file, line, key cleared, question session ended, delivered", async () => {
+  hold(E1, held());
+  keys(E1)[QUESTION_KEY] = "7";
+  sessions[E1] = "working";
+  setup([SENT]);
+  const r = await call(CONTROL, { op: "answer", to: E1, question: 7, kind: "answer", text: "100 per page" });
+  assert.deepEqual(r, { ok: true, delivered: true });
+  assert.ok(joined().some((c) => c.includes("file push") && c.includes(`${E1}/home/aiuser/.forge/messages/answer-7.md`)));
+  assert.deepEqual(sentLines(), ["[forge] answer to your question 7: read /home/aiuser/.forge/messages/answer-7.md"]);
+  assert.equal(keys(E1)[QUESTION_KEY], undefined);
+  assert.ok(joined().some((c) => c.includes(`exec ${CONTROL} `) && c.endsWith("-- hc kill question-7")));
+});
+
+test("Review Focus 2: an answer for a question no longer pending types nothing and is not delivered", async () => {
+  hold(E1, held());
+  keys(E1)[QUESTION_KEY] = "7";
+  sessions[E1] = "working";
+  setup([SENT]);
+  const r = await call(CONTROL, { op: "answer", to: E1, question: 8, kind: "answer", text: "x" });
+  assert.deepEqual(r, { ok: true, delivered: false });
+  assert.deepEqual(sentLines(), []);
+  assert.equal(keys(E1)[QUESTION_KEY], "7");
+  assert.ok(joined().some((c) => c.endsWith("-- hc kill question-8")));
+});
+
+test("Review Focus 5: a developer session that finished before the answer: key cleared, not delivered, no error", async () => {
+  hold(E1, held());
+  keys(E1)[QUESTION_KEY] = "7";
+  sessions[E1] = "working";
+  setup([{ match: "-- hc send --json agent", code: 11, stdout: '{"error":{"kind":"finished","message":"t2 has finished"}}' }]);
+  const r = await call(CONTROL, { op: "answer", to: E1, question: 7, kind: "needs-human", text: "?" });
+  assert.deepEqual(r, { ok: true, delivered: false });
+  assert.equal(keys(E1)[QUESTION_KEY], undefined);
+});
+
+test("the two typed lines pass SUMMARY_ALLOWED once their [forge] prefix is removed", async () => {
+  for (const kind of ["answer", "needs-human"]) {
+    hold(E1, held());
+    keys(E1)[QUESTION_KEY] = "7";
+    sessions[E1] = "working";
+    setup([SENT]);
+    await call(CONTROL, { op: "answer", to: E1, question: 7, kind, text: "x" });
+    const [line] = sentLines();
+    assert.ok(line.startsWith("[forge] ") && SUMMARY_ALLOWED.test(line.slice("[forge] ".length)), line);
+  }
 });
