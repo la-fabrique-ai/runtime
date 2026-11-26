@@ -548,14 +548,23 @@ function events(d: ApiDeps, after: number): Outcome {
   return { reply: () => ({ ok: true, events: list, last }), quiet: true };
 }
 
-// Une mission tenue, au moins un commit au-delà de sa base, la branche copiée
-// dans le miroir d'équipe du dépôt ; puis la ligne du journal, dont l'id est
-// celui de l'évènement.
+// Une mission tenue, des clones sans changements suivis, au moins un commit
+// au-delà de sa base, la branche copiée dans le miroir d'équipe du dépôt ;
+// puis la ligne du journal, dont l'id est celui de l'évènement. Les clones
+// sont lus comme `status` les lit (tous, pas seulement celui de la mission) :
+// un done accepté sur un clone sale libérerait un exécuteur que `status` dit
+// ensuite `unknown`, et qui ne recevrait plus de mission.
 async function done(d: ApiDeps, caller: ProjectMember): Promise<Outcome> {
   const { ctx } = d;
   const m = readHeld(await configGet(ctx, caller.name, MISSION_KEY));
   if (m === null) throw new ForgeError(`${caller.name} holds no mission: there is nothing to report done`);
   if (m === "unreadable") throw new ForgeError(`${caller.name}'s mission key is unreadable: ask for it to be released`);
+  for (const c of await cloneStates(ctx, caller.name, requireProject(d))) {
+    if (c.state === "dirty") {
+      throw new ForgeError(`${caller.name}: ${cloneDir(c.repository)} has uncommitted changes: commit or discard them, then report done again`);
+    }
+    if (c.state === "unreadable") throw new ForgeError(`${caller.name}: git status in ${cloneDir(c.repository)} did not answer: try done again`);
+  }
   const git = gitIn(ctx, caller.name, m.repository);
   // La base, à jour dans le clone : `origin/<b>` après `git fetch origin`,
   // `agent/<x>` est `team/agent/<x>` après `git fetch team`.

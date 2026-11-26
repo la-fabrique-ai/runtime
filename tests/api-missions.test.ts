@@ -430,6 +430,25 @@ test("done with nothing beyond the base is refused", async () => {
   assert.ok(!joined().some((c) => c.includes("fetch --no-tags src")));
 });
 
+// Accepté sur un clone sale, le done libérerait un exécuteur que `status` dit
+// ensuite `unknown` : il ne recevrait plus de mission.
+test("done with tracked changes in any of the executor's clones, or a clone that does not answer, is refused: nothing copied, nothing journaled", async () => {
+  hold(E1, held());
+  for (const [rules, error] of [
+    [[{ match: `${GIT} status --porcelain --untracked-files=no`, stdout: " M package-lock.json\n" }],
+      `${E1}: /workspace/web has uncommitted changes: commit or discard them, then report done again`],
+    [[{ match: "/workspace/api -c core.fsmonitor=false", stdout: " M a.ts\n" }],
+      `${E1}: /workspace/api has uncommitted changes: commit or discard them, then report done again`],
+    [[{ match: "/workspace/api -c core.fsmonitor=false", code: 128, stderr: "fatal" }],
+      `${E1}: git status in /workspace/api did not answer: try done again`],
+  ] as [ExecRule[], string][]) {
+    setup([...rules, { match: "rev-list --count origin/main..agent/T-1.1", stdout: "2\n" }]);
+    assert.deepEqual(await call(E1, { op: "done" }), { ok: false, error });
+    assert.ok(!joined().some((c) => c.includes("fetch --no-tags src")));
+  }
+  assert.ok(d.journal.entries().every((e) => e.outcome !== "ok"));
+});
+
 test("done without a mission is refused", async () => {
   assert.deepEqual(await call(E1, { op: "done" }), { ok: false, error: `${E1} holds no mission: there is nothing to report done` });
 });

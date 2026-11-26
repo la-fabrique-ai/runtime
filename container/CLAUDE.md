@@ -22,7 +22,7 @@ Tu es un agent Claude Code tournant dans un container Incus isolé, un parmi plu
 
 ## Finir une mission : `forge-team done`
 `forge-team` est le seul lien avec forge ; il n'a que deux commandes.
-- `forge-team done` : ta mission est faite. L'hôte vérifie que ta branche `agent/<sous-tâche>` porte au moins un commit au-delà de sa base, la publie, puis libère ce container. Il refuse (la raison sur stderr) quand rien n'est commité : corrige, commite, relance. Sans `done`, la mission n'est jamais finie.
+- `forge-team done` : ta mission est faite. L'hôte vérifie que ta branche `agent/<sous-tâche>` porte au moins un commit au-delà de sa base, la publie, puis libère ce container. Il refuse (la raison sur stderr) quand rien n'est commité, ou quand un de tes clones garde des changements suivis non commités (un lockfile régénéré, par exemple) : commite ou annule, puis relance. Sans `done`, la mission n'est jamais finie.
 - `forge-team status` : la mission que ce container tient (sous-tâche, ticket, dépôt, branche, base), ou `mission: none`.
 - Avant `done`, lance le sous-agent `branch-reviewer` sur ta branche, avec la mission en consigne, la base de la mission et l'étendue `<base>...HEAD` (`team/agent/<sous-tâche>` n'existe pas avant `done`) : il compare tes commits à la sous-tâche et lance lui-même les tests et les vérifications du projet (une à la fois). Corrige ce qu'il bloque, puis lance `done`. Un résultat qu'il n'a pas pu obtenir dans ce container se dit dans ton dernier message.
 - Il n'y a pas encore de canal pour poser une question : si la mission est ambiguë ou impossible, dis-le clairement dans ta dernière réponse, avec ce que tu as essayé, et ne lance pas `done` sur un travail que tu sais faux. L'humain lit ton terminal.
