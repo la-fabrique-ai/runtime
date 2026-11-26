@@ -123,11 +123,57 @@ async function configureGit(ctx: Context, name: string, identity: { name: string
   }
 }
 
+export const CLAUDE_JSON = "/home/aiuser/.claude.json";
+
 async function pushAgentState(ctx: Context, name: string): Promise<void> {
   await pushClaudeToken(ctx, name);
   ctx.out("Pre-accepting Claude Code onboarding...");
   await pushFile(ctx, "push onboarding state", join(repoRoot(), "container", "claude.json"),
-    name, "/home/aiuser/.claude.json", 1001, "600");
+    name, CLAUDE_JSON, 1001, "600");
+}
+
+// Claude Code demande, pour chaque dossier où il démarre, si on lui fait
+// confiance, « No, exit » présélectionné : une session lancée dans un clone non
+// accepté reste à cet écran sans lire sa consigne. Ce script, lancé par node
+// dans le container en aiuser (`node -e TRUST_SCRIPT <fichier> <dossier>...`),
+// ajoute chaque dossier aux projets acceptés du fichier, sans toucher au reste
+// de ce que Claude Code y a écrit ; il n'écrit que s'il change quelque chose,
+// par un temporaire renommé. Un fichier illisible est refusé, laissé tel quel.
+export const TRUST_SCRIPT = `
+const fs = require("fs");
+const [file, ...dirs] = process.argv.slice(1);
+let j = {};
+try {
+  j = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch (e) {
+  if (e.code !== "ENOENT") { console.error(file + " is not readable JSON: " + e.message); process.exit(2); }
+}
+if (typeof j !== "object" || j === null || Array.isArray(j)) { console.error(file + " is not a JSON object"); process.exit(2); }
+if (typeof j.projects !== "object" || j.projects === null || Array.isArray(j.projects)) j.projects = {};
+let changed = false;
+for (const d of dirs) {
+  const p = typeof j.projects[d] === "object" && j.projects[d] !== null ? j.projects[d] : {};
+  for (const k of ["hasTrustDialogAccepted", "hasCompletedProjectOnboarding"]) {
+    if (p[k] !== true) { p[k] = true; changed = true; }
+  }
+  j.projects[d] = p;
+}
+if (changed) {
+  const tmp = file + ".forge-trust-" + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(j, null, 2) + "\\n", { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+`;
+
+// La confiance de Claude Code pour chaque clone, le dossier où `assign` lance
+// la session (missions.ts) : à la création, et à chaque converge (un dépôt
+// ajouté au projet depuis).
+export const trustedDirs = (p: ProjectConfig): string[] => Object.keys(p.repositories).map(cloneDir);
+
+async function trustClones(ctx: Context, p: ProjectConfig, name: string): Promise<void> {
+  ctx.out("Pre-accepting Claude Code's trust for each clone...");
+  await mustSucceed(`pre-accept Claude Code's trust in ${name}`,
+    execAsAgentArgv(ctx, name, ["node", "-e", TRUST_SCRIPT, CLAUDE_JSON, ...trustedDirs(p)]));
 }
 
 // `workspace` : le marqueur du workspace a été posé au lancement (exécuteur).
@@ -180,6 +226,7 @@ export async function provisionExecutor(ctx: Context, cfg: ForgeConfig, m: Proje
   await ensureExecutorRepos(ctx, p, m.name);
   await configureGit(ctx, m.name, identity);
   await pushAgentState(ctx, m.name);
+  await trustClones(ctx, p, m.name);
   await installAgentFiles(ctx, member, AIUSER_SOCKET);
   await finish(ctx, member, true);
 }
@@ -198,6 +245,7 @@ export async function convergeExecutor(ctx: Context, cfg: ForgeConfig, m: Projec
     await ensureRepoMirrors(ctx, { ...p, repositories: added });
   }
   await ensureExecutorRepos(ctx, p, m.name);
+  await trustClones(ctx, p, m.name);
   return installAgentFiles(ctx, agentFiles(p, m), AIUSER_SOCKET);
 }
 

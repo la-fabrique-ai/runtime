@@ -1,6 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
@@ -8,7 +9,7 @@ import { FakeIncus } from "./lib/fake-incus.ts";
 import { parseConfig, type ForgeConfig } from "../cli/lib/config.ts";
 import { CONTROL, executorName, projectMembers, repoOriginMirror, repoTeamMirror } from "../cli/lib/project.ts";
 import {
-  convergeControl, convergeExecutor, provisionControl, provisionExecutor, ticketsBase, TICKETS_MOUNT,
+  CLAUDE_JSON, convergeControl, convergeExecutor, provisionControl, provisionExecutor, ticketsBase, TICKETS_MOUNT, TRUST_SCRIPT,
 } from "../cli/lib/project-provision.ts";
 
 let home: string;
@@ -99,6 +100,69 @@ test("an executor of a two-repository project: both device pairs, both clones as
   assert.equal(conf["user.forge.image_commit"], "IMGSHA");
   assert.equal(conf["user.forge.provisioning"], undefined);
   assert.equal(conf["user.forge.provisioning_workspace"], undefined);
+});
+
+// Claude Code ouvre un écran de confiance pour tout dossier non accepté : la
+// session d'un exécuteur, lancée dans le clone, y resterait bloquée.
+test("an executor's provisioning and converge pre-accept Claude Code's trust for every clone, after pushing its onboarding state", async () => {
+  const cfg = config();
+  const { ctx } = setup(NO_CLONE);
+  const name = executorName(1);
+  await provisionExecutor(ctx, cfg, member(cfg, name));
+  const trust = (calls: string[][]) => calls.filter((c) => c.includes("-e") && c.includes(TRUST_SCRIPT));
+  let found = trust(ctx.calls);
+  assert.equal(found.length, 1, flat(ctx).join("\n"));
+  assert.ok(found[0].join(" ").includes("--user 1001 --group 1001"), found[0].join(" "));
+  assert.deepEqual(found[0].slice(found[0].indexOf(TRUST_SCRIPT) + 1), [CLAUDE_JSON, "/workspace/web", "/workspace/api"]);
+  const pushed = ctx.calls.findIndex((c) => c.join(" ").includes("/home/aiuser/.claude.json") && c.includes("push"));
+  assert.ok(pushed >= 0 && pushed < ctx.calls.indexOf(found[0]), "after the onboarding state, which it would otherwise lose");
+
+  const { fake: fake2, ctx: ctx2 } = setup();
+  fake2.addInstance("agent-forge", name, {
+    status: "Running", profiles: ["agent-forge"], config: { "user.forge.role": "executor" },
+    devices: { "origin-web": { type: "disk" }, "team-web": { type: "disk" }, "origin-api": { type: "disk" }, "team-api": { type: "disk" } },
+  });
+  await convergeExecutor(ctx2, cfg, member(cfg, name));
+  found = trust(ctx2.calls);
+  assert.equal(found.length, 1);
+  assert.deepEqual(found[0].slice(found[0].indexOf(TRUST_SCRIPT) + 1), [CLAUDE_JSON, "/workspace/web", "/workspace/api"]);
+});
+
+test("the trust script adds the clones to ~/.claude.json and keeps what Claude Code wrote there", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-trust-"));
+  try {
+    const file = join(dir, "claude.json");
+    const run = (...dirs: string[]) => spawnSync(process.execPath, ["-e", TRUST_SCRIPT, file, ...dirs], { encoding: "utf8" });
+    // Absent : créé, 0600.
+    assert.equal(run("/workspace/web").status, 0);
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).projects["/workspace/web"],
+      { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true });
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    // Ce que Claude Code a écrit depuis reste, un refus explicite est remplacé.
+    writeFileSync(file, JSON.stringify({
+      numStartups: 7, mcpServers: { x: { command: "y" } },
+      projects: {
+        "/workspace": { hasTrustDialogAccepted: true, allowedTools: ["Bash"] },
+        "/workspace/web": { hasTrustDialogAccepted: false, lastCost: 1.5 },
+      },
+    }));
+    assert.equal(run("/workspace/web", "/workspace/api").status, 0);
+    const j = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(j.numStartups, 7);
+    assert.deepEqual(j.mcpServers, { x: { command: "y" } });
+    assert.deepEqual(j.projects["/workspace"], { hasTrustDialogAccepted: true, allowedTools: ["Bash"] });
+    assert.deepEqual(j.projects["/workspace/web"], { hasTrustDialogAccepted: true, lastCost: 1.5, hasCompletedProjectOnboarding: true });
+    assert.deepEqual(j.projects["/workspace/api"], { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true });
+    assert.deepEqual(readdirSync(dir), ["claude.json"], "no temporary file left");
+    // Illisible : refusé, le fichier n'est pas touché.
+    writeFileSync(file, "{ not json");
+    const bad = run("/workspace/web");
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /claude\.json/);
+    assert.equal(readFileSync(file, "utf8"), "{ not json");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("converging an executor adds the devices and the clone of a repository added since, and keeps the others", async () => {
