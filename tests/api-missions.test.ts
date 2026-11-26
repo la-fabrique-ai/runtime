@@ -223,6 +223,59 @@ test("recovery as the orchestrator does it, release then assign: on the branch w
   assert.equal(keys(E1)[MISSION_KEY], JSON.stringify(held()));
 });
 
+// Le clone déjà sur la branche, face à team/<branche> : `--is-ancestor` rend 1
+// pour « non ».
+const onBranch: ExecRule = { match: "symbolic-ref --short HEAD", stdout: "agent/T-1.1\n" };
+const notAncestor = (x: string, y: string): ExecRule => ({ match: `merge-base --is-ancestor ${x} ${y}`, code: 1 });
+const TEAM = "team/agent/T-1.1";
+
+test("on the branch, team/<branch> already in it: the clone is kept, no switch, no merge", async () => {
+  setup([onBranch]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }), { ok: true });
+  assert.ok(joined().some((c) => c.endsWith(`${GIT} merge-base --is-ancestor ${TEAM} HEAD`)), joined().join("\n"));
+  assert.ok(!joined().some((c) => c.includes(" switch") || c.includes(" merge --ff-only")), joined().join("\n"));
+});
+
+test("on the branch, clean, team/<branch> ahead: fast-forward", async () => {
+  setup([onBranch, notAncestor(TEAM, "HEAD")]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }), { ok: true });
+  assert.ok(joined().some((c) => c.endsWith(`${GIT} merge --ff-only ${TEAM}`)), joined().join("\n"));
+  assert.ok(!joined().some((c) => c.includes(" switch")));
+});
+
+test("on the branch, dirty, team/<branch> ahead: refused, nothing changed", async () => {
+  setup([onBranch, notAncestor(TEAM, "HEAD"), { match: "status --porcelain", stdout: " M a.ts\n" }]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }), { ok: false, error:
+    `${E1}: /workspace/web is on agent/T-1.1 with uncommitted changes, and ${TEAM} has moved beyond it: commit or discard them, then assign again` });
+  assert.ok(!joined().some((c) => c.includes(" switch") || c.includes(" merge --ff-only")));
+  assert.equal(keys(E1)[MISSION_KEY], undefined);
+  assert.deepEqual(readBranchRecords(), []);
+});
+
+const DIVERGED = `agent/T-1.1 in ${E1} has commits that ${TEAM} does not have, and the reverse: resolve by hand (release, inspect the clone)`;
+
+test("on the branch, diverged from team/<branch>: refused", async () => {
+  setup([onBranch, notAncestor(TEAM, "HEAD"), notAncestor("HEAD", TEAM)]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }), { ok: false, error: DIVERGED });
+  assert.ok(!joined().some((c) => c.includes(" switch") || c.includes(" merge --ff-only")));
+  assert.equal(keys(E1)[MISSION_KEY], undefined);
+});
+
+test("off the branch, a local branch diverged from team/<branch>: refused, never switch -C", async () => {
+  setup([{ match: "symbolic-ref --short HEAD", stdout: "main\n" },
+    notAncestor("agent/T-1.1", TEAM), notAncestor(TEAM, "agent/T-1.1")]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }), { ok: false, error: DIVERGED });
+  assert.ok(!joined().some((c) => c.includes(" switch")), joined().join("\n"));
+  assert.equal(keys(E1)[MISSION_KEY], undefined);
+});
+
+test("off the branch, a local branch ahead of team/<branch>: switched to as it is", async () => {
+  setup([{ match: "symbolic-ref --short HEAD", stdout: "main\n" }, notAncestor("agent/T-1.1", TEAM)]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }), { ok: true });
+  assert.ok(joined().some((c) => c.endsWith(`${GIT} switch agent/T-1.1`)), joined().join("\n"));
+  assert.ok(!joined().some((c) => c.includes("switch -C")));
+});
+
 test("a clone off the branch with tracked changes is refused, released or not; a held sub-task with another base is refused", async () => {
   setup([{ match: "symbolic-ref --short HEAD", stdout: "main\n" }, { match: "status --porcelain --untracked-files=no", stdout: " M a.ts\n" }]);
   assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }),

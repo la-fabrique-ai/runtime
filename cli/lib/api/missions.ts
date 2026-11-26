@@ -406,21 +406,42 @@ export async function cloneStates(
 }
 
 // La reprise se lit dans le clone : sur `agent/<sous-tâche>`, la branche de
-// cette sous-tâche, son travail (même non commité) est le sien et reste tel
-// quel : ni contrôle de propreté, ni changement de branche. C'est le cas d'une
-// session perdue que l'orchestrateur reprend par `release` puis `assign` : à
-// l'assign, la clé est déjà vide. Ailleurs, jamais de switch sur un arbre aux
-// changements suivis.
+// cette sous-tâche, son travail (même non commité) est le sien. C'est le cas
+// d'une session perdue que l'orchestrateur reprend par `release` puis
+// `assign` : à l'assign, la clé est déjà vide. Mais le clone ne fait foi que
+// s'il contient `team/<branche>` : une sous-tâche rendue puis reprise ailleurs
+// a pu avancer dans le miroir d'équipe. Un clone en retard, propre, avance en
+// fast-forward ; sale ou divergent, il est refusé : le garder ferait travailler
+// l'agent sur une branche périmée, et la copie forcée de `done` écraserait
+// ensuite le travail plus récent dans le miroir des agents. Jamais de switch
+// sur un arbre aux changements suivis, jamais de `switch -C` par-dessus des
+// commits que `team/<branche>` n'a pas.
 async function prepareBranch(ctx: Context, to: string, m: MissionSpec): Promise<void> {
   const dir = cloneDir(m.repository);
   const git = gitIn(ctx, to, m.repository);
-  const fetch = async () => {
-    await mustSucceed("git fetch team", git(FETCH_MS, "fetch", "team"));
-    await mustSucceed("git fetch origin", git(FETCH_MS, "fetch", "origin"));
-  };
+  await mustSucceed("git fetch team", git(FETCH_MS, "fetch", "team"));
+  await mustSucceed("git fetch origin", git(FETCH_MS, "fetch", "origin"));
+  const has = async (ref: string) => (await git(GIT_MS, "rev-parse", "--verify", "--quiet", ref)).code === 0;
+  // `--is-ancestor` : 0 oui, 1 non, autre chose une erreur, lue comme un non
+  // (qui mène au plus à un refus, jamais à un écrasement).
+  const anc = async (x: string, y: string) => (await git(GIT_MS, "merge-base", "--is-ancestor", x, y)).code === 0;
+  const team = `team/${m.branch}`;
+  const inTeam = await has(`refs/remotes/${team}`);
+  const diverged = () => new ForgeError(
+    `${m.branch} in ${to} has commits that ${team} does not have, and the reverse: resolve by hand (release, inspect the clone)`);
+
   const head = await git(GIT_MS, "symbolic-ref", "--short", "HEAD");
   if (head.code === 0 && head.stdout.trim() === m.branch) {
-    await fetch();
+    // Le clone contient le miroir (ou le miroir ne l'a jamais reçue) : la
+    // reprise, l'arbre reste tel quel, sale ou non.
+    if (!inTeam || await anc(team, "HEAD")) return;
+    const dirty = changeCount((await mustSucceed("git status", git(GIT_MS, ...TRACKED_STATUS))).stdout);
+    if (dirty > 0) {
+      throw new ForgeError(`${to}: ${dir} is on ${m.branch} with uncommitted changes, and ${team} has moved beyond it: ` +
+        "commit or discard them, then assign again");
+    }
+    if (!(await anc("HEAD", team))) throw diverged();
+    await mustSucceed(`fast-forward ${m.branch}`, git(SWITCH_MS, "merge", "--ff-only", team));
     return;
   }
   const dirty = changeCount((await mustSucceed("git status", git(GIT_MS, ...TRACKED_STATUS))).stdout);
@@ -428,17 +449,20 @@ async function prepareBranch(ctx: Context, to: string, m: MissionSpec): Promise<
     throw new ForgeError(`${to}: ${dir} has ${dirty} uncommitted change${dirty === 1 ? "" : "s"} and is not on ${m.branch}: ` +
       "commit or discard them before assigning a mission");
   }
-  await fetch();
-  const has = async (ref: string) => (await git(GIT_MS, "rev-parse", "--verify", "--quiet", ref)).code === 0;
   const local = await has(`refs/heads/${m.branch}`);
 
   // La branche est dans le miroir d'équipe (une sous-tâche reprise, ici ou
-  // ailleurs) : son travail repart de là. Une branche locale qui contient déjà
-  // celle du miroir (des commits pas encore rendus) est gardée telle quelle.
-  if (await has(`refs/remotes/team/${m.branch}`)) {
-    const ahead = local && (await git(GIT_MS, "merge-base", "--is-ancestor", `team/${m.branch}`, m.branch)).code === 0;
-    await mustSucceed(`switch to ${m.branch}`,
-      ahead ? git(SWITCH_MS, "switch", m.branch) : git(SWITCH_MS, "switch", "-C", m.branch, `team/${m.branch}`));
+  // ailleurs) : son travail repart de là. Une branche locale en retard est
+  // recréée sur le miroir ; une branche locale qui le contient déjà (des
+  // commits pas encore rendus) est gardée telle quelle ; divergente, refusée.
+  if (inTeam) {
+    if (!local || await anc(m.branch, team)) {
+      await mustSucceed(`switch to ${m.branch}`, git(SWITCH_MS, "switch", "-C", m.branch, team));
+    } else if (await anc(team, m.branch)) {
+      await mustSucceed(`switch to ${m.branch}`, git(SWITCH_MS, "switch", m.branch));
+    } else {
+      throw diverged();
+    }
     return;
   }
   // Jamais rendue, mais déjà commencée dans ce clone : on la reprend.
