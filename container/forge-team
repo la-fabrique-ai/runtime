@@ -1,9 +1,14 @@
 #!/usr/bin/env node
-// forge-team : la façon dont un exécuteur parle à forge. Une requête JSON sur
-// une ligne vers la socket de l'API de l'hôte, une réponse sur une ligne ;
-// l'hôte sait qui appelle par la socket, pas par ce que ce script dit. Aucune
-// dépendance. Un texte (une question, un compte rendu) arrive par stdin ou par
-// un fichier, jamais par un argument.
+// forge-team : la façon dont un agent parle à forge. Une requête JSON sur une
+// ligne vers une socket, une réponse sur une ligne ; celui qui reçoit sait qui
+// appelle par la socket, pas par ce que ce script dit. Aucune dépendance. Un
+// texte (une question, un compte rendu, une spec) arrive par stdin ou par un
+// fichier, jamais par un argument.
+//
+// Dans le container de contrôle (la socket du canal local de l'orchestrateur
+// existe), seulement les commandes du canal : lire les tickets, écrire leurs
+// fichiers de mission et leur pile, répondre (voir CONTROL_USAGE). Ailleurs,
+// celles d'un exécuteur, vers l'API de l'hôte :
 //
 //   forge-team ask                      une question précise (sur stdin) ; la réponse arrive dans ton terminal
 //   forge-team done [--wip] [--report-file <fichier>]
@@ -11,20 +16,101 @@
 //                                       rendu, la question attend l'humain) ; le compte rendu est gardé
 //   forge-team status                   la mission que tu tiens, ou aucune
 //
-// Sorties : 0 accepté ; 1 refusé par l'API (la raison sur stderr) ; 2 socket
-// injoignable ; 64 mauvais usage.
+// Sorties : 0 accepté ; 1 refusé (la raison sur stderr) ; 2 socket injoignable ;
+// 64 mauvais usage.
 "use strict";
 const fs = require("node:fs");
 const net = require("node:net");
 
-const SOCKET = process.env.FORGE_API_SOCKET || "/var/lib/forge/api.sock";
-const USAGE = `usage: forge-team ask                (the question on stdin)
+const API_SOCKET = process.env.FORGE_API_SOCKET || "/var/lib/forge/api.sock";
+const CHANNEL_SOCKET = process.env.FORGE_CHANNEL_SOCKET || "/run/forge-orch/channel.sock";
+const CONTROL = fs.existsSync(CHANNEL_SOCKET);
+const SOCKET = CONTROL ? CHANNEL_SOCKET : API_SOCKET;
+const EXECUTOR_USAGE = `usage: forge-team ask                (the question on stdin)
        forge-team done [--wip] [--report-file <file>]
        forge-team status`;
+const CONTROL_USAGE = `usage: forge-team tickets [<status>…]
+       forge-team ticket <id>
+       forge-team mission <id> <spec|answers|split>
+       forge-team problems [--json]
+       forge-team open <id>
+       forge-team write-mission <id> <spec|answers|split>   (the text on stdin)
+       forge-team create-stack <id>                         (a JSON array of {repository, text} on stdin)
+       forge-team answer-request <id> <n>                   (the answer on stdin)
+       forge-team comment <id>                              (the text on stdin)
+       forge-team answer <token>                            (the answer on stdin)
+       forge-team escalate <token> [--recommended-file <file>]  (what is missing on stdin)`;
+const USAGE = CONTROL ? CONTROL_USAGE : EXECUTOR_USAGE;
 
 function usage(message) {
   process.stderr.write(`forge-team: ${message}\n${USAGE}\n`);
   process.exit(64);
+}
+
+function readFile(file, what) {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch (e) {
+    usage(`cannot read the ${what} ${file}: ${e.code || e.message}`);
+  }
+}
+
+const FILES = ["spec", "answers", "split"];
+
+// Les commandes du container de contrôle : chacune, sa requête au canal.
+function controlRequest(command, args) {
+  const exactly = (n, shape) => {
+    if (args.length !== n) usage(`${command} takes ${shape}`);
+  };
+  switch (command) {
+    case "tickets":
+      return args.length === 0 ? { op: "tickets" } : { op: "tickets", status: args };
+    case "ticket":
+      exactly(1, "a ticket id");
+      return { op: "ticket", id: args[0] };
+    case "mission":
+      exactly(2, "a ticket id and spec, answers or split");
+      if (!FILES.includes(args[1])) usage("the file is spec, answers or split");
+      return { op: "mission", id: args[0], file: args[1] };
+    case "problems":
+      if (args.length > 1 || (args.length === 1 && args[0] !== "--json")) usage("problems takes only --json");
+      return { op: "problems" };
+    case "open":
+      exactly(1, "a ticket id");
+      return { op: "open", id: args[0] };
+    case "write-mission":
+      exactly(2, "a ticket id and spec, answers or split");
+      if (!FILES.includes(args[1])) usage("the file is spec, answers or split");
+      return { op: "write-mission", id: args[0], file: args[1], text: readStdin("text") };
+    case "create-stack": {
+      exactly(1, "a ticket id");
+      let subtasks;
+      try {
+        subtasks = JSON.parse(readStdin("list of sub-tasks"));
+      } catch {
+        usage("create-stack reads a JSON array of {repository, text} on stdin");
+      }
+      if (!Array.isArray(subtasks)) usage("create-stack reads a JSON array of {repository, text} on stdin");
+      return { op: "create-stack", id: args[0], subtasks };
+    }
+    case "answer-request":
+      exactly(2, "a ticket id and a request number");
+      return { op: "answer-request", id: args[0], request: args[1], text: readStdin("answer") };
+    case "comment":
+      exactly(1, "a ticket id");
+      return { op: "comment", id: args[0], text: readStdin("text") };
+    case "answer":
+      exactly(1, "a token");
+      return { op: "answer", token: args[0], text: readStdin("answer") };
+    case "escalate": {
+      let recommended = null;
+      if (args.length === 3 && args[1] === "--recommended-file") recommended = readFile(args[2], "recommended answer file");
+      else exactly(1, "a token, then --recommended-file <file> if you have an answer to recommend");
+      return { op: "escalate", token: args[0], text: readStdin("text"), recommended };
+    }
+    default:
+      usage(command === undefined ? "a command is required" : `unknown command ${command}`);
+  }
 }
 
 // Tout stdin, ses sauts de ligne finaux retirés ; un terminal n'est pas un texte.
@@ -43,6 +129,7 @@ function readStdin(what) {
 
 function request() {
   const [command, ...args] = process.argv.slice(2);
+  if (CONTROL) return controlRequest(command, args);
   switch (command) {
     case "status":
       if (args.length > 0) usage("status takes no argument");
@@ -57,12 +144,7 @@ function request() {
         if (args[i] === "--wip" && !wip) {
           wip = true;
         } else if (args[i] === "--report-file" && report === null && args[i + 1] !== undefined) {
-          const file = args[++i];
-          try {
-            report = fs.readFileSync(file, "utf8");
-          } catch (e) {
-            usage(`cannot read the report file ${file}: ${e.code || e.message}`);
-          }
+          report = readFile(args[++i], "report file");
         } else {
           usage(`done: unexpected argument ${args[i]}`);
         }
@@ -88,15 +170,76 @@ function call(req) {
       if (out.includes("\n")) socket.destroy();
     });
     socket.on("error", (e) => {
-      process.stderr.write(`forge-team: cannot reach the forge API at ${SOCKET}: ${e.code || e.message}\n`);
+      const what = CONTROL ? "the orchestrator's channel" : "the forge API";
+      process.stderr.write(`forge-team: cannot reach ${what} at ${SOCKET}: ${e.code || e.message}\n`);
       process.exit(2);
     });
     socket.on("close", () => resolve(out));
   });
 }
 
+// Ce que le canal rend, pour un humain ou un agent qui le lit.
+function printControl(req, reply) {
+  const w = (s) => process.stdout.write(`${s}\n`);
+  switch (req.op) {
+    case "tickets":
+      for (const t of reply.tickets) w(`${t.id}\t${t.status}\tP${t.priority}\t${t.title}`);
+      for (const p of reply.problems) w(`problem: ${p}`);
+      return;
+    case "ticket": {
+      const t = reply.ticket;
+      w(`${t.id} [${t.status}] P${t.priority} ${t.title}`);
+      w(`repositories: ${t.repositories.map((r) => `${r.name} (base ${r.base})`).join(", ")}`);
+      w("");
+      w(t.description);
+      w("");
+      w("## Sub-tasks");
+      for (const s of reply.subtasks) {
+        w(`${s.id} ${s.repository} #${s.position} [${s.status}]${s.branch ? ` ${s.branch}` : ""}`);
+        w(s.text);
+        w("");
+      }
+      w("## Requests");
+      for (const r of reply.requests) {
+        w(`request ${r.id} on ${r.subtask}: ${r.answer === null ? "WAITING" : "answered"}`);
+        w(r.text);
+        if (r.recommended !== null) w(`recommended: ${r.recommended}`);
+        if (r.answer !== null) w(`answer: ${r.answer}`);
+        w("");
+      }
+      w("## Comments");
+      for (const c of reply.comments) {
+        w(`${c.id} ${c.author} (${c.kind}, ${c.at})`);
+        w(c.text);
+        w("");
+      }
+      return;
+    }
+    case "mission": {
+      const text = reply.mission[req.file];
+      if (text === null) {
+        process.stderr.write("(none)\n");
+        process.exit(1);
+      }
+      process.stdout.write(text);
+      return;
+    }
+    case "problems":
+      if (process.argv.includes("--json")) w(JSON.stringify(reply.problems));
+      else for (const p of reply.problems) w(p);
+      return;
+    case "create-stack":
+      w(`ok ${reply.subtasks.join(" ")}`);
+      return;
+    default:
+      w("ok");
+  }
+}
+
 (async () => {
-  const req = request();
+  const raw = request();
+  // `mission` demande un fichier : le canal rend les trois.
+  const req = raw.op === "mission" ? { op: "mission", id: raw.id } : raw;
   const out = await call(req);
   // Une connexion fermée sans réponse ne dit pas que la demande a échoué : elle a
   // pu aboutir. La refaire à l'aveugle donnerait un doublon.
@@ -116,6 +259,7 @@ function call(req) {
     process.stderr.write(`forge-team: ${reply.error}\n`);
     process.exit(1);
   }
+  if (CONTROL) return printControl(raw, reply);
   if (req.op === "status" && "mission" in reply) {
     const m = reply.mission;
     process.stdout.write(m === null ? "ok\nmission: none\n"

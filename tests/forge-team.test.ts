@@ -48,9 +48,12 @@ afterEach(async () => {
 });
 
 // Lance forge-team contre la socket de test, `stdin` sur son entrée standard.
-function run(args: string[], stdin: string, socket = join(dir, "api.sock")): Promise<{ code: number | null; stdout: string; stderr: string }> {
+// `channel` : la socket du canal local (le container de contrôle) ; absente par défaut.
+function run(
+  args: string[], stdin: string, socket = join(dir, "api.sock"), channel = join(dir, "no-channel.sock"),
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn("node", [forgeTeam, ...args], { env: { ...process.env, FORGE_API_SOCKET: socket } });
+    const child = spawn("node", [forgeTeam, ...args], { env: { ...process.env, FORGE_API_SOCKET: socket, FORGE_CHANNEL_SOCKET: channel } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (c) => (stdout += c));
@@ -116,4 +119,46 @@ test("done --wip --report-file sends wip and the file; a missing report file exi
   const missing = await run(["done", "--report-file", join(dir, "missing.md")], "");
   assert.equal(missing.code, 64);
   assert.equal(received.length, 1);
+});
+
+// Le container de contrôle : la socket du canal existe (ici, celle du faux serveur).
+const control = (args: string[], stdin = "") => run(args, stdin, join(dir, "absent.sock"), join(dir, "api.sock"));
+
+test("control: create-stack sends the JSON array read on stdin; a stdin that is not an array exits 64", async () => {
+  answer = '{"ok":true,"subtasks":["T-1.1","T-1.2"]}';
+  const list = [{ repository: "web", text: "one" }, { repository: "api", text: "two" }];
+  const r = await control(["create-stack", "T-1"], JSON.stringify(list));
+  assert.deepEqual([r.code, r.stdout], [0, "ok T-1.1 T-1.2\n"]);
+  assert.equal(received[0], JSON.stringify({ op: "create-stack", id: "T-1", subtasks: list }));
+  assert.equal((await control(["create-stack", "T-1"], '{"a":1}')).code, 64);
+  assert.equal(received.length, 1);
+});
+
+test("control: escalate sends stdin as text and the file as recommended", async () => {
+  const file = join(dir, "r.md");
+  writeFileSync(file, "100 per page");
+  const tok = "a".repeat(32);
+  await control(["escalate", tok, "--recommended-file", file], "The spec says nothing.\n");
+  assert.equal(received[0], JSON.stringify({ op: "escalate", token: tok, text: "The spec says nothing.", recommended: "100 per page" }));
+});
+
+test("control: ticket prints a request without answer as WAITING", async () => {
+  answer = JSON.stringify({
+    ok: true,
+    ticket: { id: "T-1", title: "Paginate", description: "d", status: "dev", priority: 2, repositories: [{ name: "web", base: "main" }] },
+    subtasks: [], comments: [],
+    requests: [{ id: "1", ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: null, answer: null }],
+  });
+  const r = await control(["ticket", "T-1"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /request 1 on T-1\.1: WAITING\nWhich limit\?\n/);
+});
+
+test("with the channel's socket, done is a usage error; without it, tickets is", async () => {
+  const done = await control(["done"]);
+  assert.equal(done.code, 64);
+  assert.match(done.stderr, /usage: forge-team tickets/);
+  const tickets = await run(["tickets"], "");
+  assert.equal(tickets.code, 64);
+  assert.deepEqual(received, []);
 });
