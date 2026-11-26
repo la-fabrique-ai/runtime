@@ -224,6 +224,11 @@ The events it reacts to:
 
 ### 2.6 A developer's question
 
+*Superseded by decision 35: there are no question sessions. A developer's
+doubt goes first to its `spec-reader` sub-agent; what it does not settle goes
+to the human through `forge-team ask`, which hands the work in progress back
+and becomes a request in the ticket. The section below is kept as written.*
+
 1. The developer asks through the forge API (`forge-team ask`, §6.5).
 2. The API passes it to the orchestrator, which opens a fresh question session
    in the control container, with the ticket's context: spec, sub-task,
