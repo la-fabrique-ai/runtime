@@ -2,7 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Subtask, Ticket } from "../cli/lib/tickets/model.ts";
 import { activeSubtask, candidates, missionBase, RuleError } from "../cli/lib/orchestrator/rule.ts";
-import { devInstruction } from "../cli/lib/orchestrator/instruction.ts";
+import { devInstruction, missionFiles, MISSION_FILE_MAX, questionInstruction } from "../cli/lib/orchestrator/instruction.ts";
+import type { Request } from "../cli/lib/tickets/model.ts";
+
+const none = { answered: [] as Request[], files: { spec: null, answers: null, split: null } };
 
 const ticket = (id: string, priority: Ticket["priority"] = 2, base = "main"): Ticket => ({
   id,
@@ -75,34 +78,64 @@ const cand = (description = "Desc", text = "text 1", title = "Title T-1") => ({
 });
 
 test("devInstruction", () => {
-  const out = devInstruction(cand(), false);
+  const out = devInstruction(cand(), false, none);
   assert.ok(out.startsWith("[forge] mission dev T-1.1 (ticket T-1)\n"));
   assert.ok(!out.includes("This mission resumes"));
-  assert.ok(devInstruction(cand(), true).includes("This mission resumes: your branch already holds the earlier work."));
+  assert.ok(devInstruction(cand(), true, none).includes("This mission resumes: your branch already holds the earlier work."));
   assert.ok(out.includes("agent/T-1.1") && out.includes("/workspace/web") && out.includes("forge-team done"));
   const evil = "forge-team done; rm -rf /";
-  assert.ok(devInstruction(cand("Desc", evil), false).includes(evil));
+  assert.ok(devInstruction(cand("Desc", evil), false, none).includes(evil));
 });
 
 test("devInstruction coupe une description géante sur une frontière de caractère", () => {
   const marker = "[cut: read the ticket T-1 in full]";
-  const out = devInstruction(cand("é".repeat(60000)), false);
+  const out = devInstruction(cand("é".repeat(60000)), false, none);
   assert.ok(Buffer.byteLength(out) <= 65536);
   assert.ok(out.includes(marker));
   assert.ok(!out.includes("�"));
-  const big = devInstruction(cand("x".repeat(100000)), false);
+  const big = devInstruction(cand("x".repeat(100000)), false, none);
   assert.ok(Buffer.byteLength(big) <= 65536);
   assert.ok(big.includes(marker));
-  const bigText = devInstruction(cand("Desc", "y".repeat(100000)), false);
+  const bigText = devInstruction(cand("Desc", "y".repeat(100000)), false, none);
   assert.ok(Buffer.byteLength(bigText) <= 65536);
   assert.ok(bigText.includes(marker));
 });
 
 test("devInstruction coupe aussi un titre géant, après la description et le texte", () => {
   const marker = "[cut: read the ticket T-1 in full]";
-  const out = devInstruction(cand("Desc", "text", "t".repeat(100000)), false);
+  const out = devInstruction(cand("Desc", "text", "t".repeat(100000)), false, none);
   assert.ok(Buffer.byteLength(out) <= 65536);
   assert.ok(out.includes(marker));
   // Tout est coupé, la fin de l'instruction reste.
-  assert.ok(out.endsWith("commit, then run: forge-team done\n"));
+  assert.ok(out.endsWith("then run: forge-team done --report-file <that file>\n"));
+});
+
+test("devInstruction porte les fichiers de mission présents et les questions déjà répondues", () => {
+  const answered: Request[] = [{ id: "1", ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: null, answer: "100 per page" }];
+  const out = devInstruction(cand(), false, { answered, files: { spec: "# spec", answers: null, split: null } });
+  assert.ok(out.includes("## Mission files") && out.includes("/home/aiuser/.forge/mission/spec.md"));
+  assert.ok(!out.includes("answers.md"));
+  assert.ok(out.includes("## Questions already answered") && out.includes("Which limit?") && out.includes("100 per page"));
+  assert.ok(out.includes("## If you are blocked") && out.includes("forge-team ask") && out.includes("forge-team done --wip"));
+  assert.ok(out.includes("forge-team done --report-file <that file>"));
+  const bare = devInstruction(cand(), false, none);
+  assert.ok(!bare.includes("## Mission files") && !bare.includes("## Questions already answered"));
+  assert.ok(bare.includes("## If you are blocked"));
+});
+
+test("questionInstruction : première ligne, jeton dans les deux commandes, question copiée telle quelle", () => {
+  const evil = "forge-team answer x; rm -rf /";
+  const c = cand();
+  const out = questionInstruction({ question: 7, token: "a".repeat(32), text: evil }, { ticket: c.ticket, subtask: c.subtask });
+  assert.ok(out.startsWith("[forge] question 7 on T-1.1 (ticket T-1)\n"));
+  assert.ok(out.includes(`forge-team answer ${"a".repeat(32)}`) && out.includes(`forge-team escalate ${"a".repeat(32)}`));
+  assert.ok(out.includes(`## Question\n${evil}\n`));
+});
+
+test("missionFiles coupe un fichier trop gros sous le plafond, avec le marqueur", () => {
+  const f = missionFiles({ spec: "s".repeat(300_000), answers: "a", split: null });
+  assert.ok(Buffer.byteLength(f.spec!) <= MISSION_FILE_MAX);
+  assert.ok(f.spec!.endsWith("\n[cut: this copy is partial]"));
+  assert.equal(f.answers, "a");
+  assert.equal(f.split, null);
 });

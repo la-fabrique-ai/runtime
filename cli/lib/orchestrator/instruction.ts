@@ -1,8 +1,19 @@
-// L'instruction d'une mission dev, envoyée à l'agent. Le texte libre (ticket,
-// sous-tâche) est copié tel quel : c'est de la donnée, jamais interprétée ici.
+// Les instructions envoyées aux agents : celle d'une mission dev, celle d'une
+// session de question. Le texte libre (ticket, sous-tâche, question, réponse,
+// fichier de mission) est copié tel quel : c'est de la donnée, jamais
+// interprétée ici.
+import type { Mission, Request, Subtask, Ticket } from "../tickets/model.ts";
+import type { MissionFiles } from "./host.ts";
 import type { Candidate } from "./rule.ts";
 
 const MAX_BYTES = 65_536;
+
+// Où l'hôte pose la copie en lecture seule des fichiers de mission, dans
+// l'exécuteur (plan 2b, MISSION_FILES_DIR), et la taille d'une copie.
+export const MISSION_DIR = "/home/aiuser/.forge/mission";
+export const MISSION_FILE_MAX = 262_144;
+const FILE_CUT = "[cut: this copy is partial]";
+const FILE_NAMES = ["spec", "answers", "split"] as const;
 
 const bytes = (s: string): number => Buffer.byteLength(s, "utf8");
 
@@ -17,12 +28,45 @@ function cutBytes(s: string, max: number): string {
   return buf.subarray(0, end).toString("utf8");
 }
 
-export function devInstruction(c: Candidate, resumed: boolean): string {
+// Les fichiers de mission tels quels, chacun coupé à MISSION_FILE_MAX octets
+// (marqueur compris) s'il le dépasse.
+export function missionFiles(m: Mission): MissionFiles {
+  const one = (text: string | null): string | null => {
+    if (text === null || bytes(text) <= MISSION_FILE_MAX) return text;
+    return `${cutBytes(text, MISSION_FILE_MAX - bytes(FILE_CUT) - 1)}\n${FILE_CUT}`;
+  };
+  return { spec: one(m.spec), answers: one(m.answers), split: one(m.split) };
+}
+
+// Réduit `parts` (dans l'ordre de `order`) jusqu'à ce que le rendu tienne en
+// MAX_BYTES : chaque champ est coupé de l'excédent (plus la place du
+// marqueur), ou remplacé par le seul marqueur s'il est trop court pour l'absorber.
+function fit<P extends Record<string, string>>(parts: P, order: (keyof P)[], render: (p: P) => string, marker: string): void {
+  for (const key of order) {
+    const excess = bytes(render(parts)) - MAX_BYTES;
+    if (excess <= 0) return;
+    const value = parts[key] as string;
+    const keep = bytes(value) - excess - bytes(marker) - 1;
+    (parts as Record<string, string>)[key as string] = keep >= 0 ? `${cutBytes(value, keep)}\n${marker}` : marker;
+  }
+}
+
+export function devInstruction(
+  c: Candidate,
+  resumed: boolean,
+  extra: { answered: Request[]; files: MissionFiles },
+): string {
   const { ticket, subtask } = c;
   const marker = `[cut: read the ticket ${ticket.id} in full]`;
+  const present = FILE_NAMES.filter((k) => extra.files[k] !== null);
+  // Les questions déjà répondues, de la plus ancienne à la plus récente ; à
+  // couper, les plus anciennes partent d'abord, entières.
+  const blocks = extra.answered.map((r) => ["Question:", r.text, "Answer:", r.answer ?? "", ""].join("\n"));
+  let dropped = 0;
   type Parts = { title: string; description: string; text: string };
-  const render = ({ title, description, text }: Parts): string =>
-    [
+  const render = ({ title, description, text }: Parts): string => {
+    const kept = blocks.slice(dropped);
+    return [
       `[forge] mission dev ${subtask.id} (ticket ${ticket.id})`,
       ...(resumed ? ["This mission resumes: your branch already holds the earlier work."] : []),
       "",
@@ -34,23 +78,62 @@ export function devInstruction(c: Candidate, resumed: boolean): string {
       "## Sub-task",
       text,
       "",
+      ...(present.length > 0
+        ? ["## Mission files", "Read-only copies of the ticket's mission files. Read them before the code.",
+          ...present.map((k) => `${MISSION_DIR}/${k}.md`), ""]
+        : []),
+      ...(blocks.length > 0
+        ? ["## Questions already answered", ...(dropped > 0 ? [marker, ""] : []), ...kept]
+        : []),
       "## Branch",
       `agent/${subtask.id}, based on ${c.base}, in /workspace/${subtask.repository}`,
       "",
+      "## If you are blocked",
+      "Ask one precise question: forge-team ask (the question on stdin). The answer arrives in this terminal. " +
+        "If forge tells you the question waits for the human: commit your work, then run forge-team done --wip.",
+      "",
       "## When you are done",
-      "commit, then run: forge-team done",
+      "commit, write what you did, what you checked and what stays doubtful in a file, " +
+        "then run: forge-team done --report-file <that file>",
       "",
     ].join("\n");
+  };
 
   const parts: Parts = { title: ticket.title, description: ticket.description, text: subtask.text };
-  // D'abord la description, puis le texte de la sous-tâche, enfin le titre :
-  // chacun est coupé de l'excédent (plus la place du marqueur), ou remplacé
-  // par le seul marqueur s'il est trop court pour l'absorber.
-  for (const key of ["description", "text", "title"] as const) {
-    const excess = bytes(render(parts)) - MAX_BYTES;
-    if (excess <= 0) break;
-    const keep = bytes(parts[key]) - excess - bytes(marker) - 1;
-    parts[key] = keep >= 0 ? `${cutBytes(parts[key], keep)}\n${marker}` : marker;
-  }
+  fit(parts, ["description"], render, marker);
+  while (bytes(render(parts)) > MAX_BYTES && dropped < blocks.length) dropped++;
+  fit(parts, ["text", "title"], render, marker);
+  return render(parts);
+}
+
+export function questionInstruction(
+  q: { question: number; token: string; text: string },
+  c: { ticket: Ticket; subtask: Subtask },
+): string {
+  const { ticket, subtask } = c;
+  const marker = `[cut: read the ticket ${ticket.id} in full]`;
+  type Parts = { question: string; text: string };
+  const render = ({ question, text }: Parts): string =>
+    [
+      `[forge] question ${q.question} on ${subtask.id} (ticket ${ticket.id})`,
+      "",
+      "You answer one question of a developer, from the ticket's spec and the code, and nothing else. " +
+        `Read the ticket with forge-team ticket ${ticket.id} and its mission files with ` +
+        `forge-team mission ${ticket.id} spec (then answers, split). ` +
+        "The repositories are under /workspace, to read only. " +
+        `If the spec or the code settles the question, run: forge-team answer ${q.token} (your answer on stdin). ` +
+        `If it does not, never guess: run forge-team escalate ${q.token} ` +
+        "(what is missing on stdin; --recommended-file <file> for the answer you would give). " +
+        "Run exactly one of the two, once, then stop.",
+      "",
+      "## Question",
+      question,
+      "",
+      "## Sub-task",
+      text,
+      "",
+    ].join("\n");
+  const parts: Parts = { question: q.text, text: subtask.text };
+  fit(parts, ["text", "question"], render, marker);
   return render(parts);
 }

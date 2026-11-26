@@ -342,7 +342,7 @@ async function launch(
     repository: s.repository,
     branch: `agent/${s.id}`,
     base: c.base,
-    instruction: devInstruction(c, resumed),
+    instruction: devInstruction(c, resumed, { answered: [], files: { spec: null, answers: null, split: null } }),
     files: { spec: null, answers: null, split: null },
   };
   try {
