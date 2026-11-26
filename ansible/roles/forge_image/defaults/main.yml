@@ -10,8 +10,9 @@ forge_image_orch_uid: 1002
 # aiuser's subordinate IDs, for rootless Docker.
 forge_image_subid_start: 200000
 forge_image_subid_count: 65536
-# herdr-core (hc), pinned (DX 5 spec §5.6). The version is also HC_VERSION in
-# cli/lib/hc.ts, which a test keeps equal to this one. The URLs and sums are
+# herdr-core (hc), pinned (DX 5 spec §5.6). The Mac only needs a 0.x hc from
+# HC_MIN_VERSION on (cli/lib/hc.ts), which a test keeps at or below this
+# version (#166). The URLs and sums are
 # the release's own manifest, https://releases.herdr.dev/core/<version>/manifest.json
 # (the sums were also recomputed from the downloaded archives); they are keyed
 # by dpkg's architecture name, and the role fails on any other rather than

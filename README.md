@@ -72,8 +72,11 @@ pipx install ansible-core             # 2.20 or newer
 ```
 
 Install Herdr App and its `hc` from https://herdr.dev. `forge team up` needs
-`hc` at the version forge pins, 0.1.21 (`hc --version`), and refuses to add
-machines to Herdr App with another. `forge open` also needs the herdr TUI.
+an `hc` of the 0.x line, no older than the minimum forge names
+(`HC_MIN_VERSION` in `cli/lib/hc.ts`; `hc --version` shows yours): Herdr
+App's own updates within 0.x are fine. It refuses to add machines to Herdr
+App with an older `hc`, a 1.x or later one, or an `hc --version` it cannot
+read, and says what to do. `forge open` also needs the herdr TUI.
 
 **Both:** you need git, and an SSH key that GitHub accepts, loaded in the
 agent that ssh uses for `github.com` (`ssh-add -L` lists it). The host clones
@@ -839,9 +842,11 @@ Known limits:
   `Error connecting to agent`): the agent is not forwarded. Check
   `ForwardAgent yes` and `IdentityAgent` in your SSH config, and that you are
   attached: with no client attached, the host has no agent.
-- **`forge team up` says it needs hc 0.1.21:** your `hc` is another version,
-  or missing. Install the pinned one (https://herdr.dev), then run it again:
-  the machines are added at that second run.
+- **`forge team up` refuses your hc:** your `hc` is missing, older than
+  forge's minimum, of a line after 0.x, or prints a version forge cannot
+  read. Do what the message says (update herdr-core from https://herdr.dev,
+  or update forge for a newer line), then run it again: the machines are
+  added at that second run.
 - **`herdr --remote` fails the first time:** run it in a real terminal; it
   asks before installing herdr on the host.
 - **A clone stops on `smudge filter lfs failed`** (a repository with Git LFS
