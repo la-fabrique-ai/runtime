@@ -56,6 +56,12 @@ test("Review Focus 4: a working session is left alone; fresh starts one anyway",
   assert.equal(runs(fresh).length, 1);
 });
 
+test("a live session without a readable state (unknown) is left alone: the human's conversation is never cut", async () => {
+  const ctx = setup([state("starting")]);
+  assert.equal(await ensurePilot(ctx), "running");
+  assert.deepEqual(runs(ctx), []);
+});
+
 test("Review Focus 2: an exited session is replaced", async () => {
   const ctx = setup([state("exited")]);
   assert.equal(await ensurePilot(ctx), "started");

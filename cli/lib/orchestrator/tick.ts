@@ -310,9 +310,11 @@ async function onDone(tickets: Connector, host: HostApi, ev: DoneEvent, report: 
   s.status = "done";
   report.completed.push(s.id);
   if (holds) await host.release(ev.executor);
+  // Pas de `qa` tant qu'une demande du ticket attend l'humain.
   if (subtasks.length > 0 && subtasks.every((x) => x.status === "done")) {
     const ticket = await tickets.getTicket({ id: ev.ticket });
-    if (ticket.status === "dev") await tickets.setTicketStatus({ id: ev.ticket, status: "qa" });
+    const waits = (await tickets.listRequests({ ticket: ev.ticket, open: true })).length > 0;
+    if (ticket.status === "dev" && !waits) await tickets.setTicketStatus({ id: ev.ticket, status: "qa" });
   }
 }
 

@@ -747,3 +747,35 @@ test("a mission file over 262 144 bytes, or holding a secret, is refused", async
   assert.equal(secret.ok, false);
   assert.match((secret as { error: string }).error, /mission\.files\.answers holds a secret/);
 });
+
+test("the first assign of a fresh executor creates /home/aiuser/.forge as aiuser before the root mkdir of the mission folder", async () => {
+  setup(FRESH);
+  await call(CONTROL, { op: "assign", to: E1, mission: spec() });
+  const calls = joined();
+  const parent = calls.findIndex((c) => c.includes(`exec ${E1} --user 1001`) && c.endsWith("mkdir -p -- /home/aiuser/.forge"));
+  const mk = calls.findIndex((c) => c.endsWith(`-- mkdir -m 755 -- ${MISSION_FILES_DIR}`));
+  assert.ok(parent >= 0 && mk > parent, calls.join("\n"));
+});
+
+test("answer to a session that is blocked or unknown is refused: nothing typed, the key stays for the next turn", async () => {
+  for (const state of ["blocked", "unknown"]) {
+    hold(E1, held());
+    keys(E1)[QUESTION_KEY] = "7";
+    // Un statut que forge ne connaît pas se lit `unknown`.
+    sessions[E1] = state === "blocked" ? "blocked" : "starting";
+    setup([SENT]);
+    const r = await call(CONTROL, { op: "answer", to: E1, question: 7, kind: "answer", text: "x" });
+    assert.equal(r.ok, false, `${state}: ${JSON.stringify(r)}`);
+    assert.deepEqual(sentLines(), [], state);
+    assert.equal(keys(E1)[QUESTION_KEY], "7", state);
+  }
+});
+
+test("the question key is read with a timeout: a hanging config get refuses ask, naming the step", async () => {
+  hold(E1, held());
+  hangs = [`config get ${E1} ${QUESTION_KEY}`];
+  setup();
+  const r = await call(E1, { op: "ask", text: "q" });
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.match((r as { error: string }).error, /timed out after 30 s/);
+});

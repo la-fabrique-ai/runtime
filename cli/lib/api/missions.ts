@@ -10,6 +10,7 @@
 // `assign`, `release` et `done` passent un à la fois (`exclusive()`), et l'id
 // d'un `done` se prend en l'écrivant au journal, dans cette file : un
 // évènement d'id plus petit n'apparaît jamais après un plus grand.
+import { dirname } from "node:path";
 import type { Context, ExecResult } from "../context.ts";
 import { ForgeError, inTime, mustSucceed } from "../context.ts";
 import { recordBranch } from "../branch-records.ts";
@@ -164,6 +165,10 @@ export const MISSION_FILES_DIR = "/home/aiuser/.forge/mission";
 async function resetMissionFiles(ctx: Context, to: string): Promise<void> {
   const asRoot = (step: string, argv: string[]) =>
     mustSucceed(step, inTime(`${step} in ${to}`, INCUS_MS, ctx.exec(incus("exec", to, "--", ...argv), { timeoutMs: INCUS_MS })));
+  // Le parent est à aiuser ; avant la première session d'un exécuteur neuf, il
+  // n'existe pas encore : aiuser le crée (root le ferait à root).
+  await mustSucceed("create /home/aiuser/.forge", inTime(`create /home/aiuser/.forge in ${to}`, INCUS_MS,
+    execAsAgentArgv(ctx, to, ["mkdir", "-p", "--", dirname(MISSION_FILES_DIR)], { timeoutMs: INCUS_MS })));
   await asRoot("remove the mission files", ["rm", "-rf", "--", MISSION_FILES_DIR]);
   await asRoot("create the mission files folder", ["mkdir", "-m", "755", "--", MISSION_FILES_DIR]);
 }
@@ -599,7 +604,7 @@ async function prepareBranch(ctx: Context, to: string, m: MissionSpec): Promise<
 }
 
 async function clearQuestion(ctx: Context, to: string): Promise<void> {
-  if ((await configGet(ctx, to, QUESTION_KEY)) === "") return;
+  if ((await configGet(ctx, to, QUESTION_KEY, { timeoutMs: INCUS_MS })) === "") return;
   await mustSucceed("clear the question",
     inTime(`clearing the question of ${to}`, INCUS_MS, configUnset(ctx, to, QUESTION_KEY, { timeoutMs: INCUS_MS })));
 }
@@ -699,10 +704,10 @@ function readQuestion(value: string | undefined): number | null {
 // est celui de la question, puis la clé. Une seule question à la fois.
 async function ask(d: ApiDeps, caller: ProjectMember, text: string): Promise<Outcome> {
   const { ctx } = d;
-  const m = readHeld(await configGet(ctx, caller.name, MISSION_KEY));
+  const m = readHeld(await configGet(ctx, caller.name, MISSION_KEY, { timeoutMs: INCUS_MS }));
   if (m === null) throw new ForgeError(`${caller.name} holds no mission: there is nothing to ask about`);
   if (m === "unreadable") throw new ForgeError(`${caller.name}'s mission key is unreadable: ask for it to be released`);
-  const pending = readQuestion(await configGet(ctx, caller.name, QUESTION_KEY));
+  const pending = readQuestion(await configGet(ctx, caller.name, QUESTION_KEY, { timeoutMs: INCUS_MS }));
   if (pending !== null) throw new ForgeError(`question ${pending} still waits for its answer`);
   const entry = d.journal.append(entryFields(caller, { op: "ask", text }, "ok", null, m), d.now());
   await mustSucceed("record the question",
@@ -734,8 +739,14 @@ async function answer(
 ): Promise<boolean> {
   const { to, question: n } = a;
   let delivered = false;
-  if (readQuestion(await configGet(ctx, to, QUESTION_KEY)) === n) {
-    if (isLive(await sessionState(ctx, to, { timeoutMs: INCUS_MS }))) {
+  if (readQuestion(await configGet(ctx, to, QUESTION_KEY, { timeoutMs: INCUS_MS })) === n) {
+    const state = await sessionState(ctx, to, { timeoutMs: INCUS_MS });
+    // Bloquée à son écran, ou sans état lisible : rien n'est tapé, mais la
+    // session vit peut-être. Un refus garde la clé : l'orchestrateur relivre.
+    if (state === "blocked" || state === "unknown") {
+      throw new ForgeError(`${to}'s session is ${state}: the answer to question ${n} is not delivered yet`);
+    }
+    if (isLive(state)) {
       const file = `${MESSAGES_DIR}/answer-${n}.md`;
       await mustSucceed("push the answer", inTime(`push the answer to ${to}`, INCUS_MS,
         pushText(ctx, to, file, a.text, { uid: 1001, gid: 1001, mode: "600" }, { timeoutMs: INCUS_MS })));

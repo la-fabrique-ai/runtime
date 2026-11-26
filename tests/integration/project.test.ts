@@ -61,6 +61,7 @@ async function statusRows(): Promise<Record<string, Row>> {
 
 const mission = (subtask: string, base: string) => ({
   kind: "dev", ticket: "T-1", subtask, repository: REPO, branch: `agent/${subtask}`, base, instruction: `Fais ${subtask}.`,
+  files: { spec: `# Spec de ${subtask}\n`, answers: null, split: null },
 });
 const hc = (name: string, args: string[]) => run("incus", hcArgv(name, args).slice(1));
 
@@ -160,6 +161,10 @@ test("a project: the control's socket and home, assign, done, a stacked sub-task
   rows = await statusRows();
   assert.equal(rows[EX1].mission?.subtask, "T-1.1");
   assert.equal(rows[EX1].session, "idle", JSON.stringify(rows));
+  // La copie des fichiers de mission : lisible par l'agent, pas modifiable.
+  const spec = "/home/aiuser/.forge/mission/spec.md";
+  assert.equal(must("read spec.md", await asAiuser(EX1, ["cat", spec])).stdout, "# Spec de T-1.1\n");
+  assert.notEqual((await asAiuser(EX1, ["sh", "-c", `echo x >> ${spec}`])).status, 0, "aiuser could write spec.md");
 
   // Rien de commité : `done` refusé. Puis un commit, et `done` le range au miroir des agents.
   const early = await asAiuser(EX1, ["forge-team", "done"]);

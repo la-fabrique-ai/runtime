@@ -537,3 +537,17 @@ test("la mission envoyée porte le spec.md de la base dans files.spec", async ()
   assert.deepEqual(m.files, { spec: "# The spec\n", answers: null, split: null });
   assert.ok(m.instruction.includes("/home/aiuser/.forge/mission/spec.md"));
 });
+
+test("a plain done of the last sub-task leaves the ticket in dev while one of its requests waits for the human", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a", "b"]);
+  const cursor = memCursor();
+  await turn({ tickets, host, cursor });
+  // T-1 n'a qu'une sous-tâche, tenue par b ; une demande reste ouverte.
+  const holder = host.executors.find((e) => e.mission?.subtask === "T-1.1")!;
+  await tickets.openRequest({ ticket: "T-1", subtask: "T-1.1", text: "Which limit?" });
+  host.finish(holder.name);
+  await turn({ tickets, host, cursor });
+  assert.equal(await status(tickets, "T-1.1"), "done");
+  assert.equal((await tickets.getTicket({ id: "T-1" })).status, "dev");
+});

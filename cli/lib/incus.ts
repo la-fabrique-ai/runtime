@@ -96,8 +96,12 @@ export async function instanceExists(ctx: Context, name: string): Promise<boolea
   return (await ctx.exec(incus("info", name))).code === 0;
 }
 
-export async function configGet(ctx: Context, name: string, key: string): Promise<string> {
-  const r = await ctx.exec(incus("config", "get", name, key));
+// `timeoutMs` : un appel de l'API, dans sa file ; dépassé, c'est un refus qui
+// nomme l'étape plutôt qu'une valeur vide.
+export async function configGet(ctx: Context, name: string, key: string, opts: { timeoutMs?: number } = {}): Promise<string> {
+  const argv = incus("config", "get", name, key);
+  const r = opts.timeoutMs === undefined ? await ctx.exec(argv) : await ctx.exec(argv, { timeoutMs: opts.timeoutMs });
+  if (r.timedOut) throw new ForgeError(`incus config get ${key} of ${name} timed out after ${(opts.timeoutMs ?? 0) / 1000} s`);
   return r.code === 0 ? r.stdout.trim() : "";
 }
 
