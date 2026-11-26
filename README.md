@@ -365,8 +365,53 @@ the host checks that the branch has commits beyond its base, copies it to the
 agents' mirror and records it; the orchestrator sets the sub-task `done`,
 frees the executor, and moves on. When every sub-task of the ticket is `done`,
 the ticket goes to `qa`. Several tickets advance in parallel, one executor
-each. Writing the tickets with an agent (the Pilot), the agents' questions,
-QA and the pull requests come in later parts.
+each. QA and the pull requests come in a later part.
+
+#### Open a ticket with the Pilot
+
+You create a ticket by writing its `ticket.md`, with the `status: todo`, the
+repositories and what you want. Then, from your machine:
+
+```bash
+forge pilot T-1            # --fresh: in a new session of the Pilot (between two tickets)
+```
+
+It refreshes the origin mirrors with your forwarded SSH agent, starts the
+**Pilot** if its session does not run, and tells it you open `T-1`. The Pilot
+is a Claude Code session in the control container (its `agent` terminal: open
+it in Herdr App, or with `forge open`); `forge team up` starts it too. It
+reads the code in its own clones, asks you its questions in rounds, each with
+the answer it proposes, and writes three files in the ticket's folder:
+`spec.md` (the spec), `answers.md` (your answers) and `split.md` (the split it
+proposes). Once you agree with the spec and the split, it creates the
+sub-tasks, in order, and sets the ticket `dev`: the orchestrator takes it from
+there. Nothing goes to development before you agree. Each mission gets a
+read-only copy of these files, and the developer reads them before the code.
+
+Only you write into the Pilot's session (`forge pilot`, and what you type):
+no developer and no orchestrator message reaches it. It reaches the tickets
+only through a few verbs of the orchestrator (read a ticket, write its mission
+files, create its stack, answer a request), never the files themselves.
+
+#### Questions
+
+A developer that is blocked asks one precise question (`forge-team ask`) and
+goes on with what does not depend on it. The orchestrator starts a fresh
+**question session** in the control container, which answers from the
+ticket's spec and the code: the answer is typed into the developer's session
+and kept in the ticket. When the spec does not settle it, the question goes to
+you: the developer commits its work in progress and is released, and the ticket
+waits, while its executor takes other tickets. A waiting question is a file
+`requests/<n>.md` in the ticket's folder, without its `requests/<n>.answer.md`.
+Answer it by telling the Pilot (it shows the question and writes your answer,
+in your words), or by writing that answer file yourself. At its next turn the
+orchestrator hands the sub-task out again, with every answer given so far. A
+developer that never hands its work back is released ten minutes after its
+question went to you; a question session that gives no answer in fifteen
+minutes sends the question to you.
+
+A developer ends its mission with a report (what it did, what it checked, what
+stays doubtful), which the ticket keeps as a comment: its terminal does not.
 
 #### Executors have a `.env`
 
@@ -394,6 +439,11 @@ reach the agent and every command it runs, in clear.**
 ```bash
 forge team status          # each container: its mission, its session; the orchestrator's state (--json for a program)
 ```
+
+Under the table, `PROBLEMS` lists what the orchestrator could not do at its
+last turn (an assign the host refused, an unreadable ticket, a developer
+released without its work in progress), read from the orchestrator itself;
+`orchestrator's problems: unavailable` when it does not answer.
 
 The orchestrator decides alone. When you need to step in, `forge team assign`
 and `forge team release` are your hand on an executor, without the
@@ -799,8 +849,8 @@ Until `teams` and `pilot` are gone from the config, every host command
 | An agent sends code or tokens out | Accepted in the default open mode. Strict mode limits egress to your allowlist |
 | An agent publishes to GitHub | No GitHub credential in containers, and `origin` is a read-only mirror; only `forge ship`, on your machine, pushes |
 | An agent drives other agents' terminals | Each container has its own `hc` core; the host's `forge hc-exec` serves only the project's containers, from your SSH session, never from a container |
-| An agent abuses the channel to the host | An executor's socket answers two verbs, `done` and `status`; only the control container's, owned by the orchestrator's user, can assign or release; every request read field by field, a mission that holds the Claude token refused, every change in a journal |
-| An agent edits the tickets | The ticket base is mounted in the control container only, under the orchestrator's user's home, which the agent's user cannot enter |
+| An agent abuses the channel to the host | An executor's socket answers three verbs, `ask`, `done` and `status`; only the control container's, owned by the orchestrator's user, can assign or release; every request read field by field, a mission that holds the Claude token refused, every change in a journal |
+| An agent edits the tickets | The ticket base is mounted in the control container only, under the orchestrator's user's home, which the agent's user cannot enter. The control container's sessions (the Pilot, the question sessions) reach it only through the orchestrator's few verbs, on a local socket executors do not have; a question session acts on its own question only |
 | An agent reads your Claude token | The token is a file in the agent's own container (mode 600, a directory only the agent can read) and in your host's home, exported to the agent's process alone; it covers model requests only and is revocable in claude.ai. An agent can use it, so treat it as the agent's |
 | SSH brute force on the host | Keys only, fail2ban (not in local mode), a connection rate limit (`public`), an optional source restriction |
 | Your forwarded agent is abused on the host | Containers never receive it; a hardware key asks for a touch per use |

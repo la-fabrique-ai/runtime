@@ -357,6 +357,10 @@ Settled after the review and the reading of the console's last version:
 33. **No autonomous mode.** forge runs supervised only: the human ships with
     `forge ship` and merges on GitHub. Decision 26 is withdrawn, §6.13 says
     what stays, and the delivery has four parts (§8).
+34. **Part 2 ships without the screens** (maintainer, 2026-11-26). The human
+    answers a request through the Pilot, or by writing the answer in the
+    ticket base; the screens' small slice of decision 32 follows part 2, with
+    the colleague who iterates on it.
 
 ## 4. Goals, non-goals, anti-goals
 
@@ -883,9 +887,8 @@ the old system kept on a LAN host.
 2. **The Pilot and the questions.** The local channel; the Pilot's launch on a
    ticket, the mission files, `create-stack`; question sessions, requests,
    Waiting for human, the answer back to Ready. *End state: the human
-   specifies a ticket with the Pilot and answers questions.* It needs the
-   screens' small slice (§6.12, decision 32): the list of tickets and the
-   answer to a request.
+   specifies a ticket with the Pilot and answers questions.* It ships without
+   the screens' small slice (decision 34).
 3. **QA, fixes, cascade, ship.** QA missions and their report, fix sub-tasks,
    rebase missions and the base check before QA, `forge fetch <ticket>`,
    `forge ship <ticket>` with the lease and the GitHub stack, the import of
