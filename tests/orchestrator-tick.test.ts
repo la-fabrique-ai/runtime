@@ -533,3 +533,18 @@ test("a free executor whose state is unknown is a problem line at each turn", as
     assert.ok(r.problems.some((p) => p.startsWith("c: free but its state is unknown")), r.problems.join("\n"));
   }
 });
+
+test("a sub-task handed out again after a request is launched as a resumed mission", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a", "b", "c"]);
+  const cursor = memCursor();
+  await turn({ tickets, host, cursor });
+  host.ask("a", "Which limit?");
+  await turn({ tickets, host, cursor });
+  const [req] = await tickets.listRequests({ ticket: "T-2", open: true });
+  await tickets.answerRequest({ ticket: "T-2", id: req.id, text: "50" });
+  await turn({ tickets, host, cursor });
+  const m = host.assigned.at(-1)!.mission;
+  assert.equal(m.subtask, "T-2.1");
+  assert.ok(m.instruction.includes("This mission resumes: your branch already holds the earlier work."), m.instruction);
+});

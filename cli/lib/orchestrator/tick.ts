@@ -386,8 +386,11 @@ async function launch(
   try {
     // Les fichiers de mission et les réponses déjà données, lus à chaque lancement.
     const files = missionFiles(await tickets.readMission({ ticket: c.ticket.id }));
-    const answered = (await tickets.listRequests({ ticket: c.ticket.id }))
-      .filter((r) => r.subtask === s.id && r.answer !== null);
+    const requests = (await tickets.listRequests({ ticket: c.ticket.id })).filter((r) => r.subtask === s.id);
+    const answered = requests.filter((r) => r.answer !== null);
+    // Une sous-tâche qui a déjà une demande a été rendue en cours (ask) : sa
+    // branche porte le travail d'avant, la mission reprend.
+    if (requests.length > 0) resumed = true;
     mission = {
       kind: "dev",
       ticket: c.ticket.id,
