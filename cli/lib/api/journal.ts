@@ -26,6 +26,8 @@ export type Entry = {
   // La mission d'un `assign` ou d'un `done`, sans sa consigne : un `done`
   // accepté devient un évènement (`events`). Absente des autres lignes.
   mission?: HeldMission;
+  // Un `done` qui rend un travail en cours (la question attend l'humain).
+  wip?: boolean;
 };
 
 export type NewEntry = Omit<Entry, "id" | "time">;

@@ -58,7 +58,7 @@ export type MissionRequest =
   | { op: "release"; to: string }
   | { op: "events"; after: number }
   | { op: "ask"; text: string }
-  | { op: "done" };
+  | { op: "done"; wip: boolean; report: string | null };
 
 type Kind = ProjectMember["kind"];
 export type MissionVerb = MissionRequest["op"];
@@ -70,7 +70,7 @@ const VERBS: Record<Kind, readonly MissionVerb[]> = {
 };
 // Les champs exacts de chaque verbe ; `op` est lu à part.
 const FIELDS: Record<MissionVerb, readonly string[]> = {
-  status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: [], ask: ["text"],
+  status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: ["wip", "report"], ask: ["text"],
 };
 const MISSION_FIELDS = ["kind", "ticket", "subtask", "repository", "branch", "base", "instruction"] as const;
 const HELD_FIELDS = MISSION_FIELDS.filter((k) => k !== "instruction");
@@ -164,8 +164,16 @@ export function parseMissionRequest(line: string, from: Kind, secrets: readonly 
       }
       return { op: "events", after };
     }
-    case "done":
-      return { op: "done" };
+    case "done": {
+      // Les deux champs sont facultatifs : le forge-team de la partie 1 envoie `{"op":"done"}`.
+      const wip = json.wip ?? false;
+      if (typeof wip !== "boolean") throw new ForgeError("done: wip must be a boolean");
+      const raw = json.report ?? null;
+      if (raw !== null && typeof raw !== "string") throw new ForgeError("done: report must be a string or null");
+      const report = raw === null || raw.trim() === "" ? null : raw;
+      if (report !== null) checkText(report, INSTRUCTION_MAX, "report", secrets);
+      return { op: "done", wip, report };
+    }
     case "ask": {
       const text = json.text;
       if (typeof text !== "string") throw new ForgeError("ask: text must be a string");
@@ -237,8 +245,9 @@ function entryFields(caller: ProjectMember, req: MissionRequest | null, outcome:
     to: req !== null && "to" in req ? req.to : null,
     task: mission?.subtask ?? null,
     outcome, error, summary: null,
-    text: req?.op === "assign" ? req.mission.instruction : req?.op === "ask" ? req.text : null,
+    text: req?.op === "assign" ? req.mission.instruction : req?.op === "ask" ? req.text : req?.op === "done" ? req.report : null,
     ...(mission === undefined ? {} : { mission }),
+    ...(req?.op === "done" && req.wip ? { wip: true } : {}),
   };
 }
 
@@ -279,8 +288,10 @@ async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Prom
       }
     case "events":
       return events(d, req.after);
-    case "done":
-      return exclusive(() => withMissionLock(() => done(d, caller)));
+    case "done": {
+      const r = req;
+      return exclusive(() => withMissionLock(() => done(d, caller, r)));
+    }
     case "ask": {
       const { text } = req;
       return exclusive(() => withMissionLock(() => ask(d, caller, text)));
@@ -577,7 +588,7 @@ function events(d: ApiDeps, after: number): Outcome {
     .map((e): HostEvent => {
       const base = { id: e.id, executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask };
       if (e.op === "ask") return { ...base, kind: "ask", text: e.text ?? "" };
-      return { ...base, kind: "done", branch: e.mission!.branch, wip: false, report: null };
+      return { ...base, kind: "done", branch: e.mission!.branch, wip: e.wip === true, report: e.text ?? null };
     });
   return { reply: () => ({ ok: true, events: list, last }), quiet: true };
 }
@@ -606,12 +617,12 @@ async function ask(d: ApiDeps, caller: ProjectMember, text: string): Promise<Out
 }
 
 // Une mission tenue, des clones sans changements suivis, au moins un commit
-// au-delà de sa base, la branche copiée dans le miroir d'équipe du dépôt ;
+// au-delà de sa base (sauf un travail en cours, `wip`), la branche copiée dans le miroir d'équipe du dépôt ;
 // puis la ligne du journal, dont l'id est celui de l'évènement. Les clones
 // sont lus comme `status` les lit (tous, pas seulement celui de la mission) :
 // un done accepté sur un clone sale libérerait un exécuteur que `status` dit
 // ensuite `unknown`, et qui ne recevrait plus de mission.
-async function done(d: ApiDeps, caller: ProjectMember): Promise<Outcome> {
+async function done(d: ApiDeps, caller: ProjectMember, req: { op: "done"; wip: boolean; report: string | null }): Promise<Outcome> {
   const { ctx } = d;
   const m = readHeld(await configGet(ctx, caller.name, MISSION_KEY));
   if (m === null) throw new ForgeError(`${caller.name} holds no mission: there is nothing to report done`);
@@ -629,11 +640,11 @@ async function done(d: ApiDeps, caller: ProjectMember): Promise<Outcome> {
   await mustSucceed(stacked ? "git fetch team" : "git fetch origin", git(FETCH_MS, "fetch", stacked ? "team" : "origin"));
   const from = stacked ? `team/${m.base}` : m.base;
   const count = await mustSucceed("git rev-list", git(GIT_MS, "rev-list", "--count", `${from}..${m.branch}`));
-  if (!(Number.parseInt(count.stdout.trim(), 10) > 0)) {
-    throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
-  }
-  await copyToTeamMirror(ctx, caller.name, m.repository, m.branch);
-  const entry = d.journal.append(entryFields(caller, { op: "done" }, "ok", null, m), d.now());
+  const ahead = Number.parseInt(count.stdout.trim(), 10) > 0;
+  // Un travail en cours sans commit est accepté : rien à copier.
+  if (!ahead && !req.wip) throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
+  if (ahead) await copyToTeamMirror(ctx, caller.name, m.repository, m.branch);
+  const entry = d.journal.append(entryFields(caller, req, "ok", null, m), d.now());
   return { entry, reply: (id) => ({ ok: true, id }) };
 }
 

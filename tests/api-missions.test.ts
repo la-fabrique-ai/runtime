@@ -611,3 +611,36 @@ test("ask: a question holding a secret is refused, and the journal does not hold
   await call(CONTROL, { op: "release", to: E1 });
   assert.equal(keys(E1)[QUESTION_KEY], undefined);
 });
+
+const mirrorFetch = () => ctx.calls.some((c) => c[0] === "git" && c.includes("fetch") && c.some((a) => a.startsWith("--git-dir=")));
+
+test("done --wip with nothing committed is accepted and copies nothing; with a commit it copies the branch", async () => {
+  hold(E1, held());
+  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "0\n" }]);
+  assert.equal((await call(E1, { op: "done", wip: true, report: null })).ok, true);
+  assert.ok(!mirrorFetch());
+  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "1\n" }]);
+  assert.equal((await call(E1, { op: "done", wip: true, report: null })).ok, true);
+  assert.ok(mirrorFetch());
+});
+
+test("done --wip on a dirty clone is refused, as a plain done is", async () => {
+  hold(E1, held());
+  setup([{ match: "/workspace/web -c core.fsmonitor=false", stdout: " M a.ts\n" }]);
+  const r = await call(E1, { op: "done", wip: true, report: null });
+  assert.equal(r.ok, false);
+  assert.match((r as { error: string }).error, /uncommitted changes/);
+});
+
+test("done with a report gives an event with that report; {op:done} alone still works; an unknown field is refused", async () => {
+  hold(E1, held());
+  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "1\n" }]);
+  const r = await call(E1, { op: "done", wip: false, report: "Did x; checked y." }) as unknown as { id: number };
+  const ev = await call(CONTROL, { op: "events", after: 0 }) as unknown as { events: { wip: boolean; report: string | null }[] };
+  assert.deepEqual([ev.events[0].wip, ev.events[0].report], [false, "Did x; checked y."]);
+  assert.ok(r.id > 0);
+  hold(E2, held({ subtask: "T-1.2", branch: "agent/T-1.2" }));
+  setup([{ match: "rev-list --count", stdout: "1\n" }]);
+  assert.equal((await call(E2, { op: "done" })).ok, true);
+  assert.deepEqual(await call(E2, { op: "done", force: true }), { ok: false, error: 'done: unknown field: "force"' });
+});
