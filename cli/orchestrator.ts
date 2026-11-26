@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openMarkdownBase } from "./lib/tickets/markdown-base.ts";
 import { socketHost } from "./lib/orchestrator/host.ts";
+import { fileQuestions } from "./lib/orchestrator/questions.ts";
 import { fileCursor, tick } from "./lib/orchestrator/tick.ts";
 
 export type Args = { base: string; socket: string; state: string; prefix: string; pollSeconds: number };
@@ -68,6 +69,10 @@ async function main(): Promise<number> {
     const tickets = openMarkdownBase(args.base, { prefix: args.prefix });
     const host = socketHost(args.socket);
     const cursor = fileCursor(join(args.state, "cursor"));
+    // Les questions en cours (questions.ts) : le perdre coûte un second examen.
+    const questions = fileQuestions(join(args.state, "questions.json"));
+    // Les problèmes du dernier tour, que le canal local sert (plan 2c).
+    let lastProblems: string[] = [];
     // Les problèmes du tour précédent : une ligne identique n'est imprimée
     // qu'une fois, jusqu'à ce que l'ensemble change.
     let previous = new Set<string>();
@@ -76,7 +81,8 @@ async function main(): Promise<number> {
     // Depuis quand chaque mission tenue n'annonce aucun état de session.
     const silent = new Map<string, number>();
     while (!stopping) {
-      const r = await tick({ tickets, host, cursor, refusals, silent });
+      const r = await tick({ tickets, host, cursor, questions, refusals, silent });
+      lastProblems = r.problems;
       for (const a of r.assigned) console.log(`[orchestrator] assigned ${a.subtask} to ${a.executor}`);
       for (const s of r.completed) console.log(`[orchestrator] completed ${s}`);
       for (const s of r.recovered) console.log(`[orchestrator] recovered ${s}`);

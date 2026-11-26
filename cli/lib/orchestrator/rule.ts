@@ -32,13 +32,16 @@ export function missionBase(ticket: Ticket, subtasks: Subtask[], s: Subtask): st
 
 // Un candidat par ticket dont la sous-tâche active est `ready` et non tenue ;
 // l'ordre d'entrée (priorité) est conservé, une erreur de règle devient un problème.
+// Un ticket de `waiting` (une question attend l'humain) n'en donne aucun.
 export function candidates(
   tickets: { ticket: Ticket; subtasks: Subtask[] }[],
   held: Set<string>,
+  waiting: Set<string> = new Set(),
 ): { candidates: Candidate[]; problems: string[] } {
   const out: Candidate[] = [];
   const problems: string[] = [];
   for (const { ticket, subtasks } of tickets) {
+    if (waiting.has(ticket.id)) continue;
     const subtask = activeSubtask(subtasks);
     if (!subtask || subtask.status !== "ready" || held.has(subtask.id)) continue;
     try {

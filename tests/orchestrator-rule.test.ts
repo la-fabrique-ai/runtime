@@ -139,3 +139,10 @@ test("missionFiles coupe un fichier trop gros sous le plafond, avec le marqueur"
   assert.equal(f.answers, "a");
   assert.equal(f.split, null);
 });
+
+test("candidates : un ticket qui attend l'humain ne donne aucun candidat", () => {
+  const a = ticket("T-1");
+  const b = ticket("T-2");
+  const r = candidates([{ ticket: a, subtasks: [sub("T-1", 1)] }, { ticket: b, subtasks: [sub("T-2", 1)] }], new Set(), new Set(["T-1"]));
+  assert.deepEqual(r.candidates.map((c) => c.subtask.id), ["T-2.1"]);
+});
