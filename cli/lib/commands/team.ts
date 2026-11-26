@@ -16,12 +16,12 @@ import { loadConfig } from "../config.ts";
 import { provisioningMarker } from "../containers.ts";
 import { readEnvFile } from "../dotenv.ts";
 import { sessionState, type SessionState } from "../hc-session.ts";
-import { forgeProject, listInstances, type Instance } from "../incus.ts";
+import { execAsAgentArgv, forgeProject, listInstances, type Instance } from "../incus.ts";
 import { fetchMirrorLfs, refreshMirror } from "../mirror.ts";
 import type { HeldMission } from "../orchestrator/host.ts";
 import { configPath } from "../paths.ts";
 import { printableText } from "../printable.ts";
-import { ensureRepoMirrors, projectMembers, repoOriginMirror, repoTeamMirror, type ProjectMember } from "../project.ts";
+import { CONTROL, ensureRepoMirrors, projectMembers, repoOriginMirror, repoTeamMirror, type ProjectMember } from "../project.ts";
 import type { ProjectConfig } from "../project-config.ts";
 import {
   convergeControl, convergeExecutor, orchestratorState, provisionControl, provisionExecutor, type OrchestratorState,
@@ -53,7 +53,9 @@ export type ProjectMemberStatus = {
   // quand le container est absent ou arrêté.
   orchestrator?: OrchestratorState;
 };
-export type ProjectStatus = { members: ProjectMemberStatus[] };
+// `problems` : ceux du dernier tour de l'orchestrateur, lus par son canal ;
+// null quand ils n'ont pas pu être lus (ou avec --quick).
+export type ProjectStatus = { members: ProjectMemberStatus[]; problems: string[] | null };
 
 const SUBCOMMANDS = ["converge", "status", "sync", "assign", "release", "for-repo", "task-base", "upload-pack"];
 
@@ -74,7 +76,7 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
   const p = cfg.project;
   switch (sub) {
     case "converge": return converge(ctx, p, cfg, a, opts);
-    case "status": return status(ctx, p, opts.json === true);
+    case "status": return status(ctx, p, opts.json === true, opts.quick === true);
     case "sync": return sync(ctx, p, a);
     case "assign": return assignCommand(ctx, p, a, b, opts);
     case "release": return releaseCommand(ctx, p, a);
@@ -204,8 +206,25 @@ function printTable(ctx: Context, rows: string[][], head = ["NAME", "KIND", "STA
   for (const row of table) ctx.out(formatRow(row, widths));
 }
 
-// Aucun miroir à rafraîchir en mode projet : `--quick` ne retire rien.
-async function status(ctx: Context, p: ProjectConfig, json: boolean): Promise<number> {
+// Les problèmes du dernier tour de l'orchestrateur, demandés à son canal par
+// aiuser dans le contrôle (`forge-team problems --json`) ; null si le contrôle
+// ou le canal ne répond pas, ce qui n'est pas une erreur.
+const PROBLEMS_MS = 8_000;
+async function orchestratorProblems(ctx: Context, running: boolean): Promise<string[] | null> {
+  if (!running) return null;
+  const r = await execAsAgentArgv(ctx, CONTROL, ["forge-team", "problems", "--json"], { timeoutMs: PROBLEMS_MS });
+  if (r.timedOut || r.code !== 0) return null;
+  try {
+    const v: unknown = JSON.parse(r.stdout);
+    return Array.isArray(v) && v.every((x) => typeof x === "string") ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+// Aucun miroir à rafraîchir en mode projet. `--quick` ne demande pas les
+// problèmes de l'orchestrateur.
+async function status(ctx: Context, p: ProjectConfig, json: boolean, quick: boolean): Promise<number> {
   const instances = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
   const members: ProjectMemberStatus[] = [];
   const rows: string[][] = [];
@@ -239,11 +258,20 @@ async function status(ctx: Context, p: ProjectConfig, json: boolean): Promise<nu
     members.push(row);
     rows.push([m.name, m.kind, inst?.status ?? "Missing", session, label]);
   }
+  const problems = quick ? null : await orchestratorProblems(ctx, instances.get(CONTROL)?.status === "Running");
   if (json) {
-    ctx.out(JSON.stringify({ members } satisfies ProjectStatus));
+    ctx.out(JSON.stringify({ members, problems } satisfies ProjectStatus));
     return 0;
   }
   printTable(ctx, rows, ["NAME", "KIND", "STATUS", "SESSION", "MISSION"]);
+  if (quick) return 0;
+  if (problems === null) {
+    ctx.out("orchestrator's problems: unavailable");
+  } else if (problems.length > 0) {
+    ctx.out("");
+    ctx.out("PROBLEMS");
+    for (const line of problems) ctx.out(printableText(line));
+  }
   return 0;
 }
 

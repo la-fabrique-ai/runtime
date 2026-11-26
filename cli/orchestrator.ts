@@ -6,16 +6,21 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openMarkdownBase } from "./lib/tickets/markdown-base.ts";
 import { socketHost } from "./lib/orchestrator/host.ts";
+import { serveChannel } from "./lib/orchestrator/channel.ts";
 import { fileQuestions } from "./lib/orchestrator/questions.ts";
 import { fileCursor, tick } from "./lib/orchestrator/tick.ts";
 
-export type Args = { base: string; socket: string; state: string; prefix: string; pollSeconds: number };
+export type Args = {
+  base: string; socket: string; state: string; prefix: string; pollSeconds: number;
+  channel: string | null; channelGroup: number | null;
+};
 
 const USAGE =
-  "usage: orchestrator.ts --base <dir> --socket <path> --state <dir> [--prefix <p>] [--poll-seconds <n>]";
+  "usage: orchestrator.ts --base <dir> --socket <path> --state <dir> [--prefix <p>] [--poll-seconds <n>] " +
+  "[--channel <path> [--channel-group <gid>]]";
 
 export function parseArgs(argv: string[]): Args {
-  const known = ["--base", "--socket", "--state", "--prefix", "--poll-seconds"];
+  const known = ["--base", "--socket", "--state", "--prefix", "--poll-seconds", "--channel", "--channel-group"];
   const v = new Map<string, string>();
   for (let i = 0; i < argv.length; i += 2) {
     const k = argv[i]!;
@@ -33,7 +38,14 @@ export function parseArgs(argv: string[]): Args {
   if (!/^[0-9]+$/.test(raw) || !Number.isSafeInteger(pollSeconds) || pollSeconds < 2) {
     throw new Error(`--poll-seconds must be an integer >= 2\n${USAGE}`);
   }
-  return { base: need("--base"), socket: need("--socket"), state: need("--state"), prefix: v.get("--prefix") ?? "T", pollSeconds };
+  const group = v.get("--channel-group");
+  if (group !== undefined && (!/^[0-9]{1,9}$/.test(group) || !v.has("--channel"))) {
+    throw new Error(`--channel-group must be a numeric gid, with --channel\n${USAGE}`);
+  }
+  return {
+    base: need("--base"), socket: need("--socket"), state: need("--state"), prefix: v.get("--prefix") ?? "T", pollSeconds,
+    channel: v.get("--channel") ?? null, channelGroup: group === undefined ? null : Number(group),
+  };
 }
 
 async function main(): Promise<number> {
@@ -47,8 +59,11 @@ async function main(): Promise<number> {
 
   let stopping = false;
   let wake: () => void = () => {};
+  // Arrête aussi le canal local.
+  const stopChannel = new AbortController();
   const onSignal = (): void => {
     stopping = true;
+    stopChannel.abort();
     wake();
   };
   process.on("SIGTERM", onSignal);
@@ -71,8 +86,20 @@ async function main(): Promise<number> {
     const cursor = fileCursor(join(args.state, "cursor"));
     // Les questions en cours (questions.ts) : le perdre coûte un second examen.
     const questions = fileQuestions(join(args.state, "questions.json"));
-    // Les problèmes du dernier tour, que le canal local sert (plan 2c).
+    // Les problèmes du dernier tour, que le canal local sert.
     let lastProblems: string[] = [];
+    // Le canal local, à côté de la boucle (sans --channel, aucun : les tests de la partie 1).
+    let channel: Promise<void> = Promise.resolve();
+    if (args.channel !== null) {
+      channel = serveChannel({
+        tickets, questions, problems: () => lastProblems, log: (line) => console.log(`[orchestrator] channel: ${line}`),
+      }, { path: args.channel, group: args.channelGroup }, stopChannel.signal);
+      // Un canal qui ne s'ouvre pas arrête le processus : systemd le relance.
+      channel.catch((e) => {
+        console.error(`[orchestrator] fatal: channel: ${e instanceof Error ? e.message : String(e)}`);
+        process.exit(1);
+      });
+    }
     // Les problèmes du tour précédent : une ligne identique n'est imprimée
     // qu'une fois, jusqu'à ce que l'ensemble change.
     let previous = new Set<string>();
@@ -91,6 +118,7 @@ async function main(): Promise<number> {
       previous = now;
       await sleep(args.pollSeconds * 1000);
     }
+    await channel;
     return 0;
   } catch (e) {
     console.error(`[orchestrator] fatal: ${e instanceof Error ? e.message : String(e)}`);

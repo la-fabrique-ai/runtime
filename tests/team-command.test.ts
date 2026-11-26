@@ -94,13 +94,32 @@ test("status --json of a project prints its members: kind, presence, the mission
     { name: "agent-control", kind: "control", present: true, mission: null, session: "idle", orchestrator: "failed" },
     { name: "agent-executor-1", kind: "executor", present: true, mission: HELD, session: "idle" },
     { name: "agent-executor-2", kind: "executor", present: false, mission: null, session: "none" },
-  ] });
+  ], problems: null });
   const text = project(fake, [LIVE_IDLE, ORCH_FAILED]).ctx;
   assert.equal(await cmdTeam(text, ["status"]), 0);
   assert.deepEqual(text.out_lines.map((l) => l.split(/\s+/).join(" ").trim()), [
     "NAME KIND STATUS SESSION MISSION", "agent-control control Running idle orchestrator failed",
     "agent-executor-1 executor Running idle T-1.2 (web)", "agent-executor-2 executor Missing none free",
+    "orchestrator's problems: unavailable",
   ]);
+});
+
+test("status prints the orchestrator's problems under the table; unreachable, it says unavailable and exits 0", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  const line = "T-2: assign T-2.1 to agent-executor-1: refused";
+  const problems: ExecRule = { match: "forge-team problems --json", stdout: JSON.stringify([line]) };
+  const { ctx } = project(fake, [LIVE_IDLE, problems]);
+  assert.equal(await cmdTeam(ctx, ["status"]), 0);
+  assert.deepEqual(ctx.out_lines.slice(-2), ["PROBLEMS", line]);
+  const call = ctx.calls.map((c) => c.join(" ")).find((c) => c.includes("forge-team problems"))!;
+  assert.ok(call.includes("exec agent-control --user 1001"), call);
+  const json = project(fake, [LIVE_IDLE, problems]).ctx;
+  await cmdTeam(json, ["status"], { json: true });
+  assert.deepEqual(JSON.parse(json.out_lines[0]).problems, [line]);
+  const down = project(fake, [LIVE_IDLE, { match: "forge-team problems --json", code: 2 }]).ctx;
+  assert.equal(await cmdTeam(down, ["status"]), 0);
+  assert.equal(down.out_lines.at(-1), "orchestrator's problems: unavailable");
 });
 
 test("status shows a blocked session, and warns of a mission whose agent waits on its screen", async () => {

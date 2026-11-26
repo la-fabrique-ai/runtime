@@ -326,7 +326,9 @@ test("the control's first provisioning pushes the orchestrator (root, 0644), its
   }
   const unit = file(UNIT)!.content;
   for (const line of ["User=forge-orch", "SupplementaryGroups=1001", "Restart=always", "RestartSec=5", "UMask=0007",
-    "ExecStart=/usr/bin/node /opt/forge/orchestrator.ts --base /var/lib/forge-orch/tickets --socket /var/lib/forge/api.sock --state /var/lib/forge-orch/state --prefix Q"]) {
+    "RuntimeDirectory=forge-orch", "RuntimeDirectoryMode=0755",
+    "ExecStart=/usr/bin/node /opt/forge/orchestrator.ts --base /var/lib/forge-orch/tickets --socket /var/lib/forge/api.sock --state /var/lib/forge-orch/state --prefix Q" +
+      " --channel /run/forge-orch/channel.sock --channel-group 1001"]) {
     assert.ok(unit.split("\n").includes(line), `${line}\n${unit}`);
   }
   const calls = flat(ctx);
@@ -378,7 +380,7 @@ test("a changed orchestrator source, or a changed prefix, restarts the service a
     const prefixed = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY, ...HOOK_BLOCKS] });
     await convergeControl(prefixed, renamed, member(renamed, CONTROL));
     assert.equal(restarts(prefixed).length, 1);
-    assert.ok(fake.files.get(`agent-forge/${CONTROL}${UNIT}`)!.content.includes("--prefix R\n"));
+    assert.ok(fake.files.get(`agent-forge/${CONTROL}${UNIT}`)!.content.includes("--prefix R "));
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

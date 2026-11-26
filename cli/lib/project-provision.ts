@@ -392,6 +392,10 @@ async function ensureTicketBase(ctx: Context, p: ProjectConfig, name: string): P
 export const ORCH_DIR = "/opt/forge";
 export const ORCH_UNIT = "/etc/systemd/system/forge-orchestrator.service";
 export const ORCH_SERVICE = "forge-orchestrator";
+// Le canal local de l'orchestrateur (plan 2c), dans le dossier d'exécution que
+// systemd crée pour le service : forge-orch possède la socket, le groupe
+// d'aiuser peut l'écrire (660). Les exécuteurs n'en ont pas.
+export const CHANNEL_SOCKET = "/run/forge-orch/channel.sock";
 const ORCH_MANIFEST = `${ORCH_DIR}/.manifest`;
 const ORCH_STATE = `${ORCH_HOME}/state`;
 const ORCH_LIBS = ["orchestrator", "tickets"];
@@ -411,7 +415,12 @@ export function orchestratorUnit(prefix: string): string {
     `User=${ORCH_USER}`,
     `Group=${ORCH_USER}`,
     `SupplementaryGroups=${AIUSER_GROUP}`,
-    `ExecStart=/usr/bin/node ${ORCH_DIR}/orchestrator.ts --base ${TICKETS_MOUNT} --socket ${CONTAINER_SOCKET} --state ${ORCH_STATE} --prefix ${prefix}`,
+    // RuntimeDirectory : /run/forge-orch, à forge-orch, 0755 (aiuser y traverse
+    // vers la socket, qui seule est ouverte à son groupe).
+    "RuntimeDirectory=forge-orch",
+    "RuntimeDirectoryMode=0755",
+    `ExecStart=/usr/bin/node ${ORCH_DIR}/orchestrator.ts --base ${TICKETS_MOUNT} --socket ${CONTAINER_SOCKET} --state ${ORCH_STATE} --prefix ${prefix}` +
+      ` --channel ${CHANNEL_SOCKET} --channel-group ${AIUSER_GROUP}`,
     "Restart=always",
     "RestartSec=5",
     "UMask=0007",
