@@ -88,15 +88,27 @@ test("two waiters that see the same dead holder: one takes it over, the changes 
   assert.deepEqual(left(), []);
 });
 
-test("a lock whose owner is missing or malformed is taken over; a legacy empty lock is replaced", async () => {
+test("a legacy empty lock is replaced", async () => {
+  mkdirSync(lock, { recursive: true });
+  assert.equal(await withMissionLock(async () => "ran", { path: lock, waitMs: 0 }), "ran");
+  assert.deepEqual(left(), []);
+});
+
+// Un verrou vivant arrive toujours en place avec son `owner` : un `owner` absent
+// ou malformé ne se reprend jamais (le lire pendant un échange de verrou ne
+// doit pas faire prendre le nouveau, vivant, pour abandonné).
+test("a lock whose owner is missing or malformed is never taken over: refused after the wait, naming its path", async () => {
   for (const make of [
     () => { mkdirSync(lock, { recursive: true }); writeFileSync(join(lock, "pid"), "1\n"); },
     () => heldBy(0, "not an owner\n"),
-    () => mkdirSync(lock, { recursive: true }),
   ]) {
     make();
-    assert.equal(await withMissionLock(async () => "ran", { path: lock, waitMs: 0 }), "ran");
-    assert.deepEqual(left(), []);
+    let ran = false;
+    await assert.rejects(withMissionLock(async () => { ran = true; }, { path: lock, waitMs: 0 }),
+      (e: Error) => e.message.includes(lock) && /no valid owner/.test(e.message));
+    assert.equal(ran, false);
+    assert.ok(existsSync(lock), "left alone");
+    rmSync(lock, { recursive: true });
   }
 });
 

@@ -10,14 +10,18 @@
 // qu'un verrou (un dossier non vide) est en place. Il n'existe donc aucun
 // instant où le verrou est en place sans détenteur lisible.
 //
-// Un verrou dont le pid ne vit plus (ou sans `owner` lisible) est abandonné.
+// Un verrou dont le pid ne vit plus est abandonné. Un verrou sans `owner`
+// lisible, lui, ne se reprend jamais : un verrou vivant arrive toujours en place
+// avec son `owner`, et une lecture qui tombe pendant un échange de verrou ne doit
+// pas faire prendre le nouveau, vivant, pour abandonné. Il compte comme tenu, et
+// le refus, au bout de l'attente, nomme son chemin, à retirer à la main.
 // Le reprendre se réclame d'abord par un marqueur `<verrou>.takeover-<jeton>`,
 // créé par `mkdirSync` (atomique) : de deux processus qui trouvent le même
 // verrou abandonné, un seul le reprend ; l'autre attend et retente. Le marqueur
 // reste en place, pour qu'un retardataire qui aurait lu le même détenteur ne
 // le réclame pas une seconde fois ; les marqueurs de plus d'une heure sont
 // retirés à la prise suivante. L'attente est bornée.
-import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { ForgeError } from "../context.ts";
@@ -50,26 +54,19 @@ function alive(pid: number): boolean {
 
 const OWNER = /^([1-9][0-9]*) ([0-9a-f-]{36})\n?$/;
 
-// Le jeton du verrou en place s'il est abandonné, `null` s'il est tenu, `gone`
-// s'il n'est plus là. Un `owner` absent, illisible ou malformé n'a pas de jeton
-// à lui : le jeton de reprise est alors tiré de l'inode et du mtime du dossier
-// du verrou, qui ne changent pas tant que ce dossier est en place (personne
-// n'écrit plus dedans) : la reprise reste unique pour ce dossier-là.
-function abandoned(path: string): string | null | "gone" {
-  let content: string | undefined;
+// Le détenteur du verrou en place : son jeton s'il est mort, `held` s'il vit,
+// `unowned` si son `owner` est absent, illisible ou malformé (ou si le verrou
+// vient de partir : la prochaine tentative de prise le dira).
+function holder(path: string): { dead: string } | "held" | "unowned" {
+  let content: string;
   try {
     content = readFileSync(join(path, "owner"), "utf8");
   } catch {
-    content = undefined;
+    return "unowned";
   }
-  const m = content === undefined ? null : OWNER.exec(content);
-  if (m) return alive(Number(m[1])) ? null : m[2];
-  try {
-    const st = statSync(path);
-    return `x-${st.ino}-${Math.trunc(st.mtimeMs)}`;
-  } catch {
-    return "gone";
-  }
+  const m = OWNER.exec(content);
+  if (!m) return "unowned";
+  return alive(Number(m[1])) ? "held" : { dead: m[2] };
 }
 
 // Au mieux : retirer les marqueurs de reprise de plus d'une heure.
@@ -120,9 +117,9 @@ export async function withMissionLock<T>(fn: () => Promise<T>, opts: LockOptions
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   for (;;) {
     if (tryAcquire(path, token, opts)) break;
-    const dead = abandoned(path);
-    if (dead === "gone") continue; // libéré entre-temps : on retente la prise
-    if (dead !== null) {
+    const h = holder(path);
+    if (typeof h === "object") {
+      const dead = h.dead;
       await opts.beforeTakeover?.();
       let claimed = false;
       try {
@@ -142,7 +139,12 @@ export async function withMissionLock<T>(fn: () => Promise<T>, opts: LockOptions
         continue;
       }
     }
-    if (now() >= deadline) throw new ForgeError("the host is busy with another mission change: try again in a moment");
+    if (now() >= deadline) {
+      if (h === "unowned" && existsSync(path)) {
+        throw new ForgeError(`the mission lock ${path} has no valid owner: remove it if no forge command is running, then try again`);
+      }
+      throw new ForgeError("the host is busy with another mission change: try again in a moment");
+    }
     await sleep(STEP_MS);
   }
   try {
