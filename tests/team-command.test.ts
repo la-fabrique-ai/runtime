@@ -98,7 +98,20 @@ test("status --json of a project prints its members: kind, presence, the mission
   const text = project(fake, [LIVE_IDLE, ORCH_FAILED]).ctx;
   assert.equal(await cmdTeam(text, ["status"]), 0);
   assert.deepEqual(text.out_lines.map((l) => l.split(/\s+/).join(" ").trim()), [
-    "NAME KIND STATUS MISSION", "agent-control control Running orchestrator failed", "agent-executor-1 executor Running T-1.2 (web)", "agent-executor-2 executor Missing free",
+    "NAME KIND STATUS SESSION MISSION", "agent-control control Running idle orchestrator failed",
+    "agent-executor-1 executor Running idle T-1.2 (web)", "agent-executor-2 executor Missing none free",
+  ]);
+});
+
+test("status shows a blocked session, and warns of a mission whose agent waits on its screen", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-executor-1", { status: "Running", config: { "user.forge.mission": JSON.stringify(HELD) } });
+  const { ctx } = project(fake, [{ match: "-- hc get agent", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"blocked"}}' }]);
+  assert.equal(await cmdTeam(ctx, ["status"]), 0);
+  assert.ok(ctx.out_lines.some((l) => l.split(/\s+/).join(" ").trim() === "agent-executor-1 executor Running blocked T-1.2 (web)"),
+    ctx.out_lines.join("\n"));
+  assert.deepEqual(ctx.err_lines.filter((l) => l.startsWith("WARNING")), [
+    "WARNING: agent-executor-1 holds T-1.2 but its agent is blocked, waiting for an answer on its screen: read it with hc read <machine>/agent",
   ]);
 });
 

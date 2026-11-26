@@ -74,9 +74,15 @@ export const RETRY_AFTER_REFUSAL_MS = 5 * 60_000;
 // refus vient sans doute de lui, il ne doit pas consommer toute la file.
 const REFUSALS_PER_EXECUTOR = 2;
 
+// Une mission tenue dont la session n'annonce aucun état (`unknown`) depuis ce
+// délai est signalée : rien ne la reprend (une panne passagère ne doit pas
+// tuer un agent qui travaille), mais l'humain doit l'apprendre. `silent` garde,
+// d'un tour à l'autre, depuis quand chaque mission est muette.
+export const SILENT_SESSION_MS = 2 * 60_000;
+
 type TickDeps = {
   tickets: Connector; host: HostApi; cursor: Cursor;
-  refusals?: Map<string, number>; now?: () => number;
+  refusals?: Map<string, number>; silent?: Map<string, number>; now?: () => number;
 };
 
 export async function tick(d: TickDeps): Promise<TickReport> {
@@ -94,6 +100,7 @@ export async function tick(d: TickDeps): Promise<TickReport> {
 async function run(d: TickDeps, report: TickReport): Promise<void> {
   const { tickets, host, cursor } = d;
   const refusals = d.refusals ?? new Map<string, number>();
+  const silent = d.silent ?? new Map<string, number>();
   const now = d.now ?? Date.now;
 
   // 1. Évènements.
@@ -145,6 +152,7 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
     if (!ex.mission || !LOST.includes(ex.session)) continue;
     await recover(tickets, host, ex, ex.mission, picture, unreadable, failed, report);
   }
+  watchSessions(executors, silent, now(), report);
   for (const ex of executors) {
     const m = ex.mission;
     if (!m) continue;
@@ -218,6 +226,32 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
       free.unshift(to); // la base n'a pas pu passer la sous-tâche in-dev : l'hôte n'y est pour rien
     }
   }
+}
+
+// Les missions tenues dont l'agent n'avance plus sans l'humain, et que rien ne
+// reprend : une session `blocked` (l'agent attend à son écran), signalée à
+// chaque tour ; une session `unknown` depuis SILENT_SESSION_MS. Signaler ne
+// change rien à la mission.
+function watchSessions(executors: ExecutorStatus[], silent: Map<string, number>, t: number, report: TickReport): void {
+  const seen = new Set<string>();
+  for (const ex of executors) {
+    const m = ex.mission;
+    if (!m) continue;
+    const where = `${m.ticket}: ${m.subtask} on ${ex.name}`;
+    if (ex.session === "blocked") {
+      report.problems.push(`${where}: the agent's session is blocked, waiting for an answer on its screen: read it with hc read <machine>/agent`);
+    }
+    if (ex.session !== "unknown") continue;
+    const key = `${ex.name} ${m.subtask}`;
+    seen.add(key);
+    const since = silent.get(key) ?? t;
+    silent.set(key, since);
+    if (t - since >= SILENT_SESSION_MS) {
+      report.problems.push(`${where}: no session state for ${SILENT_SESSION_MS / 60_000} minutes ` +
+        "(container stopped, hc unreachable, or an agent that announces nothing): read its screen with hc read <machine>/agent");
+    }
+  }
+  for (const key of silent.keys()) if (!seen.has(key)) silent.delete(key);
 }
 
 // Un `done` : la sous-tâche `in-dev` passe `done` avec sa branche, l'exécuteur

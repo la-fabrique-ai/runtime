@@ -76,6 +76,12 @@ test("startSession refuses a session whose agent stops as soon as it starts", as
     /agent-executor-1's agent stopped as soon as it started \(exit code 1\)/);
 });
 
+test("startSession accepts an agent that announces blocked: it started, and waits on its screen", async () => {
+  const { ctx } = setup([{ match: "hc get agent", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"blocked"}}' }]);
+  await startSession(ctx, { name: DEV }, "T-1-1", "Fais");
+  assert.equal(ctx.calls.filter((c) => c.join(" ").includes("-- hc get agent")).length, 1);
+});
+
 test("startSession: a task without a branch is marked <container>-session; a failing kill is ignored", async () => {
   const { ctx } = setup([{ match: "hc kill agent", code: 1 }, { match: "hc rm agent", code: 1 }]);
   await startSession(ctx, { name: DEV }, null, "Relis");
@@ -93,6 +99,8 @@ test("sessionState maps hc get to a state", async () => {
   const get = (rule: ExecRule) => sessionState(setup([rule]).ctx, DEV);
   assert.equal(await get({ match: "hc get agent", stdout: '{"argv":["/usr/local/bin/forge-agent"],"status":{"app":"claude-code","state":"working"}}' }), "working");
   assert.equal(await get({ match: "hc get agent", stdout: '{"argv":["forge-agent","--forge-task","t"],"status":{"state":"done"}}' }), "done");
+  // L'agent attend une réponse à l'écran (l'écran de confiance de Claude Code, une question).
+  assert.equal(await get({ match: "hc get agent", stdout: '{"argv":["forge-agent"],"state":"live","status":{"state":"blocked"}}' }), "blocked");
   // Un terminal gardé par hc, relancé en shell après un redémarrage : pas une session.
   assert.equal(await get({ match: "hc get agent", stdout: '{"argv":["/bin/bash"],"keep":true,"state":"live","status":null}' }), "lost");
   assert.equal(await get({ match: "hc get agent", stdout: '{"state":"live","status":{"state":"idle"}}' }), "lost");

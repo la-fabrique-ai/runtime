@@ -73,8 +73,10 @@ async function main(): Promise<number> {
     let previous = new Set<string>();
     // Les sous-tâches refusées par l'hôte, et l'instant où les retenter.
     const refusals = new Map<string, number>();
+    // Depuis quand chaque mission tenue n'annonce aucun état de session.
+    const silent = new Map<string, number>();
     while (!stopping) {
-      const r = await tick({ tickets, host, cursor, refusals });
+      const r = await tick({ tickets, host, cursor, refusals, silent });
       for (const a of r.assigned) console.log(`[orchestrator] assigned ${a.subtask} to ${a.executor}`);
       for (const s of r.completed) console.log(`[orchestrator] completed ${s}`);
       for (const s of r.recovered) console.log(`[orchestrator] recovered ${s}`);

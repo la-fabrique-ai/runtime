@@ -47,7 +47,8 @@ export type MissionSpec = {
 
 export type HeldMission = Omit<MissionSpec, "instruction">;
 
-export type SessionState = "none" | "idle" | "working" | "done" | "exited" | "lost" | "unknown";
+// `blocked` : l'agent attend une réponse à son écran ; l'orchestrateur le signale.
+export type SessionState = "none" | "idle" | "working" | "done" | "blocked" | "exited" | "lost" | "unknown";
 
 export type ExecutorStatus = { name: string; mission: HeldMission | null; session: SessionState };
 
@@ -62,7 +63,7 @@ export interface HostApi {
 
 export class HostError extends Error {}
 
-const SESSIONS: readonly string[] = ["none", "idle", "working", "done", "exited", "lost", "unknown"];
+const SESSIONS: readonly string[] = ["none", "idle", "working", "done", "blocked", "exited", "lost", "unknown"];
 const MAX_REPLY = 4 * 1024 * 1024;
 
 type Obj = Record<string, unknown>;

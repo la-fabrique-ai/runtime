@@ -195,8 +195,7 @@ async function converge(ctx: Context, p: ProjectConfig, cfg: ForgeConfig, team: 
   return 0;
 }
 
-function printTable(ctx: Context, rows: string[][]): void {
-  const head = ["NAME", "KIND", "STATUS", "MISSION"];
+function printTable(ctx: Context, rows: string[][], head = ["NAME", "KIND", "STATUS", "MISSION"]): void {
   const table = rows.map((r) => r.map(printableText));
   const widths = columnWidths([head, ...table]);
   ctx.out(formatRow(head, widths));
@@ -213,6 +212,11 @@ async function status(ctx: Context, p: ProjectConfig, json: boolean): Promise<nu
     const held = m.kind === "executor" ? heldMission(inst) : null;
     if (held === "unreadable") ctx.err(`WARNING: ${m.name} has an unreadable ${MISSION_KEY}: release it.`);
     const session = inst?.status === "Running" ? await sessionState(ctx, m.name) : "none";
+    // L'agent attend à son écran (l'écran de confiance de Claude Code, une
+    // question) : la mission n'avance plus sans l'humain.
+    if (m.kind === "executor" && held !== null && held !== "unreadable" && session === "blocked") {
+      ctx.err(`WARNING: ${m.name} holds ${held.subtask} but its agent is blocked, waiting for an answer on its screen: read it with hc read <machine>/agent`);
+    }
     // Un exécuteur libre dont un clone a des changements suivis refuserait
     // toute mission : l'API le dit `unknown` à l'orchestrateur, qui ne lui en
     // donne plus ; l'humain, lui, l'apprend ici.
@@ -231,13 +235,13 @@ async function status(ctx: Context, p: ProjectConfig, json: boolean): Promise<nu
       label = `orchestrator ${row.orchestrator}`;
     }
     members.push(row);
-    rows.push([m.name, m.kind, inst?.status ?? "Missing", label]);
+    rows.push([m.name, m.kind, inst?.status ?? "Missing", session, label]);
   }
   if (json) {
     ctx.out(JSON.stringify({ members } satisfies ProjectStatus));
     return 0;
   }
-  printTable(ctx, rows);
+  printTable(ctx, rows, ["NAME", "KIND", "STATUS", "SESSION", "MISSION"]);
   return 0;
 }
 

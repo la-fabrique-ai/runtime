@@ -37,8 +37,10 @@ export function hcArgv(container: string, args: string[]): string[] {
 
 // `lost` : un terminal `agent` vivant dont le programme n'est pas forge-agent
 // (hc en garde un et le relance en shell après un redémarrage de la VM) : ce
-// n'est pas une session, rien n'y est livré.
-export type SessionState = "none" | "idle" | "working" | "done" | "exited" | "lost" | "unknown";
+// n'est pas une session, rien n'y est livré. `blocked` : l'agent attend une
+// réponse à son écran (l'écran de confiance de Claude Code, une question) ;
+// il vit, mais n'avance plus sans l'humain.
+export type SessionState = "none" | "idle" | "working" | "done" | "blocked" | "exited" | "lost" | "unknown";
 
 // Une session vivante est un terminal `agent` dont le programme est forge-agent
 // et qui a un statut d'agent.
@@ -70,7 +72,8 @@ async function sessionInfo(
     const program = Array.isArray(t.argv) && typeof t.argv[0] === "string" ? t.argv[0].split("/").pop() : undefined;
     if (program !== "forge-agent") return { state: "lost", exitCode: null };
     const state = t.status?.state;
-    return { state: state === "idle" || state === "working" || state === "done" ? state : "unknown", exitCode: null };
+    const known = state === "idle" || state === "working" || state === "done" || state === "blocked";
+    return { state: known ? state : "unknown", exitCode: null };
   } catch {
     return { state: "unknown", exitCode: null };
   }
@@ -94,7 +97,9 @@ async function requireStarted(ctx: Context, container: string, timeoutMs?: numbe
       throw new ForgeError(`${container}'s agent stopped as soon as it started (exit code ${code}). ` +
         "Read its screen in the forge space of its Herdr App machine, or with hc read <machine>/agent from your machine.");
     }
-    if (s.state === "idle" || s.state === "working" || s.state === "done") return;
+    // `blocked` : l'agent a démarré et attend à son écran ; l'orchestrateur et
+    // `forge team status` le signalent.
+    if (s.state === "idle" || s.state === "working" || s.state === "done" || s.state === "blocked") return;
   }
 }
 

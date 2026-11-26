@@ -7,7 +7,7 @@ import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
 import type { Connector } from "../cli/lib/tickets/connector.ts";
 import { HostError } from "../cli/lib/orchestrator/host.ts";
 import type { ExecutorStatus, HostApi, HostEvent, MissionSpec, SessionState } from "../cli/lib/orchestrator/host.ts";
-import { fileCursor, tick } from "../cli/lib/orchestrator/tick.ts";
+import { fileCursor, SILENT_SESSION_MS, tick } from "../cli/lib/orchestrator/tick.ts";
 import type { Cursor } from "../cli/lib/orchestrator/tick.ts";
 
 // Un hôte en mémoire : des exécuteurs, une liste d'évènements, les appels reçus.
@@ -231,6 +231,48 @@ test("un exécuteur qui refuse deux sous-tâches dans un tour en sort ; les autr
   assert.deepEqual(r.assigned, []);
   assert.deepEqual(host.calls.filter((c) => c.startsWith("assign")), ["assign a T-2.1", "assign a T-1.1"]);
   assert.equal(await status(tickets, "T-3.1"), "ready");
+});
+
+test("une mission dont la session est blocked est signalée à chaque tour, sans reprise ni libération", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a"]);
+  const cursor = memCursor();
+  await tick({ tickets, host, cursor });
+  host.executors[0].session = "blocked"; // a tient T-2.1
+  host.calls = [];
+  const r = await tick({ tickets, host, cursor });
+  assert.deepEqual(r.problems, [
+    "T-2: T-2.1 on a: the agent's session is blocked, waiting for an answer on its screen: read it with hc read <machine>/agent",
+  ]);
+  assert.deepEqual(r.recovered, []);
+  assert.ok(!host.calls.some((c) => c.startsWith("release") || c.startsWith("assign")), host.calls.join("\n"));
+  assert.equal(await status(tickets, "T-2.1"), "in-dev");
+});
+
+test("une mission dont la session n'annonce aucun état est signalée passé le délai, puis oubliée quand elle en annonce un", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a"]);
+  const cursor = memCursor();
+  const silent = new Map<string, number>();
+  let t = 0;
+  const now = () => t;
+  await tick({ tickets, host, cursor, silent, now });
+  host.executors[0].session = "unknown";
+  t = 1_000;
+  assert.deepEqual((await tick({ tickets, host, cursor, silent, now })).problems, []);
+  t = 1_000 + SILENT_SESSION_MS - 1;
+  assert.deepEqual((await tick({ tickets, host, cursor, silent, now })).problems, []);
+  t = 1_000 + SILENT_SESSION_MS;
+  assert.deepEqual((await tick({ tickets, host, cursor, silent, now })).problems, [
+    "T-2: T-2.1 on a: no session state for 2 minutes (container stopped, hc unreachable, or an agent that announces nothing): read its screen with hc read <machine>/agent",
+  ]);
+  assert.ok(!host.calls.some((c) => c.startsWith("release")));
+  // Un état annoncé : le compte repart de zéro.
+  host.executors[0].session = "working";
+  await tick({ tickets, host, cursor, silent, now });
+  host.executors[0].session = "unknown";
+  t += 60_000;
+  assert.deepEqual((await tick({ tickets, host, cursor, silent, now })).problems, []);
 });
 
 test("une session none ne déclenche pas de reprise ; un exécuteur unknown n'est ni libre ni libéré", async () => {
