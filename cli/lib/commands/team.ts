@@ -21,6 +21,7 @@ import { fetchMirrorLfs, refreshMirror } from "../mirror.ts";
 import type { HeldMission } from "../orchestrator/host.ts";
 import { configPath } from "../paths.ts";
 import { printableText } from "../printable.ts";
+import { ensurePilot } from "../pilot.ts";
 import { CONTROL, ensureRepoMirrors, projectMembers, repoOriginMirror, repoTeamMirror, type ProjectMember } from "../project.ts";
 import type { ProjectConfig } from "../project-config.ts";
 import {
@@ -170,9 +171,12 @@ async function converge(ctx: Context, p: ProjectConfig, cfg: ForgeConfig, team: 
 
   const existing = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
   const wanted = projectMembers(p);
+  // Le contrôle, prêt pour la session du Pilote ; ses instructions ont-elles changé ?
+  let control: { changed: boolean } | null = null;
   for (const m of wanted) {
     if (!existing.has(m.name)) {
       await (m.kind === "control" ? provisionControl : provisionExecutor)(ctx, cfg, m);
+      if (m.kind === "control") control = { changed: false };
       continue;
     }
     if (await provisioningMarker(ctx, m.name) !== null) {
@@ -180,10 +184,12 @@ async function converge(ctx: Context, p: ProjectConfig, cfg: ForgeConfig, team: 
       continue;
     }
     ctx.out(`Updating ${m.name}...`);
-    await (m.kind === "control" ? convergeControl : convergeExecutor)(ctx, cfg, m);
+    const r = await (m.kind === "control" ? convergeControl : convergeExecutor)(ctx, cfg, m);
+    if (m.kind === "control") control = { changed: r.instructionsChanged };
   }
   // Le service ne connaît que les membres de la config qu'il a lue au démarrage.
   await restartApiService(ctx);
+  if (control !== null) await pilotSession(ctx, control.changed);
 
   const instances = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
   printTable(ctx, wanted.map((m) => [m.name, m.kind, instances.get(m.name)?.status ?? "Missing", missionLabel(m, heldMission(instances.get(m.name)))]));
@@ -273,6 +279,22 @@ async function status(ctx: Context, p: ProjectConfig, json: boolean, quick: bool
     for (const line of problems) ctx.out(printableText(line));
   }
   return 0;
+}
+
+// La session du Pilote : lancée si elle ne tourne pas ; une session qui parle
+// avec l'humain n'est jamais coupée, un changement de ses instructions se dit.
+// Une session qui ne démarre pas est un avertissement : le reste du projet tourne.
+async function pilotSession(ctx: Context, instructionsChanged: boolean): Promise<void> {
+  try {
+    if ((await ensurePilot(ctx)) === "started") {
+      ctx.out(`Started the Pilot's session in ${CONTROL}.`);
+    } else if (instructionsChanged) {
+      ctx.out("NOTE: the Pilot's instructions changed; its session keeps the old ones until you run forge pilot <ticket> --fresh.");
+    }
+  } catch (e) {
+    if (!(e instanceof ForgeError)) throw e;
+    ctx.err(`WARNING: the Pilot's session did not start: ${e.message}`);
+  }
 }
 
 // Le miroir d'origine d'un dépôt, depuis GitHub par l'agent SSH transmis.

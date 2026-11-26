@@ -301,3 +301,18 @@ test("assign to a busy executor is refused by the host and journaled refused; re
   assert.equal(fake.instances.get("agent-forge")!.get("agent-executor-1")!.config["user.forge.mission"], undefined);
   assert.deepEqual(journalLines().map((l) => [l.id, l.caller, l.op, l.outcome]), [[0, "human", "assign", "refused"], [0, "human", "release", "ok"]]);
 });
+
+test("converge: a running Pilot is left alone, and a change of its instructions is said; with none, it is started", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  for (const n of [1, 2]) fake.addInstance("agent-forge", `agent-executor-${n}`, { status: "Running", config: { "user.forge.role": "executor" } });
+  const { ctx } = project(fake, [LIVE_IDLE]);
+  assert.equal(await cmdTeam(ctx, ["converge"]), 0);
+  assert.ok(ctx.out_lines.includes("NOTE: the Pilot's instructions changed; its session keeps the old ones until you run forge pilot <ticket> --fresh."),
+    ctx.out_lines.join("\n"));
+  assert.ok(!ctx.calls.some((c) => c.includes("agent-control") && c.join(" ").includes("-- hc run ")));
+
+  const none = project(fake, [{ match: "agent-control --user 1001 --group 1001 --cwd /workspace --env HOME=/home/aiuser --env XDG_RUNTIME_DIR=/run/user/1001 --env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus -- hc get agent", code: 1 }, LIVE_IDLE]).ctx;
+  assert.equal(await cmdTeam(none, ["converge"]), 0);
+  assert.ok(none.calls.some((c) => c.join(" ").includes("exec agent-control") && c.join(" ").includes("-- hc run ")), none.calls.map((c) => c.join(" ")).join("\n"));
+});
