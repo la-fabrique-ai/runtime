@@ -64,7 +64,22 @@ const describe = (e: unknown): string => (local(e) || e instanceof HostError ? m
 // terminal) et `unknown` (container arrêté, exec en échec) ne la déclenchent pas.
 const LOST: readonly string[] = ["exited", "lost"];
 
-export async function tick(d: { tickets: Connector; host: HostApi; cursor: Cursor }): Promise<TickReport> {
+// Une sous-tâche que l'hôte a refusé d'assigner n'est retentée qu'après ce
+// délai : refusée à chaque tour (dépôt inconnu de l'hôte, base absente), elle
+// prendrait sinon l'exécuteur à chaque tour et ferait l'aller-retour
+// in-dev/ready dans la base. `refusals` garde, d'un tour à l'autre, l'instant
+// avant lequel chacune n'est pas retentée ; en mémoire, un redémarrage l'oublie.
+export const RETRY_AFTER_REFUSAL_MS = 5 * 60_000;
+// Un exécuteur qui refuse autant de sous-tâches dans un tour en sort : le
+// refus vient sans doute de lui, il ne doit pas consommer toute la file.
+const REFUSALS_PER_EXECUTOR = 2;
+
+type TickDeps = {
+  tickets: Connector; host: HostApi; cursor: Cursor;
+  refusals?: Map<string, number>; now?: () => number;
+};
+
+export async function tick(d: TickDeps): Promise<TickReport> {
   const report: TickReport = { completed: [], assigned: [], recovered: [], problems: [] };
   try {
     await run(d, report);
@@ -76,8 +91,10 @@ export async function tick(d: { tickets: Connector; host: HostApi; cursor: Curso
   return report;
 }
 
-async function run(d: { tickets: Connector; host: HostApi; cursor: Cursor }, report: TickReport): Promise<void> {
+async function run(d: TickDeps, report: TickReport): Promise<void> {
   const { tickets, host, cursor } = d;
+  const refusals = d.refusals ?? new Map<string, number>();
+  const now = d.now ?? Date.now;
 
   // 1. Évènements.
   const after = cursor.read();
@@ -177,15 +194,28 @@ async function run(d: { tickets: Connector; host: HostApi; cursor: Cursor }, rep
   report.problems.push(...found.problems);
   // Un exécuteur `unknown` (container arrêté, hôte sans réponse) n'est pas libre.
   const free = executors.filter((e) => e.mission === null && e.session !== "unknown").map((e) => e.name).sort();
+  const t = now();
+  for (const [id, until] of refusals) if (until <= t) refusals.delete(id);
+  const refusedBy = new Map<string, number>();
   for (const c of found.candidates) {
-    if (failed.has(c.subtask.id)) continue;
-    const to = free[0];
+    const id = c.subtask.id;
+    if (failed.has(id) || refusals.has(id)) continue;
+    const to = free.shift();
     if (to === undefined) break;
-    // Assigné ou non, l'exécuteur sort de `free` pour le tour : un exécuteur qui
-    // refuse tout ne bloque pas la distribution aux suivants.
-    free.shift();
     if (await launch(tickets, host, to, c, false, failed, report)) {
-      report.assigned.push({ subtask: c.subtask.id, executor: to });
+      report.assigned.push({ subtask: id, executor: to });
+      continue;
+    }
+    // Refusée par l'hôte : la sous-tâche attend son délai, l'exécuteur reste
+    // libre pour le tour, en fin de file (le suivant le précède), sauf s'il a
+    // déjà refusé ailleurs dans ce tour.
+    if (failed.has(id)) {
+      refusals.set(id, t + RETRY_AFTER_REFUSAL_MS);
+      const n = (refusedBy.get(to) ?? 0) + 1;
+      refusedBy.set(to, n);
+      if (n < REFUSALS_PER_EXECUTOR) free.push(to);
+    } else {
+      free.unshift(to); // la base n'a pas pu passer la sous-tâche in-dev : l'hôte n'y est pour rien
     }
   }
 }

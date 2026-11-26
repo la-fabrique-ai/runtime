@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
@@ -92,8 +92,10 @@ test("une ligne de problème identique n'est imprimée qu'une fois d'un tour à 
   await tickets.setTicketStatus({ id: t.id, status: "dev" });
   await tickets.createSubtask({ ticket: t.id, repository: "web", position: 1, rank: 1, kind: "implementation", text: "s" });
 
-  // L'hôte refuse chaque assign : le même problème revient à chaque tour.
-  let assigns = 0;
+  // Un fichier de sous-tâche illisible : le même problème revient à chaque tour
+  // (un assign refusé, lui, attend son délai avant d'être retenté).
+  writeFileSync(join(base, t.id, "subtasks", "2.md"), "pas un en-tête\n\nx");
+  let statuses = 0;
   let onSecond: () => void = () => {};
   const second = new Promise<void>((r) => (onSecond = r));
   const sockets: import("node:net").Socket[] = [];
@@ -107,12 +109,10 @@ test("une ligne de problème identique n'est imprimée qu'une fois d'un tour à 
       const req = JSON.parse(buf.split("\n")[0]!);
       buf = "";
       if (req.op === "status") {
+        if (++statuses === 2) onSecond();
         s.write(JSON.stringify({ ok: true, executors: [{ name: "ex-1", mission: null, session: "none" }] }) + "\n");
       } else if (req.op === "events") {
         s.write(JSON.stringify({ ok: true, events: [], last: 0 }) + "\n");
-      } else if (req.op === "assign") {
-        if (++assigns === 2) onSecond();
-        s.write(JSON.stringify({ ok: false, error: "refused" }) + "\n");
       } else {
         s.write(JSON.stringify({ ok: true }) + "\n");
       }
@@ -129,7 +129,8 @@ test("une ligne de problème identique n'est imprimée qu'une fois d'un tour à 
     child.kill("SIGTERM");
     assert.equal(await exited, 0);
     const lines = out.split("\n").filter((l) => l.startsWith("[orchestrator] problem: "));
-    assert.deepEqual(lines, ["[orchestrator] problem: T-1: assign T-1.1 to ex-1: hôte, assign : refused"]);
+    assert.equal(lines.length, 1, out);
+    assert.match(lines[0], /^\[orchestrator\] problem: T-1: /);
   } finally {
     child.kill("SIGKILL");
     sockets.forEach((s) => s.destroy());

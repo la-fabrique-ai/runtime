@@ -191,6 +191,48 @@ test("un exécuteur qui refuse tout assign ne bloque pas la distribution aux sui
   assert.deepEqual(host.calls.filter((c) => c.startsWith("assign")), ["assign a T-2.1", "assign b T-1.1"]);
 });
 
+test("un seul exécuteur, un candidat prioritaire toujours refusé : le suivant part, et le refusé attend son délai sans repasser in-dev", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a"]);
+  host.failAssign = (m) => (m.ticket === "T-2" ? new HostError("unknown repository") : null);
+  const cursor = memCursor();
+  const refusals = new Map<string, number>();
+  let t = 0;
+  const now = () => t;
+  const r1 = await tick({ tickets, host, cursor, refusals, now });
+  // a refuse T-2.1, reste libre pour le tour : T-1.1 part sur a.
+  assert.deepEqual(r1.assigned, [{ subtask: "T-1.1", executor: "a" }]);
+  assert.equal(await status(tickets, "T-2.1"), "ready");
+  // a finit T-1.1 ; au tour suivant, T-2.1 est encore dans son délai : rien ne
+  // lui est tenté, elle ne repasse pas in-dev, a reste libre.
+  host.finish("a");
+  host.calls = [];
+  t = 60_000;
+  const r2 = await tick({ tickets, host, cursor, refusals, now });
+  assert.deepEqual(r2.completed, ["T-1.1"]);
+  assert.deepEqual(r2.assigned, []);
+  assert.ok(!host.calls.some((c) => c.startsWith("assign")), host.calls.join("\n"));
+  assert.equal(await status(tickets, "T-2.1"), "ready");
+  // Le délai passé, elle est retentée.
+  host.failAssign = null;
+  t = 6 * 60_000;
+  const r3 = await tick({ tickets, host, cursor, refusals, now });
+  assert.deepEqual(r3.assigned, [{ subtask: "T-2.1", executor: "a" }]);
+});
+
+test("un exécuteur qui refuse deux sous-tâches dans un tour en sort ; les autres continuent", async () => {
+  const { tickets } = await setup();
+  const t3 = await tickets.createTicket({ title: "t3", description: "d", priority: 3, repositories: [{ name: "web", base: "main" }] });
+  await tickets.setTicketStatus({ id: t3.id, status: "dev" });
+  await tickets.createSubtask({ ticket: t3.id, repository: "web", position: 1, rank: 1, kind: "implementation", text: "s" });
+  const host = new FakeHost(["a"]);
+  host.failAssign = (m) => new HostError(`refus ${m.subtask}`);
+  const r = await tick({ tickets, host, cursor: memCursor() });
+  assert.deepEqual(r.assigned, []);
+  assert.deepEqual(host.calls.filter((c) => c.startsWith("assign")), ["assign a T-2.1", "assign a T-1.1"]);
+  assert.equal(await status(tickets, "T-3.1"), "ready");
+});
+
 test("une session none ne déclenche pas de reprise ; un exécuteur unknown n'est ni libre ni libéré", async () => {
   const { tickets } = await setup();
   const host = new FakeHost(["a", "b", "c"]);

@@ -71,8 +71,10 @@ async function main(): Promise<number> {
     // Les problèmes du tour précédent : une ligne identique n'est imprimée
     // qu'une fois, jusqu'à ce que l'ensemble change.
     let previous = new Set<string>();
+    // Les sous-tâches refusées par l'hôte, et l'instant où les retenter.
+    const refusals = new Map<string, number>();
     while (!stopping) {
-      const r = await tick({ tickets, host, cursor });
+      const r = await tick({ tickets, host, cursor, refusals });
       for (const a of r.assigned) console.log(`[orchestrator] assigned ${a.subtask} to ${a.executor}`);
       for (const s of r.completed) console.log(`[orchestrator] completed ${s}`);
       for (const s of r.recovered) console.log(`[orchestrator] recovered ${s}`);
