@@ -12,9 +12,9 @@ import { chmodSync, chownSync, lstatSync, unlinkSync } from "node:fs";
 import { createServer } from "node:net";
 import type { Socket } from "node:net";
 import type { Connector } from "../tickets/connector.ts";
-import { ConnectorError, isTicketId, TICKET_STATUSES } from "../tickets/model.ts";
-import type { TicketStatus } from "../tickets/model.ts";
-import { QuestionError } from "./questions.ts";
+import { ConnectorError, isRepoName, isSeq, isTicketId, TICKET_STATUSES } from "../tickets/model.ts";
+import type { MissionFile, Ticket, TicketStatus } from "../tickets/model.ts";
+import { giveVerdict, QuestionError } from "./questions.ts";
 import type { Questions } from "./questions.ts";
 
 export type ChannelDeps = { tickets: Connector; questions: Questions; problems: () => string[]; log: (line: string) => void };
@@ -38,7 +38,49 @@ const VERBS: Record<string, { need: string[]; may?: string[] }> = {
   ticket: { need: ["id"] },
   mission: { need: ["id"] },
   problems: { need: [] },
+  open: { need: ["id"] },
+  "write-mission": { need: ["id", "file", "text"] },
+  "create-stack": { need: ["id", "subtasks"] },
+  "answer-request": { need: ["id", "request", "text"] },
+  comment: { need: ["id", "text"] },
+  answer: { need: ["token", "text"] },
+  escalate: { need: ["token", "text"], may: ["recommended"] },
 };
+const STACK_MAX = 50;
+
+// Un texte non vide, sous son plafond.
+function text(v: unknown, what: string, max = CHANNEL_TEXT_MAX): string {
+  if (typeof v !== "string" || v.trim() === "") throw new ChannelError(`${what} must be a non-empty text`);
+  if (Buffer.byteLength(v, "utf8") > max) throw new ChannelError(`${what} is longer than ${max} bytes`);
+  return v;
+}
+
+// Le jeton d'une session de question : 32 caractères hexadécimaux, vérifiés
+// avant toute recherche.
+function token(v: unknown): string {
+  if (typeof v !== "string" || !/^[0-9a-f]{32}$/.test(v)) throw new ChannelError("token must be 32 hex characters");
+  return v;
+}
+
+async function inSpec(tickets: Connector, id: string, what: string): Promise<Ticket> {
+  const t = await tickets.getTicket({ id });
+  if (t.status !== "spec") throw new ChannelError(`${id} is ${t.status}: ${what} only while the ticket is in spec`);
+  return t;
+}
+
+type StackItem = { repository: string; text: string };
+
+function stackItems(v: unknown): StackItem[] {
+  if (!Array.isArray(v) || v.length < 1 || v.length > STACK_MAX) {
+    throw new ChannelError(`create-stack: subtasks must be a list of 1 to ${STACK_MAX} sub-tasks`);
+  }
+  return v.map((x, i) => {
+    if (!isObj(x) || Object.keys(x).length !== 2 || !isRepoName(x.repository)) {
+      throw new ChannelError(`create-stack: sub-task ${i + 1} must be {"repository", "text"}`);
+    }
+    return { repository: x.repository, text: text(x.text, `create-stack: the text of sub-task ${i + 1}`) };
+  });
+}
 
 function ticketId(v: unknown): string {
   if (!isTicketId(v)) throw new ChannelError("id must be a ticket id");
@@ -95,9 +137,82 @@ async function run(d: ChannelDeps, op: string, req: Obj): Promise<ChannelReply> 
     }
     case "mission":
       return { ok: true, mission: await tickets.readMission({ ticket: ticketId(req.id) }) };
+    case "open": {
+      const id = ticketId(req.id);
+      const t = await tickets.getTicket({ id });
+      if (t.status === "todo") {
+        await tickets.setTicketStatus({ id, status: "spec" });
+        d.log(`open ${id}: todo to spec`);
+      } else if (t.status !== "spec") {
+        throw new ChannelError(`${id} is ${t.status}: only a todo ticket is opened`);
+      }
+      return { ok: true };
+    }
+    case "write-mission": {
+      const id = ticketId(req.id);
+      const file = req.file;
+      if (file !== "spec" && file !== "answers" && file !== "split") throw new ChannelError("write-mission: file must be spec, answers or split");
+      const body = text(req.text, "write-mission: text", CHANNEL_FILE_MAX);
+      await inSpec(tickets, id, "the mission files are written");
+      await tickets.writeMission({ ticket: id, file: file as MissionFile, text: body });
+      d.log(`write-mission ${id}: ${file}, ${Buffer.byteLength(body, "utf8")} bytes`);
+      return { ok: true };
+    }
+    case "create-stack":
+      return createStack(d, ticketId(req.id), stackItems(req.subtasks));
+    case "answer-request": {
+      const id = ticketId(req.id);
+      if (!isSeq(req.request)) throw new ChannelError("answer-request: request must be a request number");
+      await tickets.answerRequest({ ticket: id, id: req.request, text: text(req.text, "answer-request: text") });
+      d.log(`answer-request ${id}: request ${req.request}`);
+      return { ok: true };
+    }
+    case "comment": {
+      const id = ticketId(req.id);
+      await tickets.addComment({ ticket: id, author: "pilot", kind: "note", text: text(req.text, "comment: text") });
+      d.log(`comment ${id}`);
+      return { ok: true };
+    }
+    case "answer":
+    case "escalate": {
+      const t = token(req.token);
+      const body = text(req.text, `${op}: text`);
+      const rec = req.recommended ?? null;
+      const recommended = rec === null ? null : text(rec, "escalate: recommended");
+      const before = d.questions.byToken(t);
+      giveVerdict(d.questions, t, { kind: op === "answer" ? "answer" : "needs-human", text: body, recommended });
+      d.log(`${op} question ${before?.question ?? "?"}`);
+      return { ok: true };
+    }
     default:
       return { ok: true, problems: d.problems() };
   }
+}
+
+// La pile d'un ticket en `spec`, dans l'ordre de la liste (le rang) ; la
+// position compte les sous-tâches du même dépôt. Une pile interrompue reprend :
+// les sous-tâches déjà là doivent être le début de la liste (même dépôt, même
+// texte, dans l'ordre), les autres sont créées, puis le ticket passe `dev`.
+async function createStack(d: ChannelDeps, id: string, items: StackItem[]): Promise<ChannelReply> {
+  const { tickets } = d;
+  const ticket = await inSpec(tickets, id, "a stack is created");
+  const declared = new Set(ticket.repositories.map((r) => r.name));
+  const unknown = items.find((x) => !declared.has(x.repository));
+  if (unknown) throw new ChannelError(`create-stack: ${id} does not declare the repository ${unknown.repository}`);
+  const existing = await tickets.listSubtasks({ ticket: id });
+  const prefix = existing.length <= items.length &&
+    existing.every((s, i) => s.repository === items[i]!.repository && s.text === items[i]!.text && s.rank === i + 1);
+  if (!prefix) throw new ChannelError(`create-stack: ${id} already has sub-tasks that are not the start of this list`);
+  const ids = existing.map((s) => s.id);
+  for (let i = existing.length; i < items.length; i++) {
+    const { repository, text: body } = items[i]!;
+    const position = items.slice(0, i + 1).filter((x) => x.repository === repository).length;
+    const s = await tickets.createSubtask({ ticket: id, repository, position, rank: i + 1, kind: "implementation", text: body });
+    ids.push(s.id);
+  }
+  await tickets.setTicketStatus({ id, status: "dev" });
+  d.log(`create-stack ${id}: ${items.length} sub-tasks (${items.length - existing.length} created), ticket to dev`);
+  return { ok: true, subtasks: ids };
 }
 
 // Une requête, une réponse ; ne lève jamais.
