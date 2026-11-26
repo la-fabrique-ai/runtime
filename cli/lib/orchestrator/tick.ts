@@ -8,7 +8,7 @@ import type { Connector } from "../tickets/connector.ts";
 import { ConnectorError } from "../tickets/model.ts";
 import type { Request, Subtask, Ticket } from "../tickets/model.ts";
 import { HostError } from "./host.ts";
-import type { DoneEvent, ExecutorStatus, HeldMission, HostApi, MissionSpec } from "./host.ts";
+import type { AskEvent, DoneEvent, ExecutorStatus, HeldMission, HostApi, MissionSpec } from "./host.ts";
 import { candidates, missionBase, RuleError } from "./rule.ts";
 import type { Candidate } from "./rule.ts";
 import { devInstruction, missionFiles } from "./instruction.ts";
@@ -118,12 +118,9 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
   // ticket illisible ne bloque pas les autres) et relus sans effet.
   let advance = true;
   for (const ev of events) {
-    if (ev.kind === "ask") {
-      if (advance) cursor.write(ev.id);
-      continue;
-    }
     try {
-      await onDone(tickets, host, ev, report);
+      if (ev.kind === "ask") await onAsk(tickets, host, ev, report);
+      else await onDone(tickets, host, ev, report);
     } catch (e) {
       if (!local(e)) throw e;
       report.problems.push(`${ev.ticket}: event ${ev.id} (${ev.subtask}): ${message(e)}`);
@@ -300,6 +297,34 @@ async function onDone(tickets: Connector, host: HostApi, ev: DoneEvent, report: 
     const waits = (await tickets.listRequests({ ticket: ev.ticket, open: true })).length > 0;
     if (ticket.status === "dev" && !waits) await tickets.setTicketStatus({ id: ev.ticket, status: "qa" });
   }
+}
+
+// Un `ask` (décision 35) : le développeur a rendu son travail en cours avec une
+// question pour l'humain. Dans cet ordre : la demande, la libération de
+// l'émetteur s'il tient encore la sous-tâche, la sous-tâche `ready`. Le ticket
+// attend alors la réponse (`waiting`). Relu (curseur perdu, crash), il ne
+// rouvre pas une demande déjà là, et ne touche pas à une sous-tâche qu'un autre
+// exécuteur tient.
+async function onAsk(tickets: Connector, host: HostApi, ev: AskEvent, report: TickReport): Promise<void> {
+  const subtasks = await tickets.listSubtasks({ ticket: ev.ticket });
+  const s = subtasks.find((x) => x.id === ev.subtask);
+  if (!s) return void report.problems.push(`${ev.ticket}: event ${ev.id}: sub-task not found: ${ev.subtask}`);
+  if (s.status === "done") return;
+  const executors = await host.status();
+  const holds = executors.find((e) => e.name === ev.executor)?.mission?.subtask === s.id;
+  if (s.status !== "in-dev" && !(s.status === "ready" && holds)) return;
+  if (!holds && executors.some((e) => e.mission?.subtask === s.id)) return;
+  // La base Markdown garde une réponse recommandée d'une ligne dans l'en-tête
+  // de la demande ; plus longue, elle va dans son texte.
+  const rec = ev.recommended;
+  const multi = rec !== null && rec.includes("\n");
+  const text = multi ? `${ev.text}\n\nRecommended answer:\n${rec}` : ev.text;
+  const open = await tickets.listRequests({ ticket: ev.ticket, open: true });
+  if (!open.some((r) => r.subtask === s.id && r.text === text)) {
+    await tickets.openRequest({ ticket: ev.ticket, subtask: s.id, text, ...(rec !== null && !multi ? { recommended: rec } : {}) });
+  }
+  if (holds) await host.release(ev.executor);
+  if (s.status !== "ready") await tickets.setSubtaskStatus({ id: s.id, status: "ready" });
 }
 
 // Une mission dont la session est perdue : libérée, puis relancée sur le même

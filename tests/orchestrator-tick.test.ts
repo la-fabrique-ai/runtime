@@ -56,6 +56,13 @@ class FakeHost implements HostApi {
     return { events: this.events_.filter((e) => e.id > after), last: this.last ?? this.events_.at(-1)?.id ?? 0 };
   }
   // Ce que fait l'agent : il finit sa mission, l'hôte émet `done`.
+  // L'agent rend son travail en cours avec une question pour l'humain.
+  ask(name: string, text: string, recommended: string | null = null): void {
+    const e = this.executors.find((x) => x.name === name)!;
+    const m = e.mission!;
+    e.session = "done";
+    this.events_.push({ id: this.events_.length + 1, kind: "ask", executor: name, ticket: m.ticket, subtask: m.subtask, text, recommended });
+  }
   finish(name: string, o: { report?: string } = {}): void {
     const e = this.executors.find((x) => x.name === name)!;
     const m = e.mission!;
@@ -457,4 +464,62 @@ test("a plain done of the last sub-task leaves the ticket in dev while one of it
   await turn({ tickets, host, cursor });
   assert.equal(await status(tickets, "T-1.1"), "done");
   assert.equal((await tickets.getTicket({ id: "T-1" })).status, "dev");
+});
+
+// ---------------------------------------------------------------- ask : une question pour l'humain (décision 35)
+
+test("ask: the request is opened, the emitter released, the sub-task ready; the ticket gets no mission while it waits", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a", "b", "c"]);
+  const cursor = memCursor();
+  await turn({ tickets, host, cursor });
+  host.ask("a", "Which limit?", "100 per page");
+  const r = await turn({ tickets, host, cursor });
+  const [req] = await tickets.listRequests({ ticket: "T-2", open: true });
+  assert.deepEqual([req.subtask, req.text, req.recommended], ["T-2.1", "Which limit?", "100 per page"]);
+  assert.ok(host.calls.includes("release a"));
+  assert.equal(await status(tickets, "T-2.1"), "ready");
+  assert.ok(!r.assigned.some((x) => x.subtask.startsWith("T-2.")), JSON.stringify(r.assigned));
+  assert.equal(cursor.value, 1);
+  // L'humain répond : le tour suivant relance T-2.1, avec la réponse.
+  await tickets.answerRequest({ ticket: "T-2", id: req.id, text: "50" });
+  const next = await turn({ tickets, host, cursor });
+  assert.deepEqual(next.assigned.map((x) => x.subtask), ["T-2.1"]);
+  assert.ok(host.assigned.at(-1)!.mission.instruction.includes("Which limit?"));
+});
+
+test("ask: a recommended answer of several lines goes into the request's text, under Recommended answer:", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a"]);
+  const cursor = memCursor();
+  await turn({ tickets, host, cursor });
+  host.ask("a", "Which limit?", "100 per page,\nor 50 on mobile");
+  await turn({ tickets, host, cursor });
+  const [req] = await tickets.listRequests({ ticket: "T-2" });
+  assert.equal(req.recommended, null);
+  assert.equal(req.text, "Which limit?\n\nRecommended answer:\n100 per page,\nor 50 on mobile");
+});
+
+test("ask read again: no second request after a crash; a sub-task another executor holds is left alone", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a", "b", "c"]);
+  const cursor = memCursor();
+  await turn({ tickets, host, cursor });
+  // Un crash après l'ouverture : la demande est là, a tient encore T-2.1.
+  await tickets.openRequest({ ticket: "T-2", subtask: "T-2.1", text: "Which limit?" });
+  host.ask("a", "Which limit?");
+  await turn({ tickets, host, cursor });
+  assert.equal((await tickets.listRequests({ ticket: "T-2" })).length, 1);
+  assert.equal(await status(tickets, "T-2.1"), "ready");
+  // Relu pendant que c tient la sous-tâche : rien ne change.
+  await tickets.setSubtaskStatus({ id: "T-2.1", status: "in-dev" });
+  const c = host.executors.find((e) => e.name === "c")!;
+  c.mission = { kind: "dev", ticket: "T-2", subtask: "T-2.1", repository: "web", branch: "agent/T-2.1", base: "origin/main" };
+  c.session = "working";
+  host.calls = [];
+  cursor.value = 0;
+  await turn({ tickets, host, cursor });
+  assert.equal(await status(tickets, "T-2.1"), "in-dev");
+  assert.ok(!host.calls.some((x) => x.startsWith("release")), host.calls.join(","));
+  assert.equal((await tickets.listRequests({ ticket: "T-2" })).length, 1);
 });
