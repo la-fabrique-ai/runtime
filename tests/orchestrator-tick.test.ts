@@ -500,6 +500,21 @@ test("ask: a recommended answer of several lines goes into the request's text, u
   assert.equal(req.text, "Which limit?\n\nRecommended answer:\n100 per page,\nor 50 on mobile");
 });
 
+test("ask: a one-line recommended answer with a carriage return (a CRLF file) goes into the text, not the header", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a"]);
+  const cursor = memCursor();
+  await turn({ tickets, host, cursor });
+  host.ask("a", "Which limit?", "100 per page\r");
+  const r = await turn({ tickets, host, cursor });
+  assert.deepEqual(r.problems, []);
+  const [req] = await tickets.listRequests({ ticket: "T-2" });
+  assert.equal(req.recommended, null);
+  assert.equal(req.text, "Which limit?\n\nRecommended answer:\n100 per page\r");
+  assert.ok(host.calls.includes("release a"));
+  assert.equal(await status(tickets, "T-2.1"), "ready");
+});
+
 test("ask read again: no second request after a crash; a sub-task another executor holds is left alone", async () => {
   const { tickets } = await setup();
   const host = new FakeHost(["a", "b", "c"]);

@@ -320,9 +320,10 @@ async function onAsk(tickets: Connector, host: HostApi, ev: AskEvent, report: Ti
   if (s.status !== "in-dev" && !(s.status === "ready" && holds)) return;
   if (!holds && executors.some((e) => e.mission?.subtask === s.id)) return;
   // La base Markdown garde une réponse recommandée d'une ligne dans l'en-tête
-  // de la demande ; plus longue, elle va dans son texte.
+  // de la demande ; plus longue, elle va dans son texte. Un retour chariot
+  // (un fichier en CRLF) compte comme un saut de ligne : l'en-tête refuse les deux.
   const rec = ev.recommended;
-  const multi = rec !== null && rec.includes("\n");
+  const multi = rec !== null && /[\r\n]/.test(rec);
   const text = multi ? `${ev.text}\n\nRecommended answer:\n${rec}` : ev.text;
   const open = await tickets.listRequests({ ticket: ev.ticket, open: true });
   if (!open.some((r) => r.subtask === s.id && r.text === text)) {

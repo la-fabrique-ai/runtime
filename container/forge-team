@@ -103,7 +103,7 @@ function controlRequest(command, args) {
   }
 }
 
-// Tout stdin, ses sauts de ligne finaux retirés ; un terminal n'est pas un texte.
+// Tout stdin, ses sauts de ligne finaux retirés (\r compris) ; un terminal n'est pas un texte.
 function readStdin(what) {
   if (process.stdin.isTTY) usage(`${what} is read from stdin, not from a terminal`);
   let text;
@@ -112,7 +112,7 @@ function readStdin(what) {
   } catch {
     usage(`cannot read the ${what} from stdin`);
   }
-  text = text.replace(/\n+$/, "");
+  text = text.replace(/[\r\n]+$/, "");
   if (text.trim() === "") usage(`the ${what} on stdin is empty`);
   return text;
 }
@@ -127,7 +127,7 @@ function request() {
     case "ask": {
       let recommended = null;
       if (args.length === 2 && args[0] === "--recommended-file") {
-        recommended = readFile(args[1], "recommended answer file").replace(/\n+$/, "");
+        recommended = readFile(args[1], "recommended answer file").replace(/[\r\n]+$/, "");
       } else if (args.length > 0) {
         usage("ask takes only --recommended-file <file>: the question is read from stdin");
       }

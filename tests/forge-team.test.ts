@@ -145,7 +145,7 @@ test("with the channel's socket, done is a usage error; without it, tickets is",
   assert.deepEqual(received, []);
 });
 
-test("ask sends stdin as the question and the file as recommended, trailing newlines removed; it says the container is about to be released", async () => {
+test("ask sends stdin as the question and the file as recommended, trailing newlines (and carriage returns) removed; it says the container is about to be released", async () => {
   const file = join(dir, "r.md");
   writeFileSync(file, "100 per page\n\n");
   const r = await run(["ask", "--recommended-file", file], "Which limit?\n");
@@ -154,9 +154,12 @@ test("ask sends stdin as the question and the file as recommended, trailing newl
   assert.match(r.stdout, /^ok 7\n.*goes to the human.*released/s);
   await run(["ask"], "Which limit?");
   assert.equal(received[1], JSON.stringify({ op: "ask", text: "Which limit?", recommended: null }));
+  writeFileSync(file, "100 per page\r\n");
+  await run(["ask", "--recommended-file", file], "Which limit?\r\n");
+  assert.equal(received[2], JSON.stringify({ op: "ask", text: "Which limit?", recommended: "100 per page" }));
   const empty = await run(["ask"], "\n");
   assert.equal(empty.code, 64);
   const missing = await run(["ask", "--recommended-file", join(dir, "none.md")], "q");
   assert.equal(missing.code, 64);
-  assert.equal(received.length, 2);
+  assert.equal(received.length, 3);
 });
