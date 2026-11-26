@@ -8,7 +8,7 @@ import type { Connector } from "../tickets/connector.ts";
 import { ConnectorError } from "../tickets/model.ts";
 import type { Subtask, Ticket } from "../tickets/model.ts";
 import { HostError } from "./host.ts";
-import type { ExecutorStatus, HeldMission, HostApi, HostEvent, MissionSpec } from "./host.ts";
+import type { DoneEvent, ExecutorStatus, HeldMission, HostApi, MissionSpec } from "./host.ts";
 import { candidates, missionBase, RuleError } from "./rule.ts";
 import type { Candidate } from "./rule.ts";
 import { devInstruction } from "./instruction.ts";
@@ -118,6 +118,10 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
   // ticket illisible ne bloque pas les autres) et relus sans effet.
   let advance = true;
   for (const ev of events) {
+    if (ev.kind === "ask") {
+      if (advance) cursor.write(ev.id);
+      continue;
+    }
     try {
       await onDone(tickets, host, ev, report);
     } catch (e) {
@@ -256,7 +260,7 @@ function watchSessions(executors: ExecutorStatus[], silent: Map<string, number>,
 
 // Un `done` : la sous-tâche `in-dev` passe `done` avec sa branche, l'exécuteur
 // qui la tient encore est libéré, le ticket passe `qa` si tout est fini.
-async function onDone(tickets: Connector, host: HostApi, ev: HostEvent, report: TickReport): Promise<void> {
+async function onDone(tickets: Connector, host: HostApi, ev: DoneEvent, report: TickReport): Promise<void> {
   const subtasks = await tickets.listSubtasks({ ticket: ev.ticket });
   const s = subtasks.find((x) => x.id === ev.subtask);
   // Un évènement qui ne correspond à rien est signalé mais consommé : le relire
@@ -339,6 +343,7 @@ async function launch(
     branch: `agent/${s.id}`,
     base: c.base,
     instruction: devInstruction(c, resumed),
+    files: { spec: null, answers: null, split: null },
   };
   try {
     if (s.status !== "in-dev") {

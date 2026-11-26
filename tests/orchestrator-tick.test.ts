@@ -24,7 +24,7 @@ class FakeHost implements HostApi {
   // Le plus grand id du journal ; `null` : celui du dernier évènement.
   last: number | null = null;
   constructor(names: string[]) {
-    this.executors = names.map((name) => ({ name, mission: null, session: "none" as SessionState }));
+    this.executors = names.map((name) => ({ name, mission: null, session: "none" as SessionState, question: null as number | null }));
   }
   async status(): Promise<ExecutorStatus[]> {
     this.calls.push("status");
@@ -37,7 +37,7 @@ class FakeHost implements HostApi {
     if (err) throw err;
     const e = this.executors.find((x) => x.name === to)!;
     if (e.mission) throw new HostError(`${to} is busy`);
-    const { instruction: _i, ...held } = mission;
+    const { instruction: _i, files: _f, ...held } = mission;
     e.mission = held;
     e.session = "working";
     this.assigned.push({ to, mission });
@@ -59,8 +59,12 @@ class FakeHost implements HostApi {
     const e = this.executors.find((x) => x.name === name)!;
     const m = e.mission!;
     e.session = "done";
-    this.events_.push({ id: this.events_.length + 1, kind: "done", executor: name, ticket: m.ticket, subtask: m.subtask, branch: m.branch });
+    this.events_.push({ id: this.events_.length + 1, kind: "done", executor: name, ticket: m.ticket, subtask: m.subtask, branch: m.branch, wip: false, report: null });
   }
+  async answer(): Promise<{ delivered: boolean }> {
+    return { delivered: false };
+  }
+  async session(): Promise<void> {}
 }
 
 const memCursor = (): Cursor & { value: number } => {

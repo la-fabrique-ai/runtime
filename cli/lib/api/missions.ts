@@ -99,7 +99,8 @@ function checkBase(base: string, subtask: string): void {
 
 function parseMission(v: unknown, secrets: readonly string[]): MissionSpec {
   if (!isObj(v)) throw new ForgeError("assign: mission must be an object");
-  unknownFields("assign: mission", v, MISSION_FIELDS);
+  // `files` : lu par le plan 2b (tâche 4) ; accepté, ignoré d'ici là.
+  unknownFields("assign: mission", v, [...MISSION_FIELDS, "files"]);
   for (const k of MISSION_FIELDS) {
     if (typeof v[k] !== "string") throw new ForgeError(`assign: mission.${k} must be a string`);
   }
@@ -116,7 +117,10 @@ function parseMission(v: unknown, secrets: readonly string[]): MissionSpec {
   if (m.branch !== `agent/${m.subtask}`) throw new ForgeError(`assign: branch must be agent/${m.subtask}`);
   checkBase(m.base, m.subtask);
   checkText(m.instruction, INSTRUCTION_MAX, "instruction", secrets);
-  return { kind: "dev", ticket: m.ticket, subtask: m.subtask, repository: m.repository, branch: m.branch, base: m.base, instruction: m.instruction };
+  return {
+    kind: "dev", ticket: m.ticket, subtask: m.subtask, repository: m.repository, branch: m.branch, base: m.base, instruction: m.instruction,
+    files: { spec: null, answers: null, split: null },
+  };
 }
 
 export function parseMissionRequest(line: string, from: Kind, secrets: readonly string[]): MissionRequest {
@@ -529,9 +533,11 @@ async function status(ctx: Context, p: ProjectConfig): Promise<ExecutorStatus[]>
     if (mission === "unreadable") {
       // Ni libre ni reprenable : `unknown`, et l'humain est prévenu.
       ctx.err(`WARNING: ${m.name} has an unreadable ${MISSION_KEY}: release it.`);
-      return { name: m.name, mission: null, session: "unknown" };
+      return { name: m.name, mission: null, session: "unknown", question: null };
     }
-    return { name: m.name, mission, session: await executorSession(ctx, p, m.name, inst?.status === "Running", mission !== null) };
+    return {
+      name: m.name, mission, session: await executorSession(ctx, p, m.name, inst?.status === "Running", mission !== null), question: null,
+    };
   }));
 }
 
@@ -544,7 +550,10 @@ function events(d: ApiDeps, after: number): Outcome {
   const list: HostEvent[] = entries
     .filter((e) => e.op === "done" && e.outcome === "ok" && e.id > after && e.mission !== undefined)
     .sort((a, b) => a.id - b.id)
-    .map((e) => ({ id: e.id, kind: "done", executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask, branch: e.mission!.branch }));
+    .map((e): HostEvent => ({
+      id: e.id, kind: "done", executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask, branch: e.mission!.branch,
+      wip: false, report: null,
+    }));
   return { reply: () => ({ ok: true, events: list, last }), quiet: true };
 }
 

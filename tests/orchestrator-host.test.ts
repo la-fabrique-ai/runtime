@@ -39,20 +39,23 @@ async function withServer(
 
 const mission: MissionSpec = {
   kind: "dev", ticket: "T-1", subtask: "a", repository: "r", branch: "agent/x", base: "main", instruction: "do it",
+  files: { spec: "# spec", answers: null, split: null },
 };
 
 test("status renvoie les exécuteurs validés", async () => {
   const reply = JSON.stringify({
     ok: true,
     executors: [
-      { name: "agent-executor-1", mission: null, session: "idle" },
-      { name: "agent-executor-2", mission: { kind: "dev", ticket: "T-1", subtask: "a", repository: "r", branch: "b", base: "main" }, session: "working" },
+      { name: "agent-executor-1", mission: null, session: "idle", question: null },
+      { name: "agent-executor-2", mission: { kind: "dev", ticket: "T-1", subtask: "a", repository: "r", branch: "b", base: "main" }, session: "working", question: 7 },
     ],
   });
   await withServer(reply, async (path, received) => {
     const r = await socketHost(path).status();
     assert.equal(r.length, 2);
     assert.equal(r[1].mission?.branch, "b");
+    assert.equal(r[1].question, 7);
+    assert.equal(r[0].question, null);
     assert.equal(received[0], '{"op":"status"}');
   });
 });
@@ -69,7 +72,7 @@ test("release et events", async () => {
     await socketHost(path).release("e1");
     assert.equal(received[0], '{"op":"release","to":"e1"}');
   });
-  const ev = { id: 3, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b" };
+  const ev = { id: 3, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b", wip: false, report: null };
   await withServer(JSON.stringify({ ok: true, events: [ev], last: 5 }), async (path, received) => {
     assert.deepEqual(await socketHost(path).events(2), { events: [ev], last: 5 });
     assert.equal(received[0], '{"op":"events","after":2}');
@@ -87,7 +90,7 @@ test("une réponse mal formée est refusée", async () => {
     await assert.rejects(socketHost(path).events(0), HostError);
   });
   // `last` absent, négatif ou non entier ; des évènements hors d'ordre ou au-delà de `last`.
-  const ev = (id: number) => ({ id, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b" });
+  const ev = (id: number) => ({ id, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b", wip: false, report: null });
   for (const bad of [
     { ok: true, events: [] },
     { ok: true, events: [], last: -1 },
@@ -100,10 +103,10 @@ test("une réponse mal formée est refusée", async () => {
       await assert.rejects(socketHost(path).events(0), (e) => e instanceof HostError && /events/.test(e.message));
     });
   }
-  await withServer('{"ok":true,"executors":[{"name":"a","mission":null,"session":"idle","extra":1}]}', async (path) => {
+  await withServer('{"ok":true,"executors":[{"name":"a","mission":null,"session":"idle","question":null,"extra":1}]}', async (path) => {
     await assert.rejects(socketHost(path).status(), HostError);
   });
-  await withServer('{"ok":true,"executors":[{"name":"a","mission":null,"session":"nope"}]}', async (path) => {
+  await withServer('{"ok":true,"executors":[{"name":"a","mission":null,"session":"nope","question":null}]}', async (path) => {
     await assert.rejects(socketHost(path).status(), HostError);
   });
   await withServer("pas du json", async (path) => {
@@ -129,4 +132,34 @@ test("assign a son propre délai, séparé de celui des autres ops", async () =>
 
 test("un socket absent est une HostError", async () => {
   await assert.rejects(socketHost("/nonexistent/forge.sock").status(), HostError);
+});
+
+test("status sans la clé question est refusé", async () => {
+  await withServer('{"ok":true,"executors":[{"name":"a","mission":null,"session":"idle"}]}', async (path) => {
+    await assert.rejects(socketHost(path).status(), HostError);
+  });
+});
+
+test("events lit un ask et un done avec wip et report ; un done sans wip est refusé", async () => {
+  const ask = { id: 4, kind: "ask", executor: "e", ticket: "T-1", subtask: "T-1.1", text: "what is the limit?" };
+  const done = { id: 5, kind: "done", executor: "e", ticket: "T-1", subtask: "T-1.1", branch: "agent/T-1.1", wip: true, report: "did x" };
+  await withServer(JSON.stringify({ ok: true, events: [ask, done], last: 5 }), async (path) => {
+    assert.deepEqual(await socketHost(path).events(3), { events: [ask, done], last: 5 });
+  });
+  const { wip: _w, ...noWip } = done;
+  await withServer(JSON.stringify({ ok: true, events: [noWip], last: 5 }), async (path) => {
+    await assert.rejects(socketHost(path).events(0), HostError);
+  });
+});
+
+test("answer et session envoient leur ligne", async () => {
+  await withServer('{"ok":true,"delivered":false}', async (path, received) => {
+    const r = await socketHost(path).answer("agent-executor-1", { question: 7, kind: "answer", text: "42" });
+    assert.deepEqual(r, { delivered: false });
+    assert.equal(received[0], '{"op":"answer","to":"agent-executor-1","question":7,"kind":"answer","text":"42"}');
+  });
+  await withServer('{"ok":true}', async (path, received) => {
+    await socketHost(path).session({ question: 7, instruction: "[forge] question 7" });
+    assert.equal(received[0], '{"op":"session","question":7,"instruction":"[forge] question 7"}');
+  });
 });

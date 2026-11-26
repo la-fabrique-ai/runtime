@@ -30,10 +30,10 @@ const member = (name: string) => projectMembers(cfg.project!).find((m) => m.name
 
 const spec = (over: Partial<MissionSpec> = {}): MissionSpec => ({
   kind: "dev", ticket: "T-1", subtask: "T-1.1", repository: "web", branch: "agent/T-1.1", base: "origin/main",
-  instruction: "Fais la sous-tâche 1", ...over,
+  instruction: "Fais la sous-tâche 1", files: { spec: null, answers: null, split: null }, ...over,
 });
 const held = (over: Partial<MissionSpec> = {}): HeldMission => {
-  const { instruction: _, ...rest } = spec(over);
+  const { instruction: _, files: _f, ...rest } = spec(over);
   return rest;
 };
 
@@ -366,8 +366,8 @@ test("status: none only with hc up and no mission; held without terminal is lost
   fake.addInstance("agent-forge", "agent-executor-2", { status: "Stopped", config: { [MISSION_KEY]: JSON.stringify(held()) } });
   let r = await call(CONTROL, { op: "status" });
   assert.deepEqual(r, { ok: true, executors: [
-    { name: E1, mission: null, session: "none" },
-    { name: E2, mission: held(), session: "unknown" },
+    { name: E1, mission: null, session: "none", question: null },
+    { name: E2, mission: held(), session: "unknown", question: null },
   ] });
   fake.instances.get("agent-forge")!.get(E2)!.status = "Running";
   r = await call(CONTROL, { op: "status" });
@@ -383,8 +383,8 @@ test("status: a free executor whose clone has tracked changes, or whose git stat
   setup([{ match: "/workspace/api -c core.fsmonitor=false", stdout: " M a.ts\n" }]);
   let r = await call(CONTROL, { op: "status" });
   assert.deepEqual(r, { ok: true, executors: [
-    { name: E1, mission: null, session: "unknown" },
-    { name: E2, mission: held(), session: "working" },
+    { name: E1, mission: null, session: "unknown", question: null },
+    { name: E2, mission: held(), session: "working", question: null },
   ] });
   const looked = joined().filter((c) => c.includes("status --porcelain --untracked-files=no"));
   assert.ok(looked.length === 2 && looked.every((c) => c.includes(`exec ${E1} `)), looked.join("\n"));
@@ -491,7 +491,7 @@ test("done fetches the branch into repo-web.agents.git, and events(0) returns it
   assert.ok(fetch.some((a) => a.startsWith("remote.src.uploadpack=FORGE_SIDE=host ") && a.endsWith(` upload-pack ${E1}`)));
   assert.equal(fetch.at(-1), "+refs/heads/agent/T-1.1:refs/heads/agent/T-1.1");
   const ev = await call(CONTROL, { op: "events", after: 0 });
-  assert.deepEqual(ev, { ok: true, events: [{ id: 1, kind: "done", executor: E1, ticket: "T-1", subtask: "T-1.1", branch: "agent/T-1.1" }], last: 1 });
+  assert.deepEqual(ev, { ok: true, events: [{ id: 1, kind: "done", executor: E1, ticket: "T-1", subtask: "T-1.1", branch: "agent/T-1.1", wip: false, report: null }], last: 1 });
   // Les lectures acceptées du contrôle ne vont pas au journal : `last` ne bouge pas.
   assert.deepEqual(await call(CONTROL, { op: "events", after: 1 }), { ok: true, events: [], last: 1 });
   await call(CONTROL, { op: "status" });
@@ -524,7 +524,7 @@ test("status and events replies pass the orchestrator's client", async () => {
     const status = await host.status();
     assert.deepEqual(status.map((e) => [e.name, e.mission?.subtask ?? null]), [[E1, "T-1.1"], [E2, null]]);
     const ev = await host.events(0);
-    assert.deepEqual(ev.events.map((e) => [e.executor, e.branch]), [[E1, "agent/T-1.1"]]);
+    assert.deepEqual(ev.events.map((e) => [e.executor, e.kind === "done" ? e.branch : null]), [[E1, "agent/T-1.1"]]);
     await host.release(E1);
   });
 });

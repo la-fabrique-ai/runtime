@@ -8,6 +8,8 @@ import { connect } from "node:net";
 //   {"op":"assign","to":…,"mission":{MissionSpec}}   -> {"ok":true}
 //   {"op":"release","to":…}                          -> {"ok":true}
 //   {"op":"events","after":<n>}                      -> {"ok":true,"events":[HostEvent…],"last":<n>}
+//   {"op":"answer","to":…,"question":<n>,"kind":…,"text":…} -> {"ok":true,"delivered":<bool>}
+//   {"op":"session","question":<n>,"instruction":…}  -> {"ok":true}
 //   tout refus                                       -> {"ok":false,"error":"…"}
 //
 // `events` : les évènements d'id > `after`, par id croissant ; `last` est le
@@ -27,7 +29,14 @@ import { connect } from "node:net";
 // mission : l'hôte la reconnaît au clone, déjà sur `agent/<sous-tâche>`, dont
 // il garde le travail tel quel, même non commité.
 //
-// `session` : `none` = container démarré, hc joignable, aucun terminal ;
+// `answer` livre la réponse (ou l'escalade, `needs-human`) à la question `n`
+// de l'exécuteur `to`. S'il n'attend plus cette question, rien n'est livré, la
+// session de question est terminée et la réponse est `delivered: false` :
+// c'est ainsi que l'orchestrateur termine une session dont la question est
+// partie. `session` lance une session de question neuve dans le container de
+// contrôle ; elle a le long délai d'`assign`.
+//
+// `session` (de l'état d'un exécuteur) : `none` = container démarré, hc joignable, aucun terminal ;
 // un container arrêté, un exec en échec ou hors délai vaut `unknown`, comme un
 // exécuteur libre dont un clone a des changements suivis (il refuserait tout). Seuls `lost` et
 // `exited` déclenchent une reprise ; un exécuteur `unknown` n'est pas libre
@@ -43,22 +52,36 @@ export type MissionSpec = {
   branch: string;
   base: string;
   instruction: string;
+  files: MissionFiles;
 };
 
-export type HeldMission = Omit<MissionSpec, "instruction">;
+// Les fichiers de mission du ticket, copiés tels quels (null : absent).
+export type MissionFiles = { spec: string | null; answers: string | null; split: string | null };
+
+export type HeldMission = Omit<MissionSpec, "instruction" | "files">;
 
 // `blocked` : l'agent attend une réponse à son écran ; l'orchestrateur le signale.
 export type SessionState = "none" | "idle" | "working" | "done" | "blocked" | "exited" | "lost" | "unknown";
 
-export type ExecutorStatus = { name: string; mission: HeldMission | null; session: SessionState };
+// `question` : l'id de l'évènement `ask` dont l'exécuteur attend la réponse.
+export type ExecutorStatus = { name: string; mission: HeldMission | null; session: SessionState; question: number | null };
 
-export type HostEvent = { id: number; kind: "done"; executor: string; ticket: string; subtask: string; branch: string };
+// `wip` : un travail en cours rendu (la question attend l'humain) ; `report` :
+// le compte rendu final de l'agent, tel quel.
+export type DoneEvent = {
+  id: number; kind: "done"; executor: string; ticket: string; subtask: string; branch: string;
+  wip: boolean; report: string | null;
+};
+export type AskEvent = { id: number; kind: "ask"; executor: string; ticket: string; subtask: string; text: string };
+export type HostEvent = DoneEvent | AskEvent;
 
 export interface HostApi {
   status(): Promise<ExecutorStatus[]>;
   assign(to: string, mission: MissionSpec): Promise<void>;
   release(to: string): Promise<void>;
   events(after: number): Promise<{ events: HostEvent[]; last: number }>;
+  answer(to: string, a: { question: number; kind: "answer" | "needs-human"; text: string }): Promise<{ delivered: boolean }>;
+  session(a: { question: number; instruction: string }): Promise<void>;
 }
 
 export class HostError extends Error {}
@@ -78,6 +101,7 @@ function exact(v: unknown, keys: string[]): v is Obj {
 }
 
 const isStr = (v: unknown): v is string => typeof v === "string";
+const isId = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
 
 function parseHeld(v: unknown): HeldMission | null {
   if (v === null) return null;
@@ -89,11 +113,31 @@ function parseHeld(v: unknown): HeldMission | null {
 function parseExecutors(v: unknown): ExecutorStatus[] {
   if (!Array.isArray(v)) throw new Error("executors n'est pas un tableau");
   return v.map((e) => {
-    if (!exact(e, ["name", "mission", "session"]) || !isStr(e.name) || !isStr(e.session) || !SESSIONS.includes(e.session)) {
+    if (
+      !exact(e, ["name", "mission", "session", "question"]) || !isStr(e.name) || !isStr(e.session) ||
+      !SESSIONS.includes(e.session) || !(e.question === null || isId(e.question))
+    ) {
       throw new Error("exécuteur invalide");
     }
-    return { name: e.name, mission: parseHeld(e.mission), session: e.session as SessionState };
+    return { name: e.name, mission: parseHeld(e.mission), session: e.session as SessionState, question: e.question as number | null };
   });
+}
+
+function parseEvent(e: unknown): HostEvent {
+  if (!isObj(e) || !isId(e.id) || !isStr(e.executor) || !isStr(e.ticket) || !isStr(e.subtask)) {
+    throw new Error("évènement invalide");
+  }
+  const base = { id: e.id, executor: e.executor, ticket: e.ticket, subtask: e.subtask };
+  if (e.kind === "ask" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "text"]) && isStr(e.text)) {
+    return { ...base, kind: "ask", text: e.text };
+  }
+  if (
+    e.kind === "done" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch", "wip", "report"]) &&
+    isStr(e.branch) && typeof e.wip === "boolean" && (e.report === null || isStr(e.report))
+  ) {
+    return { ...base, kind: "done", branch: e.branch, wip: e.wip, report: e.report as string | null };
+  }
+  throw new Error("évènement invalide");
 }
 
 // La réponse entière : ses clés sont exactement `ok`, `events` et `last`.
@@ -102,16 +146,7 @@ function parseEvents(r: Obj): { events: HostEvent[]; last: number } {
   const { events: v, last } = r;
   if (!Number.isSafeInteger(last) || (last as number) < 0) throw new Error("last invalide");
   if (!Array.isArray(v)) throw new Error("events n'est pas un tableau");
-  const events = v.map((e): HostEvent => {
-    if (
-      !exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch"]) ||
-      !Number.isInteger(e.id) || (e.id as number) < 0 || e.kind !== "done" ||
-      !isStr(e.executor) || !isStr(e.ticket) || !isStr(e.subtask) || !isStr(e.branch)
-    ) {
-      throw new Error("évènement invalide");
-    }
-    return { id: e.id as number, kind: "done", executor: e.executor, ticket: e.ticket, subtask: e.subtask, branch: e.branch };
-  });
+  const events = v.map(parseEvent);
   // Par id croissant, aucun au-delà de `last` : le curseur ne fait qu'avancer.
   events.forEach((e, i) => {
     if ((i > 0 && e.id <= events[i - 1]!.id) || e.id > (last as number)) throw new Error("évènements hors d'ordre");
@@ -165,7 +200,8 @@ export function socketHost(path: string, opts: { timeoutMs?: number; assignTimeo
   const assignTimeoutMs = opts.assignTimeoutMs ?? 120_000;
   // Valide la réponse ; toute erreur de forme devient une HostError nommant l'op.
   const run = async <T>(request: Obj, pick: (r: Obj) => T): Promise<T> => {
-    const reply = await call(path, request.op === "assign" ? assignTimeoutMs : timeoutMs, request);
+    const long = request.op === "assign" || request.op === "session";
+    const reply = await call(path, long ? assignTimeoutMs : timeoutMs, request);
     try {
       return pick(reply);
     } catch (e) {
@@ -177,5 +213,11 @@ export function socketHost(path: string, opts: { timeoutMs?: number; assignTimeo
     assign: (to, mission) => run({ op: "assign", to, mission }, () => undefined),
     release: (to) => run({ op: "release", to }, () => undefined),
     events: (after) => run({ op: "events", after }, parseEvents),
+    answer: (to, a) =>
+      run({ op: "answer", to, question: a.question, kind: a.kind, text: a.text }, (r) => {
+        if (!exact(r, ["ok", "delivered"]) || typeof r.delivered !== "boolean") throw new Error("réponse answer invalide");
+        return { delivered: r.delivered };
+      }),
+    session: (a) => run({ op: "session", question: a.question, instruction: a.instruction }, () => undefined),
   };
 }
