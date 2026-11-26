@@ -771,15 +771,21 @@ take one sub-task at a time. Nothing keeps both alive.
 
 To move a host from teams to a project:
 
-1. **Ship every task first.** From each repository's clone, `forge fetch`, then
-   `forge ship <task>` for every task you want to keep, and pull any work still
-   uncommitted in a container. The team mirrors and the team containers are not
-   read by the new model.
-2. **Update forge** (`git pull`, then `forge install`, see [Updating](#updating)).
-3. **Recreate the containers.** Replace `teams` and `pilot` by a `project` in
-   `~/.config/agent-forge/config.json` on the host, delete the team containers
-   (`incus --project agent-forge delete <container> --force`; their workspaces
-   under `~/workspaces` stay until you remove them), then `forge team up`.
+1. **Ship every task first, with the old forge.** From each repository's
+   clone, `forge fetch`, then `forge ship <task>` for every task you want to
+   keep, and pull any work still uncommitted in a container. The team mirrors
+   and the team containers are not read by the new model.
+2. **Change the config on the host.** Remove `teams` and `pilot` from
+   `~/.config/agent-forge/config.json`, declare a `project`, and delete the
+   team containers (`incus --project agent-forge delete <container> --force`;
+   their workspaces under `~/workspaces` stay until you remove them).
+3. **Update forge** (`git pull`, then `forge install`, see
+   [Updating](#updating)): it runs `forge setup` and builds the image, now
+   with `forge-orch`.
+4. **Create the project's containers:** `forge team up`.
+
+Until `teams` and `pilot` are gone from the config, every host command
+(`forge setup`, `forge install`, the API service) stops on that refusal.
 
 ## Security model
 
