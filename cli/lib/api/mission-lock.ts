@@ -4,24 +4,39 @@
 // main de l'humain, qui tourne dans son propre processus. Sans lui, les deux
 // verraient le même exécuteur libre avant que l'un ait écrit sa mission.
 //
-// Un dossier créé par `mkdirSync` (atomique : un seul processus le crée), qui
-// garde le pid de son détenteur. Un verrou dont le pid ne vit plus est
-// abandonné : il est repris. L'attente est bornée.
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+// Un dossier qui porte un fichier `owner`, « <pid> <jeton> », le jeton tiré au
+// hasard pour chaque prise. Le dossier est préparé à côté, son `owner` écrit,
+// puis renommé à sa place : le renommage est atomique, et il échoue tant
+// qu'un verrou (un dossier non vide) est en place. Il n'existe donc aucun
+// instant où le verrou est en place sans détenteur lisible.
+//
+// Un verrou dont le pid ne vit plus (ou sans `owner` lisible) est abandonné.
+// Le reprendre se réclame d'abord par un marqueur `<verrou>.takeover-<jeton>`,
+// créé par `mkdirSync` (atomique) : de deux processus qui trouvent le même
+// verrou abandonné, un seul le reprend ; l'autre attend et retente. Le marqueur
+// reste en place, pour qu'un retardataire qui aurait lu le même détenteur ne
+// le réclame pas une seconde fois ; les marqueurs de plus d'une heure sont
+// retirés à la prise suivante. L'attente est bornée.
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { ForgeError } from "../context.ts";
 import { apiDataDir } from "../paths.ts";
 
 export const LOCK_WAIT_MS = 150_000;
 const STEP_MS = 200;
-// Un dossier sans pid lisible est celui d'un détenteur qui ne l'a pas encore
-// écrit ; passé ce délai, il est tenu pour abandonné.
-const NO_PID_GRACE_MS = 10_000;
+const MARKER_TTL_MS = 3_600_000;
 
 export const missionLockPath = (): string => join(apiDataDir(), "mission.lock");
 
-export type LockOptions = { path?: string; waitMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => number };
+export type LockOptions = {
+  path?: string; waitMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => number;
+  // Pour les tests seulement : appelé quand un détenteur abandonné vient d'être
+  // lu, juste avant de réclamer sa reprise (deux appels qui voient le même), et
+  // juste avant d'écrire `owner` dans le dossier préparé (une écriture qui échoue).
+  beforeTakeover?: () => void | Promise<void>;
+  beforeOwnerWrite?: (dir: string) => void;
+};
 
 function alive(pid: number): boolean {
   try {
@@ -33,20 +48,65 @@ function alive(pid: number): boolean {
   }
 }
 
-// Vrai quand le verrou en place est abandonné : son pid ne vit plus, ou il n'a
-// jamais écrit de pid lisible depuis plus que le délai de grâce.
-function stale(path: string, now: number): boolean {
-  let pid: number;
+const OWNER = /^([1-9][0-9]*) ([0-9a-f-]{36})\n?$/;
+
+// Le jeton du verrou en place s'il est abandonné, `null` s'il est tenu, `gone`
+// s'il n'est plus là. Un `owner` absent, illisible ou malformé n'a pas de jeton
+// à lui : le jeton de reprise est alors tiré de l'inode et du mtime du dossier
+// du verrou, qui ne changent pas tant que ce dossier est en place (personne
+// n'écrit plus dedans) : la reprise reste unique pour ce dossier-là.
+function abandoned(path: string): string | null | "gone" {
+  let content: string | undefined;
   try {
-    pid = Number(readFileSync(join(path, "pid"), "utf8").trim());
+    content = readFileSync(join(path, "owner"), "utf8");
   } catch {
-    try {
-      return now - statSync(path).mtimeMs > NO_PID_GRACE_MS;
-    } catch {
-      return false; // déjà retiré : la prochaine tentative le prendra
-    }
+    content = undefined;
   }
-  return !Number.isSafeInteger(pid) || pid <= 0 || !alive(pid);
+  const m = content === undefined ? null : OWNER.exec(content);
+  if (m) return alive(Number(m[1])) ? null : m[2];
+  try {
+    const st = statSync(path);
+    return `x-${st.ino}-${Math.trunc(st.mtimeMs)}`;
+  } catch {
+    return "gone";
+  }
+}
+
+// Au mieux : retirer les marqueurs de reprise de plus d'une heure.
+function cleanMarkers(path: string): void {
+  try {
+    const prefix = `${basename(path)}.takeover-`;
+    const limit = Date.now() - MARKER_TTL_MS;
+    for (const name of readdirSync(dirname(path))) {
+      if (!name.startsWith(prefix)) continue;
+      const marker = join(dirname(path), name);
+      try {
+        if (statSync(marker).mtimeMs < limit) rmSync(marker, { recursive: true, force: true });
+      } catch {
+        // Déjà retiré par un autre.
+      }
+    }
+  } catch {
+    // Rien à nettoyer.
+  }
+}
+
+// Une tentative de prise : vrai si le verrou est à ce processus.
+function tryAcquire(path: string, token: string, opts: LockOptions): boolean {
+  const tmp = `${path}.new-${randomUUID()}`;
+  try {
+    mkdirSync(tmp, { mode: 0o700 });
+    opts.beforeOwnerWrite?.(tmp);
+    writeFileSync(join(tmp, "owner"), token, { mode: 0o600 });
+    // Un ancien dossier `mission.lock` vide est remplacé par le renommage même.
+    renameSync(tmp, path);
+    return true;
+  } catch (e) {
+    rmSync(tmp, { recursive: true, force: true });
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOTEMPTY" || code === "EEXIST") return false;
+    throw e;
+  }
 }
 
 export async function withMissionLock<T>(fn: () => Promise<T>, opts: LockOptions = {}): Promise<T> {
@@ -55,38 +115,50 @@ export async function withMissionLock<T>(fn: () => Promise<T>, opts: LockOptions
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = opts.now ?? Date.now;
   const deadline = now() + waitMs;
-  mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
+  const uuid = randomUUID();
+  const token = `${process.pid} ${uuid}\n`;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   for (;;) {
-    try {
-      mkdirSync(path, { mode: 0o700 });
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    }
-    if (stale(path, now())) {
-      // Repris par un renommage : de deux processus qui le trouvent abandonné,
-      // un seul réussit, l'autre retente la création.
-      const aside = `${path}.stale-${randomUUID()}`;
+    if (tryAcquire(path, token, opts)) break;
+    const dead = abandoned(path);
+    if (dead === "gone") continue; // libéré entre-temps : on retente la prise
+    if (dead !== null) {
+      await opts.beforeTakeover?.();
+      let claimed = false;
       try {
-        renameSync(path, aside);
-        rmSync(aside, { recursive: true, force: true });
-      } catch {
-        // Un autre l'a repris d'abord.
+        mkdirSync(`${path}.takeover-${dead}`, { mode: 0o700 });
+        claimed = true;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        // Un autre a réclamé ce détenteur-là : il le reprend, on attend.
       }
-      continue;
+      if (claimed) {
+        try {
+          renameSync(path, `${path}.dead-${dead}`);
+          rmSync(`${path}.dead-${dead}`, { recursive: true, force: true });
+        } catch {
+          // Déjà parti : la prochaine tentative le dira.
+        }
+        continue;
+      }
     }
     if (now() >= deadline) throw new ForgeError("the host is busy with another mission change: try again in a moment");
     await sleep(STEP_MS);
   }
-  const pidFile = join(path, "pid");
-  writeFileSync(pidFile, `${process.pid}\n`, { mode: 0o600 });
   try {
+    cleanMarkers(path);
     return await fn();
   } finally {
     // Seulement le sien : un verrou repris entre-temps (il ne devrait pas
-    // l'être, ce processus vit) n'est pas retiré.
+    // l'être, ce processus vit) n'est pas retiré. Écarté par un renommage
+    // d'abord, pour que la place ne reste jamais occupée par un dossier à demi
+    // supprimé.
     try {
-      if (existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() === String(process.pid)) rmSync(path, { recursive: true, force: true });
+      if (readFileSync(join(path, "owner"), "utf8") === token) {
+        const done = `${path}.done-${uuid}`;
+        renameSync(path, done);
+        rmSync(done, { recursive: true, force: true });
+      }
     } catch {
       // Rien à retirer.
     }
