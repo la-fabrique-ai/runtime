@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,7 +63,7 @@ function run(args: string[], stdin: string, socket = join(dir, "api.sock")): Pro
 test("done sends the bare verb; status prints the mission when the reply has its shape", async () => {
   const r = await run(["done"], "");
   assert.deepEqual([r.code, r.stdout], [0, "ok 7\n"]);
-  assert.equal(received[0], '{"op":"done"}');
+  assert.equal(received[0], '{"op":"done","wip":false,"report":null}');
   answer = '{"ok":true,"mission":{"kind":"dev","ticket":"T-1","subtask":"T-1.1","repository":"web","branch":"agent/T-1.1","base":"origin/main"}}';
   const held = await run(["status"], "");
   assert.deepEqual([held.code, held.stdout],
@@ -88,12 +88,32 @@ test("a connection closed without an answer says the request may have gone throu
   assert.match(r.stderr, /no answer from the forge API: the request may have been carried out; check forge-team status/);
 });
 
-test("only done and status exist: any other verb prints the usage and exits 64, without a request", async () => {
-  for (const args of [["message", "agent-x", "Salut"], ["assign", "x", "t"], ["release", "x"], ["ask", "Quoi ?"], ["bogus"], [], ["done", "extra"]]) {
+test("any other verb, or a bad argument, prints the usage and exits 64, without a request", async () => {
+  for (const args of [["message", "agent-x", "Salut"], ["assign", "x", "t"], ["release", "x"], ["ask", "Quoi ?"], ["bogus"], [], ["done", "extra"], ["status", "x"]]) {
     const r = await run(args, "texte");
     assert.equal(r.code, 64, args.join(" "));
-    assert.match(r.stderr, /usage: forge-team done.*\n\s+forge-team status/);
+    assert.match(r.stderr, /usage: forge-team ask.*\n\s+forge-team done \[--wip\] \[--report-file <file>\]\n\s+forge-team status/);
   }
   assert.deepEqual(received, []);
   assert.equal(probes, 0);
+});
+
+test("ask sends stdin as the question, its trailing newlines removed; an empty stdin is a usage error", async () => {
+  const r = await run(["ask"], "what is the limit?\n\n");
+  assert.equal(received[0], '{"op":"ask","text":"what is the limit?"}');
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /^ok 7\nyour question is recorded: go on with what does not depend on it; the answer arrives in this terminal\n$/);
+  const empty = await run(["ask"], "\n");
+  assert.equal(empty.code, 64);
+  assert.equal(received.length, 1);
+});
+
+test("done --wip --report-file sends wip and the file; a missing report file exits 64 and sends nothing", async () => {
+  const report = join(dir, "r.md");
+  writeFileSync(report, "Did x.\n");
+  await run(["done", "--wip", "--report-file", report], "");
+  assert.equal(received[0], JSON.stringify({ op: "done", wip: true, report: "Did x.\n" }));
+  const missing = await run(["done", "--report-file", join(dir, "missing.md")], "");
+  assert.equal(missing.code, 64);
+  assert.equal(received.length, 1);
 });

@@ -2,18 +2,24 @@
 // forge-team : la façon dont un exécuteur parle à forge. Une requête JSON sur
 // une ligne vers la socket de l'API de l'hôte, une réponse sur une ligne ;
 // l'hôte sait qui appelle par la socket, pas par ce que ce script dit. Aucune
-// dépendance.
+// dépendance. Un texte (une question, un compte rendu) arrive par stdin ou par
+// un fichier, jamais par un argument.
 //
-//   forge-team done      ta mission est faite et commitée : forge range ta branche
-//   forge-team status    la mission que tu tiens, ou aucune
+//   forge-team ask                      une question précise (sur stdin) ; la réponse arrive dans ton terminal
+//   forge-team done [--wip] [--report-file <fichier>]
+//                                       ta mission est faite et commitée (--wip : un travail en cours
+//                                       rendu, la question attend l'humain) ; le compte rendu est gardé
+//   forge-team status                   la mission que tu tiens, ou aucune
 //
 // Sorties : 0 accepté ; 1 refusé par l'API (la raison sur stderr) ; 2 socket
 // injoignable ; 64 mauvais usage.
 "use strict";
+const fs = require("node:fs");
 const net = require("node:net");
 
 const SOCKET = process.env.FORGE_API_SOCKET || "/var/lib/forge/api.sock";
-const USAGE = `usage: forge-team done     (your mission is finished and committed)
+const USAGE = `usage: forge-team ask                (the question on stdin)
+       forge-team done [--wip] [--report-file <file>]
        forge-team status`;
 
 function usage(message) {
@@ -21,13 +27,51 @@ function usage(message) {
   process.exit(64);
 }
 
+// Tout stdin, ses sauts de ligne finaux retirés ; un terminal n'est pas un texte.
+function readStdin(what) {
+  if (process.stdin.isTTY) usage(`${what} is read from stdin, not from a terminal`);
+  let text;
+  try {
+    text = fs.readFileSync(0, "utf8");
+  } catch {
+    usage(`cannot read the ${what} from stdin`);
+  }
+  text = text.replace(/\n+$/, "");
+  if (text.trim() === "") usage(`the ${what} on stdin is empty`);
+  return text;
+}
+
 function request() {
   const [command, ...args] = process.argv.slice(2);
-  if (command !== "done" && command !== "status") {
-    usage(command === undefined ? "a command is required" : `unknown command ${command}`);
+  switch (command) {
+    case "status":
+      if (args.length > 0) usage("status takes no argument");
+      return { op: "status" };
+    case "ask":
+      if (args.length > 0) usage("ask takes no argument: the question is read from stdin");
+      return { op: "ask", text: readStdin("question") };
+    case "done": {
+      let wip = false;
+      let report = null;
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--wip" && !wip) {
+          wip = true;
+        } else if (args[i] === "--report-file" && report === null && args[i + 1] !== undefined) {
+          const file = args[++i];
+          try {
+            report = fs.readFileSync(file, "utf8");
+          } catch (e) {
+            usage(`cannot read the report file ${file}: ${e.code || e.message}`);
+          }
+        } else {
+          usage(`done: unexpected argument ${args[i]}`);
+        }
+      }
+      return { op: "done", wip, report };
+    }
+    default:
+      usage(command === undefined ? "a command is required" : `unknown command ${command}`);
   }
-  if (args.length > 0) usage(`${command} takes no argument`);
-  return { op: command };
 }
 
 // La requête part sans fermer l'écriture : le device proxy d'Incus prend la fin
@@ -82,6 +126,9 @@ function call(req) {
     for (const e of reply.executors) {
       process.stdout.write(`${e.name} session=${e.session} mission=${e.mission === null ? "none" : e.mission.subtask}\n`);
     }
+  } else if (req.op === "ask") {
+    process.stdout.write(`ok ${reply.id}\nyour question is recorded: go on with what does not depend on it; ` +
+      "the answer arrives in this terminal\n");
   } else {
     process.stdout.write(`ok${typeof reply.id === "number" ? ` ${reply.id}` : ""}\n`);
   }
