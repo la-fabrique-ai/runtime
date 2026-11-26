@@ -7,7 +7,6 @@ import { join } from "node:path";
 import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
 import type { Connector } from "../cli/lib/tickets/connector.ts";
 import { handleChannel, serveChannel, type ChannelDeps } from "../cli/lib/orchestrator/channel.ts";
-import { fileQuestions } from "../cli/lib/orchestrator/questions.ts";
 
 async function setup(): Promise<{ d: ChannelDeps; tickets: Connector; logs: string[]; dir: string }> {
   const dir = mkdtempSync(join(tmpdir(), "forge-channel-"));
@@ -20,7 +19,7 @@ async function setup(): Promise<{ d: ChannelDeps; tickets: Connector; logs: stri
   await tickets.openRequest({ ticket: t.id, subtask: s.id, text: "Which limit?" });
   const logs: string[] = [];
   const d: ChannelDeps = {
-    tickets, questions: fileQuestions(join(dir, "questions.json")), problems: () => ["T-9: something"], log: (l) => void logs.push(l),
+    tickets, problems: () => ["T-9: something"], log: (l) => void logs.push(l),
   };
   return { d, tickets, logs, dir };
 }
@@ -136,21 +135,6 @@ test("Review Focus 4: a repository the ticket does not declare is refused before
   const r = await ask(d, { op: "create-stack", id, subtasks: [{ repository: "web", text: "a" }, { repository: "docs", text: "b" }] });
   assert.deepEqual(r, { ok: false, error: `create-stack: ${id} does not declare the repository docs` });
   assert.deepEqual(await tickets.listSubtasks({ ticket: id }), []);
-});
-
-test("Review Focus 2: answer sets the verdict of its token once; another shape of token is refused", async () => {
-  const { d } = await setup();
-  const tok = "a".repeat(32);
-  d.questions.put({
-    question: 7, executor: "agent-executor-1", ticket: "T-1", subtask: "T-1.1", text: "q", token: tok,
-    startedAt: 0, verdict: null, request: null, deliveredAt: null,
-  });
-  assert.deepEqual(await ask(d, { op: "answer", token: tok, text: "100" }), { ok: true });
-  assert.deepEqual(d.questions.byToken(tok)!.verdict, { kind: "answer", text: "100", recommended: null });
-  assert.deepEqual(await ask(d, { op: "escalate", token: tok, text: "?" }), { ok: false, error: "this question is already settled" });
-  assert.deepEqual(await ask(d, { op: "answer", token: "b".repeat(32), text: "x" }), { ok: false, error: "unknown question token" });
-  assert.deepEqual(await ask(d, { op: "answer", token: "T-1", text: "x" }), { ok: false, error: "token must be 32 hex characters" });
-  assert.equal(d.questions.byToken(tok)!.verdict!.text, "100");
 });
 
 test("answer-request writes the answer", async () => {

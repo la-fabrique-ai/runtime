@@ -22,12 +22,10 @@ export type Entry = {
   id: number; time: string; caller: string; op: JournalOp | "notify" | null; to: string | null; task: string | null;
   outcome: "ok" | "refused"; error: string | null;
   summary: string | null; // l'avis de `forge notify`
-  text: string | null; // la consigne d'un assign, la question d'un ask, le compte rendu d'un done
+  text: string | null; // la consigne d'un assign, le compte rendu d'un done
   // La mission d'un `assign` ou d'un `done`, sans sa consigne : un `done`
   // accepté devient un évènement (`events`). Absente des autres lignes.
   mission?: HeldMission;
-  // Un `done` qui rend un travail en cours (la question attend l'humain).
-  wip?: boolean;
 };
 
 export type NewEntry = Omit<Entry, "id" | "time">;

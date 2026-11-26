@@ -1,12 +1,12 @@
-// Le canal local de l'orchestrateur : les sessions du container de contrôle
-// (le Pilote, les sessions de question), qui tournent en aiuser, atteignent la
+// Le canal local de l'orchestrateur : la session du Pilote, dans le container
+// de contrôle, qui tourne en aiuser, atteignent la
 // base des tickets par quelques verbes étroits, sur une socket Unix que
 // l'utilisateur de l'orchestrateur possède et que le groupe d'aiuser peut
 // écrire (spec §6.2, §6.5). Une requête est une ligne JSON validée à la main,
 // la réponse une ligne JSON, comme l'API de l'hôte.
 //
 // Le canal ne rend jamais un chemin, une trace ni une credential : seulement le
-// message d'une ConnectorError, d'une QuestionError ou de sa propre validation ;
+// message d'une ConnectorError ou de sa propre validation ;
 // toute autre erreur est `internal error`. Rien ici n'écrit dans une session.
 import { chmodSync, chownSync, lstatSync, unlinkSync } from "node:fs";
 import { createServer } from "node:net";
@@ -14,10 +14,8 @@ import type { Socket } from "node:net";
 import type { Connector } from "../tickets/connector.ts";
 import { ConnectorError, isRepoName, isSeq, isTicketId, TICKET_STATUSES } from "../tickets/model.ts";
 import type { MissionFile, Ticket, TicketStatus } from "../tickets/model.ts";
-import { giveVerdict, QuestionError } from "./questions.ts";
-import type { Questions } from "./questions.ts";
 
-export type ChannelDeps = { tickets: Connector; questions: Questions; problems: () => string[]; log: (line: string) => void };
+export type ChannelDeps = { tickets: Connector; problems: () => string[]; log: (line: string) => void };
 export type ChannelReply = { ok: true; [k: string]: unknown } | { ok: false; error: string };
 
 // Des plafonds contre un client emballé : une ligne, un fichier de mission (la
@@ -43,8 +41,6 @@ const VERBS: Record<string, { need: string[]; may?: string[] }> = {
   "create-stack": { need: ["id", "subtasks"] },
   "answer-request": { need: ["id", "request", "text"] },
   comment: { need: ["id", "text"] },
-  answer: { need: ["token", "text"] },
-  escalate: { need: ["token", "text"], may: ["recommended"] },
 };
 const STACK_MAX = 50;
 
@@ -52,13 +48,6 @@ const STACK_MAX = 50;
 function text(v: unknown, what: string, max = CHANNEL_TEXT_MAX): string {
   if (typeof v !== "string" || v.trim() === "") throw new ChannelError(`${what} must be a non-empty text`);
   if (Buffer.byteLength(v, "utf8") > max) throw new ChannelError(`${what} is longer than ${max} bytes`);
-  return v;
-}
-
-// Le jeton d'une session de question : 32 caractères hexadécimaux, vérifiés
-// avant toute recherche.
-function token(v: unknown): string {
-  if (typeof v !== "string" || !/^[0-9a-f]{32}$/.test(v)) throw new ChannelError("token must be 32 hex characters");
   return v;
 }
 
@@ -173,17 +162,6 @@ async function run(d: ChannelDeps, op: string, req: Obj): Promise<ChannelReply> 
       d.log(`comment ${id}`);
       return { ok: true };
     }
-    case "answer":
-    case "escalate": {
-      const t = token(req.token);
-      const body = text(req.text, `${op}: text`);
-      const rec = req.recommended ?? null;
-      const recommended = rec === null ? null : text(rec, "escalate: recommended");
-      const before = d.questions.byToken(t);
-      giveVerdict(d.questions, t, { kind: op === "answer" ? "answer" : "needs-human", text: body, recommended });
-      d.log(`${op} question ${before?.question ?? "?"}`);
-      return { ok: true };
-    }
     default:
       return { ok: true, problems: d.problems() };
   }
@@ -222,7 +200,7 @@ export async function handleChannel(d: ChannelDeps, line: string): Promise<Chann
     const { op, req } = parse(line);
     return await run(d, op, req);
   } catch (e) {
-    if (e instanceof ChannelError || e instanceof ConnectorError || e instanceof QuestionError) return { ok: false, error: e.message };
+    if (e instanceof ChannelError || e instanceof ConnectorError) return { ok: false, error: e.message };
     return { ok: false, error: "internal error" };
   }
 }

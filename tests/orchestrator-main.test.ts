@@ -58,7 +58,7 @@ test("le processus distribue, puis sort 0 sur SIGTERM", async () => {
       const req = JSON.parse(buf.split("\n")[0]!);
       buf = "";
       if (req.op === "status") {
-        s.write(JSON.stringify({ ok: true, executors: [{ name: "ex-1", mission: null, session: "none", question: null }] }) + "\n");
+        s.write(JSON.stringify({ ok: true, executors: [{ name: "ex-1", mission: null, session: "none" }] }) + "\n");
       } else if (req.op === "events") {
         s.write(JSON.stringify({ ok: true, events: [], last: 0 }) + "\n");
       } else {
@@ -128,7 +128,7 @@ test("une ligne de problème identique n'est imprimée qu'une fois d'un tour à 
       buf = "";
       if (req.op === "status") {
         if (++statuses === 2) onSecond();
-        s.write(JSON.stringify({ ok: true, executors: [{ name: "ex-1", mission: null, session: "none", question: null }] }) + "\n");
+        s.write(JSON.stringify({ ok: true, executors: [{ name: "ex-1", mission: null, session: "none" }] }) + "\n");
       } else if (req.op === "events") {
         s.write(JSON.stringify({ ok: true, events: [], last: 0 }) + "\n");
       } else {

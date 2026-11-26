@@ -170,18 +170,3 @@ test("typeNotice gives up after ten attempts, and refuses a finished terminal", 
   assert.equal(await typeNotice(c.ctx, LEAD, "Fini"), 3);
   assert.equal(c.sleeps.length, 1);
 });
-
-test("startSession with a session of its own: only that terminal, its tab, its instruction path; agent and messages untouched", async () => {
-  const { fake, ctx } = setup();
-  fake.addInstance("agent-forge", "agent-control", { status: "Running" });
-  await startSession(ctx, { name: "agent-control" }, "question-7", "Réponds", {
-    session: "question-7", instructionPath: "/home/aiuser/.forge/questions/7.md", keepMessages: true,
-  });
-  const calls = ctx.calls.map((c) => c.join(" "));
-  assert.ok(calls.some((c) => c.includes("-- hc run --bg --name question-7 ") && c.includes("herdr.tab=question-7")), calls.join("\n"));
-  assert.ok(calls.some((c) => c.endsWith("-- hc kill question-7")));
-  assert.ok(!calls.some((c) => c.endsWith("hc kill agent") || c.endsWith("hc rm agent")));
-  assert.ok(!calls.some((c) => c.includes("/home/aiuser/.forge/messages")));
-  assert.ok(calls.some((c) => c.includes("file push") && c.includes("agent-control/home/aiuser/.forge/questions/7.md")));
-  assert.ok(calls.some((c) => c.includes("--instruction-file /home/aiuser/.forge/questions/7.md")));
-});

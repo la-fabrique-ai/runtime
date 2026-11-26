@@ -51,11 +51,8 @@ export const isLive = (s: SessionState) => s === "idle" || s === "working" || s 
 // sans statut) : c'est une session morte, `exited`, pas un état inconnu.
 // `timeoutMs` : un `hc get` qui ne répond pas à temps vaut `unknown`, jamais
 // `none` (l'API de projet, dont le statut ne doit pas se figer).
-// `session` : un autre terminal que `agent` (une session de question).
-export async function sessionState(
-  ctx: Context, container: string, opts: { timeoutMs?: number; session?: string } = {},
-): Promise<SessionState> {
-  return (await sessionInfo(ctx, container, opts.timeoutMs, opts.session)).state;
+export async function sessionState(ctx: Context, container: string, opts: { timeoutMs?: number } = {}): Promise<SessionState> {
+  return (await sessionInfo(ctx, container, opts.timeoutMs)).state;
 }
 
 // Avec ou sans délai : un appel sans `timeoutMs` garde la forme d'avant.
@@ -63,9 +60,9 @@ const execMaybeTimed = (ctx: Context, argv: string[], timeoutMs: number | undefi
   timeoutMs === undefined ? ctx.exec(argv) : ctx.exec(argv, { timeoutMs });
 
 async function sessionInfo(
-  ctx: Context, container: string, timeoutMs?: number, session = SESSION,
+  ctx: Context, container: string, timeoutMs?: number,
 ): Promise<{ state: SessionState; exitCode: unknown; timedOut?: boolean }> {
-  const r = await execMaybeTimed(ctx, hcArgv(container, ["get", session]), timeoutMs);
+  const r = await execMaybeTimed(ctx, hcArgv(container, ["get", SESSION]), timeoutMs);
   if (r.timedOut) return { state: "unknown", exitCode: null, timedOut: true };
   if (r.code !== 0) return { state: "none", exitCode: null };
   try {
@@ -89,11 +86,11 @@ async function sessionInfo(
 const STARTUP_LOOKS = 6;
 const STARTUP_STEP_MS = 500;
 
-async function requireStarted(ctx: Context, container: string, timeoutMs?: number, session = SESSION): Promise<void> {
+async function requireStarted(ctx: Context, container: string, timeoutMs?: number): Promise<void> {
   const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   for (let i = 0; i < STARTUP_LOOKS; i++) {
     await sleep(STARTUP_STEP_MS);
-    const s = await sessionInfo(ctx, container, timeoutMs, session);
+    const s = await sessionInfo(ctx, container, timeoutMs);
     if (s.timedOut) throw new ForgeError(`hc get in ${container} timed out after ${(timeoutMs ?? 0) / 1000} s`);
     if (s.state === "exited") {
       const code = typeof s.exitCode === "number" ? String(s.exitCode) : "unknown";
@@ -115,39 +112,32 @@ async function requireStarted(ctx: Context, container: string, timeoutMs?: numbe
 // (/workspace/<nom>) pour un exécuteur, /workspace par défaut.
 // `timeoutMs` : chaque appel hc ou incus qui suit l'egress a ce délai (l'API,
 // dans sa file) ; dépassé, c'est un refus qui nomme l'étape.
-// `session` : un terminal à soi (une session de question, `question-<n>`) ;
-// seul ce terminal est tué et retiré, l'onglet Herdr porte son nom, et
-// `agent` n'est pas touché. `instructionPath` : où pousser sa consigne.
-// `keepMessages` : le dossier des messages reste tel quel.
 export async function startSession(
-  ctx: Context, m: { name: string }, task: string | null, instruction: string,
-  opts: { cwd?: string; timeoutMs?: number; session?: string; instructionPath?: string; keepMessages?: boolean } = {},
+  ctx: Context, m: { name: string }, task: string | null, instruction: string, opts: { cwd?: string; timeoutMs?: number } = {},
 ): Promise<void> {
   const t = opts.timeoutMs;
-  const session = opts.session ?? SESSION;
-  const path = opts.instructionPath ?? INSTRUCTION_PATH;
   const hc = (step: string, args: string[]) => inTime(`${step} in ${m.name}`, t, execMaybeTimed(ctx, hcArgv(m.name, args), t));
   const mode = await egressBeforeStart(ctx, m.name);
   await egressAfterStart(ctx, m.name, mode);
   // Leur échec est sans importance : il n'y avait peut-être pas de session.
-  await hc("hc kill", ["kill", session]);
-  await hc("hc rm", ["rm", session]);
-  if (!opts.keepMessages) await clearMessages(ctx, m.name, { timeoutMs: t });
+  await hc("hc kill", ["kill", SESSION]);
+  await hc("hc rm", ["rm", SESSION]);
+  await clearMessages(ctx, m.name, { timeoutMs: t });
   await mustSucceed("push the instruction", inTime(`push the instruction to ${m.name}`, t,
-    pushText(ctx, m.name, path, instruction, { uid: 1001, gid: 1001, mode: "600" }, { timeoutMs: t })));
+    pushText(ctx, m.name, INSTRUCTION_PATH, instruction, { uid: 1001, gid: 1001, mode: "600" }, { timeoutMs: t })));
   const marker = `${m.name}-${task ?? "session"}`;
   await mustSucceed("hc run", hc("hc run", [
-    "run", "--bg", "--name", session, "--cwd", opts.cwd ?? "/workspace",
+    "run", "--bg", "--name", SESSION, "--cwd", opts.cwd ?? "/workspace",
     // Herdr App ne montre que les terminaux étiquetés par un espace et un
     // onglet ; des ids qu'il ne connaît pas deviennent un espace et un onglet
     // neufs. Les mêmes ids à chaque tâche : la session suivante retombe au
     // même endroit.
-    "--label", `${HERDR_SPACE_LABEL}=forge`, "--label", `${HERDR_TAB_LABEL}=${session}`,
+    "--label", `${HERDR_SPACE_LABEL}=forge`, "--label", `${HERDR_TAB_LABEL}=agent`,
     // L'ordre que forge-agent lit : --forge-task, puis --instruction-file, puis
     // les arguments de claude.
-    "forge-agent", "--forge-task", marker, "--instruction-file", path, "--permission-mode", "auto",
+    "forge-agent", "--forge-task", marker, "--instruction-file", INSTRUCTION_PATH, "--permission-mode", "auto",
   ]));
-  await requireStarted(ctx, m.name, t, session);
+  await requireStarted(ctx, m.name, t);
 }
 
 export const MESSAGES_DIR = "/home/aiuser/.forge/messages";
@@ -172,26 +162,17 @@ export const NO_SESSION = "has no live session: an executor has one from the mom
 // terminée dans Herdr App, et le prochain `assign` la remplace (startSession).
 // `timeoutMs` : dépassé, un refus qui nomme l'étape (l'appelant décide s'il le
 // tient pour un simple avertissement).
-export async function stopSession(
-  ctx: Context, container: string, opts: { timeoutMs?: number; session?: string } = {},
-): Promise<boolean> {
-  const session = opts.session ?? SESSION;
-  const r = await inTime(`hc kill in ${container}`, opts.timeoutMs, execMaybeTimed(ctx, hcArgv(container, ["kill", session]), opts.timeoutMs));
+export async function stopSession(ctx: Context, container: string, opts: { timeoutMs?: number } = {}): Promise<boolean> {
+  const r = await inTime(`hc kill in ${container}`, opts.timeoutMs, execMaybeTimed(ctx, hcArgv(container, ["kill", SESSION]), opts.timeoutMs));
   return r.code === 0;
 }
 
 // Tape une ligne que forge a écrite dans la session `agent` du container : un
 // seul élément d'argv, jamais un shell. Rend le numéro de tour de hc.
-// `session` : un autre terminal que `agent` ; `timeoutMs` : le délai de chaque
-// envoi (l'API, dans sa file), dépassé c'est un refus qui nomme l'étape.
-export async function typeNotice(
-  ctx: Context, container: string, notice: string, opts: { session?: string; timeoutMs?: number } = {},
-): Promise<number> {
+export async function typeNotice(ctx: Context, container: string, notice: string): Promise<number> {
   const sleep = ctx.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const session = opts.session ?? SESSION;
   for (let attempt = 1; ; attempt++) {
-    const r = await inTime(`hc send in ${container}`, opts.timeoutMs,
-      execMaybeTimed(ctx, hcArgv(container, ["send", "--json", session, notice]), opts.timeoutMs));
+    const r = await ctx.exec(hcArgv(container, ["send", "--json", SESSION, notice]));
     if (r.code === 0) return sentTurn(container, r.stdout);
     const why = hcError(r);
     if (why.includes("has finished")) throw new ForgeError(`${container} ${NO_SESSION}`);

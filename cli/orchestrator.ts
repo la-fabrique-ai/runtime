@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { openMarkdownBase } from "./lib/tickets/markdown-base.ts";
 import { socketHost } from "./lib/orchestrator/host.ts";
 import { serveChannel } from "./lib/orchestrator/channel.ts";
-import { fileQuestions } from "./lib/orchestrator/questions.ts";
 import { fileCursor, tick } from "./lib/orchestrator/tick.ts";
 
 export type Args = {
@@ -84,15 +83,13 @@ async function main(): Promise<number> {
     const tickets = openMarkdownBase(args.base, { prefix: args.prefix });
     const host = socketHost(args.socket);
     const cursor = fileCursor(join(args.state, "cursor"));
-    // Les questions en cours (questions.ts) : le perdre coûte un second examen.
-    const questions = fileQuestions(join(args.state, "questions.json"));
     // Les problèmes du dernier tour, que le canal local sert.
     let lastProblems: string[] = [];
     // Le canal local, à côté de la boucle (sans --channel, aucun : les tests de la partie 1).
     let channel: Promise<void> = Promise.resolve();
     if (args.channel !== null) {
       channel = serveChannel({
-        tickets, questions, problems: () => lastProblems, log: (line) => console.log(`[orchestrator] channel: ${line}`),
+        tickets, problems: () => lastProblems, log: (line) => console.log(`[orchestrator] channel: ${line}`),
       }, { path: args.channel, group: args.channelGroup }, stopChannel.signal);
       // Un canal qui ne s'ouvre pas arrête le processus : systemd le relance.
       channel.catch((e) => {
@@ -108,7 +105,7 @@ async function main(): Promise<number> {
     // Depuis quand chaque mission tenue n'annonce aucun état de session.
     const silent = new Map<string, number>();
     while (!stopping) {
-      const r = await tick({ tickets, host, cursor, questions, refusals, silent });
+      const r = await tick({ tickets, host, cursor, refusals, silent });
       lastProblems = r.problems;
       for (const a of r.assigned) console.log(`[orchestrator] assigned ${a.subtask} to ${a.executor}`);
       for (const s of r.completed) console.log(`[orchestrator] completed ${s}`);

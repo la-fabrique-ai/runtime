@@ -11,9 +11,8 @@ import { parseConfig } from "../cli/lib/config.ts";
 import type { ApiDeps } from "../cli/lib/api/missions.ts";
 import { Journal } from "../cli/lib/api/journal.ts";
 import { hostSocketPath, serveApi } from "../cli/lib/api/server.ts";
-import { handleMission, MISSION_FILES_DIR, MISSION_KEY, parseMissionRequest, QUESTION_KEY } from "../cli/lib/api/missions.ts";
+import { handleMission, MISSION_FILES_DIR, MISSION_KEY, parseMissionRequest } from "../cli/lib/api/missions.ts";
 import { MISSION_DIR } from "../cli/lib/orchestrator/instruction.ts";
-import { SUMMARY_ALLOWED } from "../cli/lib/api/protocol.ts";
 import { readBranchRecords } from "../cli/lib/branch-records.ts";
 import { socketHost, type HeldMission, type MissionSpec } from "../cli/lib/orchestrator/host.ts";
 import { CONTROL, executorName, projectMembers, repoTeamMirror } from "../cli/lib/project.ts";
@@ -368,8 +367,8 @@ test("status: none only with hc up and no mission; held without terminal is lost
   fake.addInstance("agent-forge", "agent-executor-2", { status: "Stopped", config: { [MISSION_KEY]: JSON.stringify(held()) } });
   let r = await call(CONTROL, { op: "status" });
   assert.deepEqual(r, { ok: true, executors: [
-    { name: E1, mission: null, session: "none", question: null },
-    { name: E2, mission: held(), session: "unknown", question: null },
+    { name: E1, mission: null, session: "none" },
+    { name: E2, mission: held(), session: "unknown" },
   ] });
   fake.instances.get("agent-forge")!.get(E2)!.status = "Running";
   r = await call(CONTROL, { op: "status" });
@@ -385,8 +384,8 @@ test("status: a free executor whose clone has tracked changes, or whose git stat
   setup([{ match: "/workspace/api -c core.fsmonitor=false", stdout: " M a.ts\n" }]);
   let r = await call(CONTROL, { op: "status" });
   assert.deepEqual(r, { ok: true, executors: [
-    { name: E1, mission: null, session: "unknown", question: null },
-    { name: E2, mission: held(), session: "working", question: null },
+    { name: E1, mission: null, session: "unknown" },
+    { name: E2, mission: held(), session: "working" },
   ] });
   const looked = joined().filter((c) => c.includes("status --porcelain --untracked-files=no"));
   assert.ok(looked.length === 2 && looked.every((c) => c.includes(`exec ${E1} `)), looked.join("\n"));
@@ -493,7 +492,7 @@ test("done fetches the branch into repo-web.agents.git, and events(0) returns it
   assert.ok(fetch.some((a) => a.startsWith("remote.src.uploadpack=FORGE_SIDE=host ") && a.endsWith(` upload-pack ${E1}`)));
   assert.equal(fetch.at(-1), "+refs/heads/agent/T-1.1:refs/heads/agent/T-1.1");
   const ev = await call(CONTROL, { op: "events", after: 0 });
-  assert.deepEqual(ev, { ok: true, events: [{ id: 1, kind: "done", executor: E1, ticket: "T-1", subtask: "T-1.1", branch: "agent/T-1.1", wip: false, report: null }], last: 1 });
+  assert.deepEqual(ev, { ok: true, events: [{ id: 1, kind: "done", executor: E1, ticket: "T-1", subtask: "T-1.1", branch: "agent/T-1.1", report: null }], last: 1 });
   // Les lectures acceptées du contrôle ne vont pas au journal : `last` ne bouge pas.
   assert.deepEqual(await call(CONTROL, { op: "events", after: 1 }), { ok: true, events: [], last: 1 });
   await call(CONTROL, { op: "status" });
@@ -581,128 +580,19 @@ test("with a project, the server opens one socket per project container and answ
   }
 });
 
-// --------------------------------------------------------------- les questions (plan 2b)
-
-test("ask: accepted with a mission, its id is the journal line's; status and events show it", async () => {
-  hold(E1, held());
-  const r = await call(E1, { op: "ask", text: "what is the limit?" });
-  const line = d.journal.entries().find((e) => e.op === "ask")!;
-  assert.deepEqual(r, { ok: true, id: line.id });
-  assert.equal(keys(E1)[QUESTION_KEY], String(line.id));
-  const st = await call(CONTROL, { op: "status" }) as unknown as { executors: { name: string; question: number | null }[] };
-  assert.deepEqual(st.executors.map((e) => [e.name, e.question]), [[E1, line.id], [E2, null]]);
-  const ev = await call(CONTROL, { op: "events", after: 0 });
-  assert.deepEqual(ev, { ok: true, events: [{ id: line.id, kind: "ask", executor: E1, ticket: "T-1", subtask: "T-1.1", text: "what is the limit?" }], last: line.id });
-});
-
-test("ask: a second ask is refused with the pending id; without a mission, or from the control, refused", async () => {
-  hold(E1, held());
-  const first = await call(E1, { op: "ask", text: "q1" }) as unknown as { id: number };
-  assert.deepEqual(await call(E1, { op: "ask", text: "q2" }), { ok: false, error: `question ${first.id} still waits for its answer` });
-  assert.deepEqual(await call(E2, { op: "ask", text: "q" }), { ok: false, error: `${E2} holds no mission: there is nothing to ask about` });
-  assert.deepEqual(await call(CONTROL, { op: "ask", text: "q" }), { ok: false, error: "ask is not a verb of the control container" });
-});
-
-test("ask: a question holding a secret is refused, and the journal does not hold it; release clears the key", async () => {
-  hold(E1, held());
-  const r = await call(E1, { op: "ask", text: "the token is tok-123" });
-  assert.equal(r.ok, false);
-  assert.ok(!readFileSync(join(home, "api", "journal.jsonl"), "utf8").includes("tok-123"));
-  await call(E1, { op: "ask", text: "q" });
-  assert.ok(keys(E1)[QUESTION_KEY]);
-  await call(CONTROL, { op: "release", to: E1 });
-  assert.equal(keys(E1)[QUESTION_KEY], undefined);
-});
-
 const mirrorFetch = () => ctx.calls.some((c) => c[0] === "git" && c.includes("fetch") && c.some((a) => a.startsWith("--git-dir=")));
-
-test("done --wip with nothing committed is accepted and copies nothing; with a commit it copies the branch", async () => {
-  hold(E1, held());
-  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "0\n" }]);
-  assert.equal((await call(E1, { op: "done", wip: true, report: null })).ok, true);
-  assert.ok(!mirrorFetch());
-  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "1\n" }]);
-  assert.equal((await call(E1, { op: "done", wip: true, report: null })).ok, true);
-  assert.ok(mirrorFetch());
-});
-
-test("done --wip on a dirty clone is refused, as a plain done is", async () => {
-  hold(E1, held());
-  setup([{ match: "/workspace/web -c core.fsmonitor=false", stdout: " M a.ts\n" }]);
-  const r = await call(E1, { op: "done", wip: true, report: null });
-  assert.equal(r.ok, false);
-  assert.match((r as { error: string }).error, /uncommitted changes/);
-});
 
 test("done with a report gives an event with that report; {op:done} alone still works; an unknown field is refused", async () => {
   hold(E1, held());
   setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "1\n" }]);
-  const r = await call(E1, { op: "done", wip: false, report: "Did x; checked y." }) as unknown as { id: number };
-  const ev = await call(CONTROL, { op: "events", after: 0 }) as unknown as { events: { wip: boolean; report: string | null }[] };
-  assert.deepEqual([ev.events[0].wip, ev.events[0].report], [false, "Did x; checked y."]);
+  const r = await call(E1, { op: "done", report: "Did x; checked y." }) as unknown as { id: number };
+  const ev = await call(CONTROL, { op: "events", after: 0 }) as unknown as { events: { report: string | null }[] };
+  assert.equal(ev.events[0].report, "Did x; checked y.");
   assert.ok(r.id > 0);
   hold(E2, held({ subtask: "T-1.2", branch: "agent/T-1.2" }));
   setup([{ match: "rev-list --count", stdout: "1\n" }]);
   assert.equal((await call(E2, { op: "done" })).ok, true);
   assert.deepEqual(await call(E2, { op: "done", force: true }), { ok: false, error: 'done: unknown field: "force"' });
-});
-
-const SENT: ExecRule = { match: "-- hc send --json agent", stdout: '{"turn":3}' };
-const sentLines = () => ctx.calls.filter((c) => c.includes("send")).map((c) => c.at(-1)!);
-
-test("session: the control starts question-<n> in agent-control; an executor cannot", async () => {
-  const r = await call(CONTROL, { op: "session", question: 7, instruction: "[forge] question 7 on T-1.1 (ticket T-1)" });
-  assert.deepEqual(r, { ok: true });
-  assert.ok(joined().some((c) => c.includes(`exec ${CONTROL} `) && c.includes("-- hc run --bg --name question-7 ")), joined().join("\n"));
-  assert.ok(!joined().some((c) => c.endsWith("hc kill agent")));
-  assert.deepEqual(await call(E1, { op: "session", question: 7, instruction: "x" }), { ok: false, error: "session is not a verb of the executor container" });
-});
-
-test("answer to an executor waiting for question 7: file, line, key cleared, question session ended, delivered", async () => {
-  hold(E1, held());
-  keys(E1)[QUESTION_KEY] = "7";
-  sessions[E1] = "working";
-  setup([SENT]);
-  const r = await call(CONTROL, { op: "answer", to: E1, question: 7, kind: "answer", text: "100 per page" });
-  assert.deepEqual(r, { ok: true, delivered: true });
-  assert.ok(joined().some((c) => c.includes("file push") && c.includes(`${E1}/home/aiuser/.forge/messages/answer-7.md`)));
-  assert.deepEqual(sentLines(), ["[forge] answer to your question 7: read /home/aiuser/.forge/messages/answer-7.md"]);
-  assert.equal(keys(E1)[QUESTION_KEY], undefined);
-  assert.ok(joined().some((c) => c.includes(`exec ${CONTROL} `) && c.endsWith("-- hc kill question-7")));
-});
-
-test("Review Focus 2: an answer for a question no longer pending types nothing and is not delivered", async () => {
-  hold(E1, held());
-  keys(E1)[QUESTION_KEY] = "7";
-  sessions[E1] = "working";
-  setup([SENT]);
-  const r = await call(CONTROL, { op: "answer", to: E1, question: 8, kind: "answer", text: "x" });
-  assert.deepEqual(r, { ok: true, delivered: false });
-  assert.deepEqual(sentLines(), []);
-  assert.equal(keys(E1)[QUESTION_KEY], "7");
-  assert.ok(joined().some((c) => c.endsWith("-- hc kill question-8")));
-});
-
-test("Review Focus 5: a developer session that finished before the answer: key cleared, not delivered, no error", async () => {
-  hold(E1, held());
-  keys(E1)[QUESTION_KEY] = "7";
-  sessions[E1] = "working";
-  setup([{ match: "-- hc send --json agent", code: 11, stdout: '{"error":{"kind":"finished","message":"t2 has finished"}}' }]);
-  const r = await call(CONTROL, { op: "answer", to: E1, question: 7, kind: "needs-human", text: "?" });
-  assert.deepEqual(r, { ok: true, delivered: false });
-  assert.equal(keys(E1)[QUESTION_KEY], undefined);
-});
-
-test("the two typed lines pass SUMMARY_ALLOWED once their [forge] prefix is removed", async () => {
-  for (const kind of ["answer", "needs-human"]) {
-    hold(E1, held());
-    keys(E1)[QUESTION_KEY] = "7";
-    sessions[E1] = "working";
-    setup([SENT]);
-    await call(CONTROL, { op: "answer", to: E1, question: 7, kind, text: "x" });
-    const [line] = sentLines();
-    assert.ok(line.startsWith("[forge] ") && SUMMARY_ALLOWED.test(line.slice("[forge] ".length)), line);
-  }
 });
 
 // --------------------------------------------------------------- les fichiers de mission (plan 2b)
@@ -755,27 +645,4 @@ test("the first assign of a fresh executor creates /home/aiuser/.forge as aiuser
   const parent = calls.findIndex((c) => c.includes(`exec ${E1} --user 1001`) && c.endsWith("mkdir -p -- /home/aiuser/.forge"));
   const mk = calls.findIndex((c) => c.endsWith(`-- mkdir -m 755 -- ${MISSION_FILES_DIR}`));
   assert.ok(parent >= 0 && mk > parent, calls.join("\n"));
-});
-
-test("answer to a session that is blocked or unknown is refused: nothing typed, the key stays for the next turn", async () => {
-  for (const state of ["blocked", "unknown"]) {
-    hold(E1, held());
-    keys(E1)[QUESTION_KEY] = "7";
-    // Un statut que forge ne connaît pas se lit `unknown`.
-    sessions[E1] = state === "blocked" ? "blocked" : "starting";
-    setup([SENT]);
-    const r = await call(CONTROL, { op: "answer", to: E1, question: 7, kind: "answer", text: "x" });
-    assert.equal(r.ok, false, `${state}: ${JSON.stringify(r)}`);
-    assert.deepEqual(sentLines(), [], state);
-    assert.equal(keys(E1)[QUESTION_KEY], "7", state);
-  }
-});
-
-test("the question key is read with a timeout: a hanging config get refuses ask, naming the step", async () => {
-  hold(E1, held());
-  hangs = [`config get ${E1} ${QUESTION_KEY}`];
-  setup();
-  const r = await call(E1, { op: "ask", text: "q" });
-  assert.equal(r.ok, false, JSON.stringify(r));
-  assert.match((r as { error: string }).error, /timed out after 30 s/);
 });

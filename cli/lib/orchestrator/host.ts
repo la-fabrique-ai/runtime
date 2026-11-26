@@ -8,8 +8,6 @@ import { connect } from "node:net";
 //   {"op":"assign","to":…,"mission":{MissionSpec}}   -> {"ok":true}
 //   {"op":"release","to":…}                          -> {"ok":true}
 //   {"op":"events","after":<n>}                      -> {"ok":true,"events":[HostEvent…],"last":<n>}
-//   {"op":"answer","to":…,"question":<n>,"kind":…,"text":…} -> {"ok":true,"delivered":<bool>}
-//   {"op":"session","question":<n>,"instruction":…}  -> {"ok":true}
 //   tout refus                                       -> {"ok":false,"error":"…"}
 //
 // `events` : les évènements d'id > `after`, par id croissant ; `last` est le
@@ -28,13 +26,6 @@ import { connect } from "node:net";
 // La reprise d'une session perdue est `release` puis `assign` de la même
 // mission : l'hôte la reconnaît au clone, déjà sur `agent/<sous-tâche>`, dont
 // il garde le travail tel quel, même non commité.
-//
-// `answer` livre la réponse (ou l'escalade, `needs-human`) à la question `n`
-// de l'exécuteur `to`. S'il n'attend plus cette question, rien n'est livré, la
-// session de question est terminée et la réponse est `delivered: false` :
-// c'est ainsi que l'orchestrateur termine une session dont la question est
-// partie. `session` lance une session de question neuve dans le container de
-// contrôle ; elle a le long délai d'`assign`.
 //
 // `session` (de l'état d'un exécuteur) : `none` = container démarré, hc joignable, aucun terminal ;
 // un container arrêté, un exec en échec ou hors délai vaut `unknown`, comme un
@@ -63,14 +54,11 @@ export type HeldMission = Omit<MissionSpec, "instruction" | "files">;
 // `blocked` : l'agent attend une réponse à son écran ; l'orchestrateur le signale.
 export type SessionState = "none" | "idle" | "working" | "done" | "blocked" | "exited" | "lost" | "unknown";
 
-// `question` : l'id de l'évènement `ask` dont l'exécuteur attend la réponse.
-export type ExecutorStatus = { name: string; mission: HeldMission | null; session: SessionState; question: number | null };
+export type ExecutorStatus = { name: string; mission: HeldMission | null; session: SessionState };
 
-// `wip` : un travail en cours rendu (la question attend l'humain) ; `report` :
-// le compte rendu final de l'agent, tel quel.
+// `report` : le compte rendu final de l'agent, tel quel.
 export type DoneEvent = {
-  id: number; kind: "done"; executor: string; ticket: string; subtask: string; branch: string;
-  wip: boolean; report: string | null;
+  id: number; kind: "done"; executor: string; ticket: string; subtask: string; branch: string; report: string | null;
 };
 export type AskEvent = { id: number; kind: "ask"; executor: string; ticket: string; subtask: string; text: string };
 export type HostEvent = DoneEvent | AskEvent;
@@ -80,8 +68,6 @@ export interface HostApi {
   assign(to: string, mission: MissionSpec): Promise<void>;
   release(to: string): Promise<void>;
   events(after: number): Promise<{ events: HostEvent[]; last: number }>;
-  answer(to: string, a: { question: number; kind: "answer" | "needs-human"; text: string }): Promise<{ delivered: boolean }>;
-  session(a: { question: number; instruction: string }): Promise<void>;
 }
 
 export class HostError extends Error {}
@@ -114,12 +100,11 @@ function parseExecutors(v: unknown): ExecutorStatus[] {
   if (!Array.isArray(v)) throw new Error("executors n'est pas un tableau");
   return v.map((e) => {
     if (
-      !exact(e, ["name", "mission", "session", "question"]) || !isStr(e.name) || !isStr(e.session) ||
-      !SESSIONS.includes(e.session) || !(e.question === null || isId(e.question))
+      !exact(e, ["name", "mission", "session"]) || !isStr(e.name) || !isStr(e.session) || !SESSIONS.includes(e.session)
     ) {
       throw new Error("exécuteur invalide");
     }
-    return { name: e.name, mission: parseHeld(e.mission), session: e.session as SessionState, question: e.question as number | null };
+    return { name: e.name, mission: parseHeld(e.mission), session: e.session as SessionState };
   });
 }
 
@@ -132,10 +117,10 @@ function parseEvent(e: unknown): HostEvent {
     return { ...base, kind: "ask", text: e.text };
   }
   if (
-    e.kind === "done" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch", "wip", "report"]) &&
-    isStr(e.branch) && typeof e.wip === "boolean" && (e.report === null || isStr(e.report))
+    e.kind === "done" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch", "report"]) &&
+    isStr(e.branch) && (e.report === null || isStr(e.report))
   ) {
-    return { ...base, kind: "done", branch: e.branch, wip: e.wip, report: e.report as string | null };
+    return { ...base, kind: "done", branch: e.branch, report: e.report as string | null };
   }
   throw new Error("évènement invalide");
 }
@@ -200,8 +185,7 @@ export function socketHost(path: string, opts: { timeoutMs?: number; assignTimeo
   const assignTimeoutMs = opts.assignTimeoutMs ?? 120_000;
   // Valide la réponse ; toute erreur de forme devient une HostError nommant l'op.
   const run = async <T>(request: Obj, pick: (r: Obj) => T): Promise<T> => {
-    const long = request.op === "assign" || request.op === "session";
-    const reply = await call(path, long ? assignTimeoutMs : timeoutMs, request);
+    const reply = await call(path, request.op === "assign" ? assignTimeoutMs : timeoutMs, request);
     try {
       return pick(reply);
     } catch (e) {
@@ -213,11 +197,5 @@ export function socketHost(path: string, opts: { timeoutMs?: number; assignTimeo
     assign: (to, mission) => run({ op: "assign", to, mission }, () => undefined),
     release: (to) => run({ op: "release", to }, () => undefined),
     events: (after) => run({ op: "events", after }, parseEvents),
-    answer: (to, a) =>
-      run({ op: "answer", to, question: a.question, kind: a.kind, text: a.text }, (r) => {
-        if (!exact(r, ["ok", "delivered"]) || typeof r.delivered !== "boolean") throw new Error("réponse answer invalide");
-        return { delivered: r.delivered };
-      }),
-    session: (a) => run({ op: "session", question: a.question, instruction: a.instruction }, () => undefined),
   };
 }

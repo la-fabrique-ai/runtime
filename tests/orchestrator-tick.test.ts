@@ -9,22 +9,9 @@ import { HostError } from "../cli/lib/orchestrator/host.ts";
 import type { ExecutorStatus, HostApi, HostEvent, MissionSpec, SessionState } from "../cli/lib/orchestrator/host.ts";
 import { fileCursor, SILENT_SESSION_MS, tick } from "../cli/lib/orchestrator/tick.ts";
 import type { Cursor } from "../cli/lib/orchestrator/tick.ts";
-import { giveVerdict, type Questions, type QuestionRecord } from "../cli/lib/orchestrator/questions.ts";
+// Un tour : les tests passent leurs dépendances telles quelles.
+const turn = tick;
 
-// Les questions en mémoire, comme fileQuestions sans le fichier.
-function memQuestions(): Questions {
-  let list: QuestionRecord[] = [];
-  return {
-    all: () => list.map((r) => ({ ...r })),
-    byToken: (t) => list.find((r) => r.token === t) ?? null,
-    put: (r) => void (list = [...list.filter((x) => x.question !== r.question), { ...r }]),
-    remove: (q) => void (list = list.filter((x) => x.question !== q)),
-  };
-}
-type Deps = Parameters<typeof tick>[0];
-const turn = (d: Omit<Deps, "questions"> & { questions?: Questions }) => tick({ questions: memQuestions(), ...d });
-
-// Un hôte en mémoire : des exécuteurs, une liste d'évènements, les appels reçus.
 class FakeHost implements HostApi {
   executors: ExecutorStatus[];
   events_: HostEvent[] = [];
@@ -38,7 +25,7 @@ class FakeHost implements HostApi {
   // Le plus grand id du journal ; `null` : celui du dernier évènement.
   last: number | null = null;
   constructor(names: string[]) {
-    this.executors = names.map((name) => ({ name, mission: null, session: "none" as SessionState, question: null as number | null }));
+    this.executors = names.map((name) => ({ name, mission: null, session: "none" as SessionState }));
   }
   async status(): Promise<ExecutorStatus[]> {
     this.calls.push("status");
@@ -62,7 +49,6 @@ class FakeHost implements HostApi {
     const e = this.executors.find((x) => x.name === to)!;
     e.mission = null;
     e.session = "idle";
-    e.question = null;
   }
   async events(after: number): Promise<{ events: HostEvent[]; last: number }> {
     this.calls.push(`events ${after}`);
@@ -70,33 +56,14 @@ class FakeHost implements HostApi {
     return { events: this.events_.filter((e) => e.id > after), last: this.last ?? this.events_.at(-1)?.id ?? 0 };
   }
   // Ce que fait l'agent : il finit sa mission, l'hôte émet `done`.
-  finish(name: string, o: { wip?: boolean; report?: string } = {}): void {
+  finish(name: string, o: { report?: string } = {}): void {
     const e = this.executors.find((x) => x.name === name)!;
     const m = e.mission!;
     e.session = "done";
     this.events_.push({
       id: this.events_.length + 1, kind: "done", executor: name, ticket: m.ticket, subtask: m.subtask, branch: m.branch,
-      wip: o.wip ?? false, report: o.report ?? null,
+      report: o.report ?? null,
     });
-  }
-  // L'agent pose une question : l'hôte l'écrit au journal et la montre dans status.
-  ask(name: string, text: string): number {
-    const e = this.executors.find((x) => x.name === name)!;
-    const id = this.events_.length + 1;
-    this.events_.push({ id, kind: "ask", executor: name, ticket: e.mission!.ticket, subtask: e.mission!.subtask, text });
-    e.question = id;
-    return id;
-  }
-  sessions: { question: number; instruction: string }[] = [];
-  async answer(to: string, a: { question: number }): Promise<{ delivered: boolean }> {
-    this.calls.push(`answer ${to} ${a.question}`);
-    const e = this.executors.find((x) => x.name === to)!;
-    const delivered = e.question === a.question;
-    if (delivered) e.question = null;
-    return { delivered };
-  }
-  async session(a: { question: number; instruction: string }): Promise<void> {
-    this.sessions.push(a);
   }
 }
 
@@ -441,49 +408,6 @@ test("fileCursor : un rename en échec ne laisse pas de temporaire", () => {
   assert.deepEqual(readdirSync(dir), ["cursor"]);
 });
 
-// Une question de T-2.1 (exécuteur a) partie à l'humain : la demande est ouverte.
-async function escalated(): Promise<{ tickets: Connector; host: FakeHost; cursor: Cursor & { value: number }; questions: Questions }> {
-  const { tickets } = await setup();
-  const host = new FakeHost(["a", "b", "c"]);
-  const cursor = memCursor();
-  const questions = memQuestions();
-  await turn({ tickets, host, cursor, questions, now: () => 0 });
-  host.ask("a", "Which limit?");
-  await turn({ tickets, host, cursor, questions, now: () => 0 });
-  giveVerdict(questions, questions.all()[0].token, { kind: "needs-human", text: "The spec says nothing.", recommended: null });
-  await turn({ tickets, host, cursor, questions, now: () => 0 });
-  return { tickets, host, cursor, questions };
-}
-
-test("Review Focus 3 : un ticket dont une demande attend n'a pas de mission ; répondue, puis le done --wip, il repart avec la réponse", async () => {
-  const { tickets, host, cursor, questions } = await escalated();
-  assert.equal((await tickets.listRequests({ ticket: "T-2", open: true })).length, 1);
-  // a rend son travail en cours : T-2.1 revient ready, mais le ticket attend.
-  host.finish("a", { wip: true });
-  let r = await turn({ tickets, host, cursor, questions, now: () => 1000 });
-  assert.equal(await status(tickets, "T-2.1"), "ready");
-  assert.ok(!r.assigned.some((x) => x.subtask.startsWith("T-2.")), JSON.stringify(r.assigned));
-  // L'humain répond : le tour suivant relance T-2.1, l'instruction porte la réponse.
-  const [req] = await tickets.listRequests({ ticket: "T-2", open: true });
-  await tickets.answerRequest({ ticket: "T-2", id: req.id, text: "100 per page" });
-  r = await turn({ tickets, host, cursor, questions, now: () => 2000 });
-  assert.deepEqual(r.assigned.map((x) => x.subtask), ["T-2.1"]);
-  const m = host.assigned.at(-1)!.mission;
-  assert.ok(m.instruction.includes("Which limit?") && m.instruction.includes("100 per page"));
-});
-
-test("Review Focus 3 bis : l'humain répond avant le done --wip ; rien n'attend indéfiniment", async () => {
-  const { tickets, host, cursor, questions } = await escalated();
-  const [req] = await tickets.listRequests({ ticket: "T-2", open: true });
-  await tickets.answerRequest({ ticket: "T-2", id: req.id, text: "100 per page" });
-  let r = await turn({ tickets, host, cursor, questions, now: () => 1000 });
-  assert.ok(!r.assigned.some((x) => x.subtask === "T-2.1"));
-  host.finish("a", { wip: true });
-  r = await turn({ tickets, host, cursor, questions, now: () => 2000 });
-  assert.ok(r.assigned.some((x) => x.subtask === "T-2.1"), JSON.stringify(r));
-  assert.ok(host.assigned.at(-1)!.mission.instruction.includes("100 per page"));
-});
-
 test("un done avec compte rendu laisse un commentaire note de l'exécuteur sur le ticket", async () => {
   const { tickets } = await setup();
   const host = new FakeHost(["a"]);
@@ -495,33 +419,16 @@ test("un done avec compte rendu laisse un commentaire note de l'exécuteur sur l
   assert.deepEqual(comments.map((c) => [c.author, c.kind, c.text]), [["a", "note", "Did x; checked y."]]);
 });
 
-test("un done --wip remet la sous-tâche ready et libère ; relu pendant qu'un autre la tient, il ne change rien", async () => {
+test("une session perdue sur un ticket qui attend l'humain : libérée, pas relancée", async () => {
   const { tickets } = await setup();
   const host = new FakeHost(["a", "b", "c"]);
   const cursor = memCursor();
   await turn({ tickets, host, cursor });
-  host.finish("a", { wip: true });
-  await turn({ tickets, host, cursor });
-  assert.ok(host.calls.includes("release a"));
-  // T-2.1 est reparti dans le même tour ; on le donne à c, un autre exécuteur.
-  const [ea, ec] = [host.executors.find((e) => e.name === "a")!, host.executors.find((e) => e.name === "c")!];
-  if (ea.mission?.subtask === "T-2.1") [ec.mission, ec.session, ea.mission] = [ea.mission, "working", null];
-  const holder = host.executors.find((e) => e.mission?.subtask === "T-2.1")!;
-  assert.equal(holder.name, "c");
-  assert.equal(await status(tickets, "T-2.1"), "in-dev");
-  host.calls = [];
-  cursor.value = 0;
-  await turn({ tickets, host, cursor });
-  assert.equal(await status(tickets, "T-2.1"), "in-dev");
-  assert.equal(host.executors.find((e) => e.mission?.subtask === "T-2.1")!.name, holder.name);
-  assert.ok(!host.calls.some((c) => c.startsWith("release")), host.calls.join(","));
-});
-
-test("une session perdue sur un ticket qui attend l'humain : libérée, pas relancée", async () => {
-  const { tickets, host, cursor, questions } = await escalated();
+  // T-2.1 sur a ; une demande de T-2 attend l'humain.
+  await tickets.openRequest({ ticket: "T-2", subtask: "T-2.1", text: "Which limit?" });
   host.executors.find((e) => e.name === "a")!.session = "lost";
   host.calls = [];
-  await turn({ tickets, host, cursor, questions, now: () => 1000 });
+  await turn({ tickets, host, cursor });
   assert.ok(host.calls.includes("release a"));
   assert.ok(!host.calls.some((c) => c.startsWith("assign") && c.includes("T-2.")), host.calls.join(","));
   assert.equal(await status(tickets, "T-2.1"), "ready");

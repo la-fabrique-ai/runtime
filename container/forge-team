@@ -10,10 +10,8 @@
 // fichiers de mission et leur pile, répondre (voir CONTROL_USAGE). Ailleurs,
 // celles d'un exécuteur, vers l'API de l'hôte :
 //
-//   forge-team ask                      une question précise (sur stdin) ; la réponse arrive dans ton terminal
-//   forge-team done [--wip] [--report-file <fichier>]
-//                                       ta mission est faite et commitée (--wip : un travail en cours
-//                                       rendu, la question attend l'humain) ; le compte rendu est gardé
+//   forge-team done [--report-file <fichier>]
+//                                       ta mission est faite et commitée ; le compte rendu est gardé
 //   forge-team status                   la mission que tu tiens, ou aucune
 //
 // Sorties : 0 accepté ; 1 refusé (la raison sur stderr) ; 2 socket injoignable ;
@@ -26,8 +24,7 @@ const API_SOCKET = process.env.FORGE_API_SOCKET || "/var/lib/forge/api.sock";
 const CHANNEL_SOCKET = process.env.FORGE_CHANNEL_SOCKET || "/run/forge-orch/channel.sock";
 const CONTROL = fs.existsSync(CHANNEL_SOCKET);
 const SOCKET = CONTROL ? CHANNEL_SOCKET : API_SOCKET;
-const EXECUTOR_USAGE = `usage: forge-team ask                (the question on stdin)
-       forge-team done [--wip] [--report-file <file>]
+const EXECUTOR_USAGE = `usage: forge-team done [--report-file <file>]
        forge-team status`;
 const CONTROL_USAGE = `usage: forge-team tickets [<status>…]
        forge-team ticket <id>
@@ -37,9 +34,7 @@ const CONTROL_USAGE = `usage: forge-team tickets [<status>…]
        forge-team write-mission <id> <spec|answers|split>   (the text on stdin)
        forge-team create-stack <id>                         (a JSON array of {repository, text} on stdin)
        forge-team answer-request <id> <n>                   (the answer on stdin)
-       forge-team comment <id>                              (the text on stdin)
-       forge-team answer <token>                            (the answer on stdin)
-       forge-team escalate <token> [--recommended-file <file>]  (what is missing on stdin)`;
+       forge-team comment <id>                              (the text on stdin)`;
 const USAGE = CONTROL ? CONTROL_USAGE : EXECUTOR_USAGE;
 
 function usage(message) {
@@ -99,15 +94,6 @@ function controlRequest(command, args) {
     case "comment":
       exactly(1, "a ticket id");
       return { op: "comment", id: args[0], text: readStdin("text") };
-    case "answer":
-      exactly(1, "a token");
-      return { op: "answer", token: args[0], text: readStdin("answer") };
-    case "escalate": {
-      let recommended = null;
-      if (args.length === 3 && args[1] === "--recommended-file") recommended = readFile(args[2], "recommended answer file");
-      else exactly(1, "a token, then --recommended-file <file> if you have an answer to recommend");
-      return { op: "escalate", token: args[0], text: readStdin("text"), recommended };
-    }
     default:
       usage(command === undefined ? "a command is required" : `unknown command ${command}`);
   }
@@ -134,22 +120,16 @@ function request() {
     case "status":
       if (args.length > 0) usage("status takes no argument");
       return { op: "status" };
-    case "ask":
-      if (args.length > 0) usage("ask takes no argument: the question is read from stdin");
-      return { op: "ask", text: readStdin("question") };
     case "done": {
-      let wip = false;
       let report = null;
       for (let i = 0; i < args.length; i++) {
-        if (args[i] === "--wip" && !wip) {
-          wip = true;
-        } else if (args[i] === "--report-file" && report === null && args[i + 1] !== undefined) {
+        if (args[i] === "--report-file" && report === null && args[i + 1] !== undefined) {
           report = readFile(args[++i], "report file");
         } else {
           usage(`done: unexpected argument ${args[i]}`);
         }
       }
-      return { op: "done", wip, report };
+      return { op: "done", report };
     }
     default:
       usage(command === undefined ? "a command is required" : `unknown command ${command}`);
@@ -270,9 +250,6 @@ function printControl(req, reply) {
     for (const e of reply.executors) {
       process.stdout.write(`${e.name} session=${e.session} mission=${e.mission === null ? "none" : e.mission.subtask}\n`);
     }
-  } else if (req.op === "ask") {
-    process.stdout.write(`ok ${reply.id}\nyour question is recorded: go on with what does not depend on it; ` +
-      "the answer arrives in this terminal\n");
   } else {
     process.stdout.write(`ok${typeof reply.id === "number" ? ` ${reply.id}` : ""}\n`);
   }

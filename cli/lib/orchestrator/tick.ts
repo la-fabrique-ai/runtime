@@ -12,8 +12,6 @@ import type { DoneEvent, ExecutorStatus, HeldMission, HostApi, MissionSpec } fro
 import { candidates, missionBase, RuleError } from "./rule.ts";
 import type { Candidate } from "./rule.ts";
 import { devInstruction, missionFiles } from "./instruction.ts";
-import { stepQuestions } from "./questions.ts";
-import type { Questions } from "./questions.ts";
 
 export type Cursor = { read(): number; write(id: number): void };
 
@@ -83,7 +81,7 @@ const REFUSALS_PER_EXECUTOR = 2;
 export const SILENT_SESSION_MS = 2 * 60_000;
 
 type TickDeps = {
-  tickets: Connector; host: HostApi; cursor: Cursor; questions: Questions;
+  tickets: Connector; host: HostApi; cursor: Cursor;
   refusals?: Map<string, number>; silent?: Map<string, number>; now?: () => number;
 };
 
@@ -151,8 +149,6 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
     }
   }
 
-  // Les questions : sessions, verdicts, livraisons (questions.ts).
-  await stepQuestions({ tickets, host, questions: d.questions, now }, executors, picture, report.problems);
   // Un ticket dont une demande attend l'humain ne reçoit aucune mission, et sa
   // mission perdue n'est pas relancée : la sous-tâche attend la réponse.
   const waiting = new Set(picture.filter((p) => p.requests.some((r) => r.answer === null)).map((p) => p.ticket.id));
@@ -286,18 +282,6 @@ async function onDone(tickets: Connector, host: HostApi, ev: DoneEvent, report: 
   if (s.status === "done") return;
   const holder = (await host.status()).find((e) => e.name === ev.executor);
   const holds = holder?.mission?.subtask === s.id;
-  if (ev.wip) {
-    // Un travail en cours rendu (la question attend l'humain) : la sous-tâche
-    // revient `ready`, sans lien. Relu (curseur perdu) alors qu'un autre
-    // exécuteur la tient, il ne change rien.
-    if (s.status !== "in-dev" && !(s.status === "ready" && holds)) return;
-    // Tenue par un autre exécuteur (le même évènement relu) : on n'y touche pas.
-    if (!holds && (await host.status()).some((e) => e.mission?.subtask === s.id)) return;
-    if (ev.report !== null) await tickets.addComment({ ticket: ev.ticket, author: ev.executor, kind: "note", text: ev.report });
-    if (holds) await host.release(ev.executor);
-    if (s.status !== "ready") await tickets.setSubtaskStatus({ id: s.id, status: "ready" });
-    return;
-  }
   // `ready` mais tenue par l'émetteur : un assign accepté dont la réponse s'est perdue.
   if (s.status !== "in-dev" && !(s.status === "ready" && holds)) {
     return void report.problems.push(`${ev.ticket}: event ${ev.id}: ${s.id} is ${s.status}, not in-dev; ignored`);

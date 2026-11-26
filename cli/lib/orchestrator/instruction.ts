@@ -1,8 +1,7 @@
-// Les instructions envoyées aux agents : celle d'une mission dev, celle d'une
-// session de question. Le texte libre (ticket, sous-tâche, question, réponse,
-// fichier de mission) est copié tel quel : c'est de la donnée, jamais
-// interprétée ici.
-import type { Mission, Request, Subtask, Ticket } from "../tickets/model.ts";
+// L'instruction d'une mission dev, envoyée à l'agent. Le texte libre (ticket,
+// sous-tâche, question, réponse, fichier de mission) est copié tel quel : c'est
+// de la donnée, jamais interprétée ici.
+import type { Mission, Request } from "../tickets/model.ts";
 import type { MissionFiles } from "./host.ts";
 import type { Candidate } from "./rule.ts";
 
@@ -103,37 +102,5 @@ export function devInstruction(
   fit(parts, ["description"], render, marker);
   while (bytes(render(parts)) > MAX_BYTES && dropped < blocks.length) dropped++;
   fit(parts, ["text", "title"], render, marker);
-  return render(parts);
-}
-
-export function questionInstruction(
-  q: { question: number; token: string; text: string },
-  c: { ticket: Ticket; subtask: Subtask },
-): string {
-  const { ticket, subtask } = c;
-  const marker = `[cut: read the ticket ${ticket.id} in full]`;
-  type Parts = { question: string; text: string };
-  const render = ({ question, text }: Parts): string =>
-    [
-      `[forge] question ${q.question} on ${subtask.id} (ticket ${ticket.id})`,
-      "",
-      "You answer one question of a developer, from the ticket's spec and the code, and nothing else. " +
-        `Read the ticket with forge-team ticket ${ticket.id} and its mission files with ` +
-        `forge-team mission ${ticket.id} spec (then answers, split). ` +
-        "The repositories are under /workspace, to read only. " +
-        `If the spec or the code settles the question, run: forge-team answer ${q.token} (your answer on stdin). ` +
-        `If it does not, never guess: run forge-team escalate ${q.token} ` +
-        "(what is missing on stdin; --recommended-file <file> for the answer you would give). " +
-        "Run exactly one of the two, once, then stop.",
-      "",
-      "## Question",
-      question,
-      "",
-      "## Sub-task",
-      text,
-      "",
-    ].join("\n");
-  const parts: Parts = { question: q.text, text: subtask.text };
-  fit(parts, ["text", "question"], render, marker);
   return render(parts);
 }

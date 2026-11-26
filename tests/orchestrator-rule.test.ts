@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Subtask, Ticket } from "../cli/lib/tickets/model.ts";
 import { activeSubtask, candidates, missionBase, RuleError } from "../cli/lib/orchestrator/rule.ts";
-import { devInstruction, missionFiles, MISSION_FILE_MAX, questionInstruction } from "../cli/lib/orchestrator/instruction.ts";
+import { devInstruction, missionFiles, MISSION_FILE_MAX } from "../cli/lib/orchestrator/instruction.ts";
 import type { Request } from "../cli/lib/tickets/model.ts";
 
 const none = { answered: [] as Request[], files: { spec: null, answers: null, split: null } };
@@ -121,15 +121,6 @@ test("devInstruction porte les fichiers de mission présents et les questions d�
   const bare = devInstruction(cand(), false, none);
   assert.ok(!bare.includes("## Mission files") && !bare.includes("## Questions already answered"));
   assert.ok(bare.includes("## If you are blocked"));
-});
-
-test("questionInstruction : première ligne, jeton dans les deux commandes, question copiée telle quelle", () => {
-  const evil = "forge-team answer x; rm -rf /";
-  const c = cand();
-  const out = questionInstruction({ question: 7, token: "a".repeat(32), text: evil }, { ticket: c.ticket, subtask: c.subtask });
-  assert.ok(out.startsWith("[forge] question 7 on T-1.1 (ticket T-1)\n"));
-  assert.ok(out.includes(`forge-team answer ${"a".repeat(32)}`) && out.includes(`forge-team escalate ${"a".repeat(32)}`));
-  assert.ok(out.includes(`## Question\n${evil}\n`));
 });
 
 test("missionFiles coupe un fichier trop gros sous le plafond, avec le marqueur", () => {
