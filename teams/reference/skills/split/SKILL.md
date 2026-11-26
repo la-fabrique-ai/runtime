@@ -1,18 +1,18 @@
 ---
 name: split
-description: "À utiliser une fois la spec d'un ticket approuvée par l'humain : proposer la pile de sous-tâches, puis la créer après son accord."
+description: "Use once the human has approved a ticket's spec: propose the stack of sub-tasks, then create it after their approval."
 ---
 
-# Découper un ticket en pile
+# Split a ticket into a stack
 
-Tu proposes à l'humain la pile de sous-tâches du ticket, puis tu la crées une fois qu'il est d'accord. Les développeurs la prennent ensuite, une sous-tâche à la fois, dans l'ordre.
+You propose the ticket's stack of sub-tasks to the human, then create it once they agree. Developers then take it one sub-task at a time, in order.
 
-1. Relis la spec (`forge-team mission <id> spec`) et les dépôts du ticket (`forge-team ticket <id>`).
-2. Propose la pile : une sous-tâche par pull request qu'un humain relit d'une traite, chacune posée sur celles d'en dessous, dans l'ordre où elles se construisent. Pour chacune : le dépôt (un de ceux du ticket) et le texte, qui dit ce qu'elle fait et comment on sait qu'elle est finie.
-3. Écris la proposition dans `split` : `forge-team write-mission <id> split` (le texte sur stdin), et montre-la à l'humain.
-4. Ajuste avec lui jusqu'à son accord explicite. Le silence n'est pas un accord.
-5. Une fois d'accord, crée la pile : `forge-team create-stack <id>`, avec sur stdin le tableau JSON, dans l'ordre, par exemple `[{"repository": "web", "text": "…"}, {"repository": "api", "text": "…"}]`. Si la commande est interrompue, relance-la avec la même liste : elle crée les sous-tâches qui manquent.
-6. Dis à l'humain que le ticket est en développement, et comment le suivre : `forge team status` depuis sa machine, ou en te demandant où on en est.
-7. Note le ticket et sa pile dans `/workspace/notes.md`.
+1. Read the spec again (`forge-team mission <id> spec`) and the ticket's repositories (`forge-team ticket <id>`).
+2. Propose the stack: one sub-task per pull request a human reviews in one sitting, each standing on the ones below, in the order they are built. For each: its repository (one of the ticket's) and its text, which says what it does and how one knows it is finished.
+3. Write the proposal to `split`: `forge-team write-mission <id> split` (the text on stdin), and show it to the human.
+4. Adjust it with them until they explicitly agree. Silence is not approval.
+5. Once they agree, create the stack: `forge-team create-stack <id>`, with the JSON array on stdin, in order, for example `[{"repository": "web", "text": "…"}, {"repository": "api", "text": "…"}]`. If the command is interrupted, run it again with the same list: it creates the missing sub-tasks.
+6. Tell the human the ticket is in development, and how to follow it: `forge team status` from their machine, or by asking you where things stand.
+7. Record the ticket and its stack in `/workspace/notes.md`.
 
-Jamais : créer la pile avant l'accord de l'humain, changer la pile d'un ticket déjà en développement, mettre dans une sous-tâche ce que la spec n'a pas décidé.
+Never: create the stack before the human agreed, change the stack of a ticket already in development, or put in a sub-task what the spec did not decide.

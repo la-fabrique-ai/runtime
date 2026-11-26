@@ -1,21 +1,21 @@
 ---
 name: design
-description: "À utiliser quand l'humain ouvre un ticket avec toi (une ligne `[forge] ticket <id>`) : écrire avec lui la spec du ticket, avant tout découpage."
+description: "Use when the human opens a ticket with you (a line `[forge] ticket <id>`): write the ticket's spec with them, before any split."
 ---
 
-# Écrire la spec d'un ticket avec l'humain
+# Write a ticket's spec with the human
 
-Tu transformes la demande d'un ticket en une spec qu'un développeur peut suivre sans te demander. Tu n'écris ni plan ni code.
+You turn a ticket's request into a spec a developer can follow without asking you. You never write a plan or code.
 
-1. Lis le ticket : `forge-team ticket <id>`, et ses fichiers de mission s'il en a déjà (`forge-team mission <id> spec`, puis `answers`, `split`).
-2. Fais explorer le code par des sous-agents `scout`, une question précise chacun. Ne lis pas toi-même beaucoup de fichiers : garde le résultat, pas l'exploration.
-3. Reformule la demande avec tes mots. Si le pourquoi manque, demande-le.
-4. Pose tes questions à l'humain **par tours**, quelques-unes à la fois, chacune avec la réponse que tu proposes. Ne pose que celles dont la réponse change ce qui sera construit ; le reste, décide-le et note-le.
-5. Écris les réponses de l'humain, dans ses mots, dans `answers` : `forge-team write-mission <id> answers` (le texte sur stdin), à chaque tour.
-6. Écris la spec dans `spec` : `forge-team write-mission <id> spec`. Elle dit l'intention, les objectifs et les non-objectifs, les choix faits et pourquoi, ce qui reste au développeur.
-7. Dis à l'humain où la relire : `forge-team mission <id> spec`. Demande-lui son accord explicite sur la spec.
-8. Une fois la spec approuvée, passe au skill `split`.
+1. Read the ticket: `forge-team ticket <id>`, and its mission files if it has some already (`forge-team mission <id> spec`, then `answers`, `split`).
+2. Get facts from `scout` sub-agents, one precise question each, in the clones under `/workspace/<repository>`. Never read many files yourself: keep the result, not the exploration.
+3. Restate the request in your own words. If the why is unknown, ask for it.
+4. Ask the human your questions **in rounds**, a few at a time, each with the answer you propose. Ask only those whose answer changes what gets built; decide the rest and note it.
+5. Write the human's answers, in their words, to `answers`: `forge-team write-mission <id> answers` (the text on stdin), at each round.
+6. Write the spec to `spec`: `forge-team write-mission <id> spec`. It says the intent, the goals and non-goals, the choices made and why, and what is left to the developer. A developer's doubt is settled from it by a sub-agent: write the decisions down, not only the outcome.
+7. Tell the human where to read it back: `forge-team mission <id> spec`. Ask for their explicit approval of the spec.
+8. Once the spec is approved, go on with the skill `split`.
 
-Dis à l'humain : ce qui a été décidé, ce qui reste ouvert, où lire la spec.
+Tell the human: what was decided, what stays open, where to read the spec.
 
-Jamais : écrire la spec dans un dépôt, découper avant l'accord de l'humain sur la spec, décider seul une question que l'humain doit trancher.
+Never: write the spec in a repository, split before the human approved the spec, or decide alone a question the human should answer.
