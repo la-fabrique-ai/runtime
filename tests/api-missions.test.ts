@@ -646,3 +646,43 @@ test("the first assign of a fresh executor creates /home/aiuser/.forge as aiuser
   const mk = calls.findIndex((c) => c.endsWith(`-- mkdir -m 755 -- ${MISSION_FILES_DIR}`));
   assert.ok(parent >= 0 && mk > parent, calls.join("\n"));
 });
+
+// --------------------------------------------------------------- ask : une question pour l'humain (décision 35)
+
+test("ask with nothing committed is accepted and copies nothing; its event carries the question and the recommended answer", async () => {
+  hold(E1, held());
+  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "0\n" }]);
+  const r = await call(E1, { op: "ask", text: "Which limit?", recommended: "100 per page" }) as unknown as { ok: boolean; id: number };
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(!mirrorFetch());
+  const ev = await call(CONTROL, { op: "events", after: 0 });
+  assert.deepEqual(ev, { ok: true, events: [{
+    id: r.id, kind: "ask", executor: E1, ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: "100 per page",
+  }], last: r.id });
+  // L'hôte ne libère pas : c'est l'orchestrateur qui le fait.
+  assert.deepEqual(JSON.parse(keys(E1)[MISSION_KEY]), held());
+});
+
+test("ask with commits copies the branch to the team mirror; recommended is optional (null)", async () => {
+  hold(E1, held());
+  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "2\n" }]);
+  assert.equal((await call(E1, { op: "ask", text: "Which limit?" })).ok, true);
+  assert.ok(mirrorFetch());
+  const ev = await call(CONTROL, { op: "events", after: 0 }) as unknown as { events: { recommended: string | null }[] };
+  assert.equal(ev.events[0].recommended, null);
+});
+
+test("ask on a dirty clone, without a mission, from the control, or holding a secret: refused, nothing journaled as ok", async () => {
+  hold(E1, held());
+  setup([{ match: "/workspace/web -c core.fsmonitor=false", stdout: " M a.ts\n" }]);
+  const dirty = await call(E1, { op: "ask", text: "q" });
+  assert.equal(dirty.ok, false);
+  assert.match((dirty as { error: string }).error, /uncommitted changes: commit or discard them, then ask again/);
+  setup();
+  assert.deepEqual(await call(E2, { op: "ask", text: "q" }), { ok: false, error: `${E2} holds no mission: there is nothing to ask about` });
+  assert.deepEqual(await call(CONTROL, { op: "ask", text: "q" }), { ok: false, error: "ask is not a verb of the control container" });
+  const secret = await call(E1, { op: "ask", text: "q", recommended: "use tok-123" });
+  assert.equal(secret.ok, false);
+  assert.ok(!readFileSync(join(home, "api", "journal.jsonl"), "utf8").includes("tok-123"));
+  assert.ok(d.journal.entries().every((e) => e.outcome === "refused"));
+});

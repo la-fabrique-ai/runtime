@@ -12,6 +12,9 @@
 //
 //   forge-team done [--report-file <fichier>]
 //                                       ta mission est faite et commitée ; le compte rendu est gardé
+//   forge-team ask [--recommended-file <fichier>]
+//                                       une question pour l'humain (sur stdin) : ton travail en cours,
+//                                       commité, est rendu, et ce container va être libéré
 //   forge-team status                   la mission que tu tiens, ou aucune
 //
 // Sorties : 0 accepté ; 1 refusé (la raison sur stderr) ; 2 socket injoignable ;
@@ -25,6 +28,7 @@ const CHANNEL_SOCKET = process.env.FORGE_CHANNEL_SOCKET || "/run/forge-orch/chan
 const CONTROL = fs.existsSync(CHANNEL_SOCKET);
 const SOCKET = CONTROL ? CHANNEL_SOCKET : API_SOCKET;
 const EXECUTOR_USAGE = `usage: forge-team done [--report-file <file>]
+       forge-team ask [--recommended-file <file>]   (the question for the human on stdin)
        forge-team status`;
 const CONTROL_USAGE = `usage: forge-team tickets [<status>…]
        forge-team ticket <id>
@@ -120,6 +124,15 @@ function request() {
     case "status":
       if (args.length > 0) usage("status takes no argument");
       return { op: "status" };
+    case "ask": {
+      let recommended = null;
+      if (args.length === 2 && args[0] === "--recommended-file") {
+        recommended = readFile(args[1], "recommended answer file").replace(/\n+$/, "");
+      } else if (args.length > 0) {
+        usage("ask takes only --recommended-file <file>: the question is read from stdin");
+      }
+      return { op: "ask", text: readStdin("question"), recommended };
+    }
     case "done": {
       let report = null;
       for (let i = 0; i < args.length; i++) {
@@ -250,6 +263,9 @@ function printControl(req, reply) {
     for (const e of reply.executors) {
       process.stdout.write(`${e.name} session=${e.session} mission=${e.mission === null ? "none" : e.mission.subtask}\n`);
     }
+  } else if (req.op === "ask") {
+    process.stdout.write(`ok ${reply.id}\nyour question goes to the human, with your work in progress: ` +
+      "this container is about to be released; the sub-task resumes later, with the answer\n");
   } else {
     process.stdout.write(`ok${typeof reply.id === "number" ? ` ${reply.id}` : ""}\n`);
   }

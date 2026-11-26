@@ -92,10 +92,10 @@ test("a connection closed without an answer says the request may have gone throu
 });
 
 test("any other verb, or a bad argument, prints the usage and exits 64, without a request", async () => {
-  for (const args of [["message", "agent-x", "Salut"], ["assign", "x", "t"], ["release", "x"], ["ask", "Quoi ?"], ["bogus"], [], ["done", "extra"], ["status", "x"]]) {
+  for (const args of [["message", "agent-x", "Salut"], ["assign", "x", "t"], ["release", "x"], ["ask", "Quoi ?"], ["ask", "--recommended-file"], ["bogus"], [], ["done", "extra"], ["status", "x"]]) {
     const r = await run(args, "texte");
     assert.equal(r.code, 64, args.join(" "));
-    assert.match(r.stderr, /usage: forge-team done \[--report-file <file>\]\n\s+forge-team status/);
+    assert.match(r.stderr, /usage: forge-team done \[--report-file <file>\]\n\s+forge-team ask \[--recommended-file <file>\].*\n\s+forge-team status/);
   }
   assert.deepEqual(received, []);
   assert.equal(probes, 0);
@@ -143,4 +143,20 @@ test("with the channel's socket, done is a usage error; without it, tickets is",
   const tickets = await run(["tickets"], "");
   assert.equal(tickets.code, 64);
   assert.deepEqual(received, []);
+});
+
+test("ask sends stdin as the question and the file as recommended, trailing newlines removed; it says the container is about to be released", async () => {
+  const file = join(dir, "r.md");
+  writeFileSync(file, "100 per page\n\n");
+  const r = await run(["ask", "--recommended-file", file], "Which limit?\n");
+  assert.equal(received[0], JSON.stringify({ op: "ask", text: "Which limit?", recommended: "100 per page" }));
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /^ok 7\n.*goes to the human.*released/s);
+  await run(["ask"], "Which limit?");
+  assert.equal(received[1], JSON.stringify({ op: "ask", text: "Which limit?", recommended: null }));
+  const empty = await run(["ask"], "\n");
+  assert.equal(empty.code, 64);
+  const missing = await run(["ask", "--recommended-file", join(dir, "none.md")], "q");
+  assert.equal(missing.code, 64);
+  assert.equal(received.length, 2);
 });

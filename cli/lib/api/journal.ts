@@ -22,10 +22,12 @@ export type Entry = {
   id: number; time: string; caller: string; op: JournalOp | "notify" | null; to: string | null; task: string | null;
   outcome: "ok" | "refused"; error: string | null;
   summary: string | null; // l'avis de `forge notify`
-  text: string | null; // la consigne d'un assign, le compte rendu d'un done
+  text: string | null; // la consigne d'un assign, le compte rendu d'un done, la question d'un ask
   // La mission d'un `assign` ou d'un `done`, sans sa consigne : un `done`
   // accepté devient un évènement (`events`). Absente des autres lignes.
   mission?: HeldMission;
+  // La réponse recommandée d'un ask, quand le développeur en donne une.
+  recommended?: string;
 };
 
 export type NewEntry = Omit<Entry, "id" | "time">;

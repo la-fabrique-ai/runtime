@@ -55,7 +55,8 @@ export type MissionRequest =
   | { op: "assign"; to: string; mission: MissionSpec }
   | { op: "release"; to: string }
   | { op: "events"; after: number }
-  | { op: "done"; report: string | null };
+  | { op: "done"; report: string | null }
+  | { op: "ask"; text: string; recommended: string | null };
 
 type Kind = ProjectMember["kind"];
 export type MissionVerb = MissionRequest["op"];
@@ -63,11 +64,11 @@ export type MissionVerb = MissionRequest["op"];
 // Les verbes de chaque socket : un exécuteur ne confie rien, le contrôle ne finit rien.
 const VERBS: Record<Kind, readonly MissionVerb[]> = {
   control: ["status", "assign", "release", "events"],
-  executor: ["done", "status"],
+  executor: ["done", "status", "ask"],
 };
 // Les champs exacts de chaque verbe ; `op` est lu à part.
 const FIELDS: Record<MissionVerb, readonly string[]> = {
-  status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: ["report"],
+  status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: ["report"], ask: ["text", "recommended"],
 };
 const MISSION_FIELDS = ["kind", "ticket", "subtask", "repository", "branch", "base", "instruction"] as const;
 const HELD_FIELDS = MISSION_FIELDS.filter((k) => k !== "instruction");
@@ -221,6 +222,16 @@ export function parseMissionRequest(line: string, from: Kind, secrets: readonly 
       if (report !== null) checkText(report, INSTRUCTION_MAX, "report", secrets);
       return { op: "done", report };
     }
+    case "ask": {
+      const text = json.text;
+      if (typeof text !== "string") throw new ForgeError("ask: text must be a string");
+      checkText(text, INSTRUCTION_MAX, "question", secrets);
+      const raw = json.recommended ?? null;
+      if (raw !== null && typeof raw !== "string") throw new ForgeError("ask: recommended must be a string or null");
+      const recommended = raw === null || raw.trim() === "" ? null : raw;
+      if (recommended !== null) checkText(recommended, INSTRUCTION_MAX, "recommended answer", secrets);
+      return { op: "ask", text, recommended };
+    }
     default:
       return { op: "status" };
   }
@@ -288,8 +299,10 @@ function entryFields(caller: ProjectMember, req: MissionRequest | null, outcome:
     outcome, error, summary: null,
     text: req === null ? null
       : req.op === "assign" ? req.mission.instruction
-        : req.op === "done" ? req.report : null,
+        : req.op === "done" ? req.report
+          : req.op === "ask" ? req.text : null,
     ...(mission === undefined ? {} : { mission }),
+    ...(req?.op === "ask" && req.recommended !== null ? { recommended: req.recommended } : {}),
   };
 }
 
@@ -330,9 +343,10 @@ async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Prom
       }
     case "events":
       return events(d, req.after);
-    case "done": {
+    case "done":
+    case "ask": {
       const r = req;
-      return exclusive(() => withMissionLock(() => done(d, caller, r)));
+      return exclusive(() => withMissionLock(() => handBack(d, caller, r)));
     }
   }
 }
@@ -610,38 +624,47 @@ async function status(ctx: Context, p: ProjectConfig): Promise<ExecutorStatus[]>
   }));
 }
 
-// Les `done` acceptés d'id > after, par id croissant ; `last` est le plus
-// grand id du journal (0 s'il est vide), lu dans le même instant.
+// Les `done` et les `ask` acceptés d'id > after, par id croissant ; `last` est
+// le plus grand id du journal (0 s'il est vide), lu dans le même instant.
 function events(d: ApiDeps, after: number): Outcome {
   d.journal.refresh();
   const entries = d.journal.entries();
   const last = entries.reduce((max, e) => Math.max(max, e.id), 0);
   const list: HostEvent[] = entries
-    .filter((e) => e.op === "done" && e.outcome === "ok" && e.id > after && e.mission !== undefined)
+    .filter((e) => (e.op === "done" || e.op === "ask") && e.outcome === "ok" && e.id > after && e.mission !== undefined)
     .sort((a, b) => a.id - b.id)
-    .map((e): HostEvent => ({
-      id: e.id, kind: "done", executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask,
-      branch: e.mission!.branch, report: e.text ?? null,
-    }));
+    .map((e): HostEvent => {
+      const base = { id: e.id, executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask };
+      if (e.op === "ask") return { ...base, kind: "ask", text: e.text ?? "", recommended: e.recommended ?? null };
+      return { ...base, kind: "done", branch: e.mission!.branch, report: e.text ?? null };
+    });
   return { reply: () => ({ ok: true, events: list, last }), quiet: true };
 }
 
-// Une mission tenue, des clones sans changements suivis, au moins un commit
-// au-delà de sa base, la branche copiée dans le miroir d'équipe du dépôt ;
-// puis la ligne du journal, dont l'id est celui de l'évènement. Les clones
+// `done` et `ask` rendent la mission : une mission tenue, des clones sans
+// changements suivis, la branche copiée dans le miroir d'équipe du dépôt ;
+// puis la ligne du journal, dont l'id est celui de l'évènement. `done` exige
+// au moins un commit au-delà de la base ; `ask` (décision 35 : une question
+// pour l'humain, avec le travail en cours) l'accepte sans commit, et ne copie
+// alors rien. L'hôte ne libère pas l'exécuteur : l'orchestrateur le fait. Les clones
 // sont lus comme `status` les lit (tous, pas seulement celui de la mission) :
 // un done accepté sur un clone sale libérerait un exécuteur que `status` dit
 // ensuite `unknown`, et qui ne recevrait plus de mission.
-async function done(d: ApiDeps, caller: ProjectMember, req: { op: "done"; report: string | null }): Promise<Outcome> {
+async function handBack(
+  d: ApiDeps, caller: ProjectMember, req: { op: "done"; report: string | null } | { op: "ask"; text: string; recommended: string | null },
+): Promise<Outcome> {
   const { ctx } = d;
-  const m = readHeld(await configGet(ctx, caller.name, MISSION_KEY));
-  if (m === null) throw new ForgeError(`${caller.name} holds no mission: there is nothing to report done`);
+  const again = req.op === "done" ? "report done again" : "ask again";
+  const m = readHeld(await configGet(ctx, caller.name, MISSION_KEY, { timeoutMs: INCUS_MS }));
+  if (m === null) {
+    throw new ForgeError(`${caller.name} holds no mission: there is nothing to ${req.op === "done" ? "report done" : "ask about"}`);
+  }
   if (m === "unreadable") throw new ForgeError(`${caller.name}'s mission key is unreadable: ask for it to be released`);
   for (const c of await cloneStates(ctx, caller.name, requireProject(d))) {
     if (c.state === "dirty") {
-      throw new ForgeError(`${caller.name}: ${cloneDir(c.repository)} has uncommitted changes: commit or discard them, then report done again`);
+      throw new ForgeError(`${caller.name}: ${cloneDir(c.repository)} has uncommitted changes: commit or discard them, then ${again}`);
     }
-    if (c.state === "unreadable") throw new ForgeError(`${caller.name}: git status in ${cloneDir(c.repository)} did not answer: try done again`);
+    if (c.state === "unreadable") throw new ForgeError(`${caller.name}: git status in ${cloneDir(c.repository)} did not answer: try ${req.op} again`);
   }
   const git = gitIn(ctx, caller.name, m.repository);
   // La base, à jour dans le clone : `origin/<b>` après `git fetch origin`,
@@ -650,10 +673,9 @@ async function done(d: ApiDeps, caller: ProjectMember, req: { op: "done"; report
   await mustSucceed(stacked ? "git fetch team" : "git fetch origin", git(FETCH_MS, "fetch", stacked ? "team" : "origin"));
   const from = stacked ? `team/${m.base}` : m.base;
   const count = await mustSucceed("git rev-list", git(GIT_MS, "rev-list", "--count", `${from}..${m.branch}`));
-  if (!(Number.parseInt(count.stdout.trim(), 10) > 0)) {
-    throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
-  }
-  await copyToTeamMirror(ctx, caller.name, m.repository, m.branch);
+  const ahead = Number.parseInt(count.stdout.trim(), 10) > 0;
+  if (!ahead && req.op === "done") throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
+  if (ahead) await copyToTeamMirror(ctx, caller.name, m.repository, m.branch);
   const entry = d.journal.append(entryFields(caller, req, "ok", null, m), d.now());
   return { entry, reply: (id) => ({ ok: true, id }) };
 }

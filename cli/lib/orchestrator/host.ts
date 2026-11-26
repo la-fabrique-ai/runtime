@@ -60,7 +60,11 @@ export type ExecutorStatus = { name: string; mission: HeldMission | null; sessio
 export type DoneEvent = {
   id: number; kind: "done"; executor: string; ticket: string; subtask: string; branch: string; report: string | null;
 };
-export type AskEvent = { id: number; kind: "ask"; executor: string; ticket: string; subtask: string; text: string };
+// Une question pour l'humain (décision 35) : le développeur a rendu son travail
+// en cours ; `recommended` est la réponse qu'il recommanderait, ou null.
+export type AskEvent = {
+  id: number; kind: "ask"; executor: string; ticket: string; subtask: string; text: string; recommended: string | null;
+};
 export type HostEvent = DoneEvent | AskEvent;
 
 export interface HostApi {
@@ -113,8 +117,11 @@ function parseEvent(e: unknown): HostEvent {
     throw new Error("évènement invalide");
   }
   const base = { id: e.id, executor: e.executor, ticket: e.ticket, subtask: e.subtask };
-  if (e.kind === "ask" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "text"]) && isStr(e.text)) {
-    return { ...base, kind: "ask", text: e.text };
+  if (
+    e.kind === "ask" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "text", "recommended"]) &&
+    isStr(e.text) && (e.recommended === null || isStr(e.recommended))
+  ) {
+    return { ...base, kind: "ask", text: e.text, recommended: e.recommended as string | null };
   }
   if (
     e.kind === "done" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch", "report"]) &&

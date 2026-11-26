@@ -131,3 +131,14 @@ test("assign a son propre délai, séparé de celui des autres ops", async () =>
 test("un socket absent est une HostError", async () => {
   await assert.rejects(socketHost("/nonexistent/forge.sock").status(), HostError);
 });
+
+test("events lit un ask avec sa réponse recommandée ; un ask sans recommended est refusé", async () => {
+  const ask = { id: 4, kind: "ask", executor: "e", ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: null };
+  await withServer(JSON.stringify({ ok: true, events: [ask], last: 4 }), async (path) => {
+    assert.deepEqual(await socketHost(path).events(0), { events: [ask], last: 4 });
+  });
+  const { recommended: _r, ...bare } = ask;
+  await withServer(JSON.stringify({ ok: true, events: [bare], last: 4 }), async (path) => {
+    await assert.rejects(socketHost(path).events(0), HostError);
+  });
+});
