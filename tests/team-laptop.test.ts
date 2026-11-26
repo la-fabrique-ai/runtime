@@ -5,6 +5,7 @@ import { cmdTeamLaptop } from "../cli/lib/commands/team-laptop.ts";
 import { remoteAttachForwarding } from "../cli/lib/laptop/remote.ts";
 import { viaCommand } from "../cli/lib/laptop/machines.ts";
 import { saveHost, type LaptopHost } from "../cli/lib/laptop/state.ts";
+import { HC_MIN_VERSION } from "../cli/lib/hc.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,7 +28,7 @@ const host = (name: string, kind: LaptopHost["kind"] = "remote"): LaptopHost => 
   name, kind, address: "203.0.113.10", port: 22, user: "alice", admin: "ubuntu",
   adminKey: "/keys/admin", exposure: "public", done: [],
 });
-const HC: ExecRule = { match: "hc --version", stdout: "hc 0.1.21\n" };
+const HC: ExecRule = { match: "hc --version", stdout: `hc ${HC_MIN_VERSION}\n` };
 
 test("assign forwards the instruction as stdin, with the host's own command and no agent forwarding", async () => {
   const ctx = fakeContext({ rules: [{ match: "'forge' 'team' 'assign'", stdout: "Assigned T-3.1 to agent-executor-1 (web, from origin/main).\n" }] });
