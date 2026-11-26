@@ -250,6 +250,11 @@ function watchSessions(executors: ExecutorStatus[], silent: Map<string, number>,
   const seen = new Set<string>();
   for (const ex of executors) {
     const m = ex.mission;
+    // Libre mais `unknown` : il ne reçoit aucune mission, l'humain doit le savoir.
+    if (!m && ex.session === "unknown") {
+      report.problems.push(`${ex.name}: free but its state is unknown (container stopped, hc unreachable, ` +
+        "or a clone with uncommitted changes): it gets no mission; see forge team status");
+    }
     if (!m) continue;
     const where = `${m.ticket}: ${m.subtask} on ${ex.name}`;
     if (ex.session === "blocked") {

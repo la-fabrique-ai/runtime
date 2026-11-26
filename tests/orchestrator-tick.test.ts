@@ -523,3 +523,13 @@ test("ask read again: no second request after a crash; a sub-task another execut
   assert.ok(!host.calls.some((x) => x.startsWith("release")), host.calls.join(","));
   assert.equal((await tickets.listRequests({ ticket: "T-2" })).length, 1);
 });
+
+test("a free executor whose state is unknown is a problem line at each turn", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a", "b", "c"]);
+  host.executors[2].session = "unknown";
+  for (let i = 0; i < 2; i++) {
+    const r = await turn({ tickets, host, cursor: memCursor() });
+    assert.ok(r.problems.some((p) => p.startsWith("c: free but its state is unknown")), r.problems.join("\n"));
+  }
+});
