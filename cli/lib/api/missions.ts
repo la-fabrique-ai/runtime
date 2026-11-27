@@ -13,7 +13,7 @@
 import { dirname } from "node:path";
 import type { Context, ExecResult } from "../context.ts";
 import { ForgeError, inTime, mustSucceed } from "../context.ts";
-import { recordBranch } from "../branch-records.ts";
+import { recordBranch, setBuiltOn } from "../branch-records.ts";
 import { clearMessages, hcArgv, sessionState, startSession, stopSession } from "../hc-session.ts";
 import { configGet, configSet, configUnset, execAsAgentArgv, incus, listInstances, pushText } from "../incus.ts";
 import { ensureBareTeamMirror, HOST_GIT_CWD } from "../mirror.ts";
@@ -472,6 +472,9 @@ const GIT_MS = 20_000;
 const MIRROR_MS = 120_000;
 const INCUS_MS = 30_000;
 const STATUS_MS = 8_000;
+// Ce qu'un clone a rendu de chaque branche, au dernier rendu qui l'a copiée.
+const PUBLISHED = "refs/forge/published";
+const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const SAFE_GIT = [
   "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
   "-c", "remote.origin.uploadpack=git-upload-pack", "-c", "remote.team.uploadpack=git-upload-pack",
@@ -529,6 +532,15 @@ async function prepareBranch(ctx: Context, to: string, m: MissionSpec): Promise<
   const inTeam = await has(`refs/remotes/${team}`);
   const diverged = () => new ForgeError(
     `${m.branch} in ${to} has commits that ${team} does not have, and the reverse: resolve by hand (release, inspect the clone)`);
+  // Divergé, mais le clone a rendu tout ce qu'il a (sa branche est la réf qu'il
+  // a publiée) : une mission de rebase l'a réécrite ailleurs, elle repart du
+  // miroir d'équipe. Appelé sur un clone sans changement suivi.
+  const handedBack = async (): Promise<boolean> => {
+    const r = await git(GIT_MS, "rev-parse", `refs/heads/${m.branch}`, `${PUBLISHED}/${m.branch}`);
+    const [mine, sent] = r.stdout.trim().split("\n");
+    return r.code === 0 && mine !== undefined && mine !== "" && mine === sent;
+  };
+  const fromTeam = () => mustSucceed(`switch to ${m.branch}`, git(SWITCH_MS, "switch", "-C", m.branch, team));
 
   const head = await git(GIT_MS, "symbolic-ref", "--short", "HEAD");
   if (head.code === 0 && head.stdout.trim() === m.branch) {
@@ -540,7 +552,11 @@ async function prepareBranch(ctx: Context, to: string, m: MissionSpec): Promise<
       throw new ForgeError(`${to}: ${dir} is on ${m.branch} with uncommitted changes, and ${team} has moved beyond it: ` +
         "commit or discard them, then assign again");
     }
-    if (!(await anc("HEAD", team))) throw diverged();
+    if (!(await anc("HEAD", team))) {
+      if (!(await handedBack())) throw diverged();
+      await fromTeam();
+      return;
+    }
     await mustSucceed(`fast-forward ${m.branch}`, git(SWITCH_MS, "merge", "--ff-only", team));
     return;
   }
@@ -560,6 +576,8 @@ async function prepareBranch(ctx: Context, to: string, m: MissionSpec): Promise<
       await mustSucceed(`switch to ${m.branch}`, git(SWITCH_MS, "switch", "-C", m.branch, team));
     } else if (await anc(team, m.branch)) {
       await mustSucceed(`switch to ${m.branch}`, git(SWITCH_MS, "switch", m.branch));
+    } else if (await handedBack()) {
+      await fromTeam();
     } else {
       throw diverged();
     }
@@ -711,9 +729,25 @@ async function handBack(
   const count = await mustSucceed("git rev-list", git(GIT_MS, "rev-list", "--count", `${from}..${m.branch}`));
   const ahead = Number.parseInt(count.stdout.trim(), 10) > 0;
   if (!ahead && req.op === "done") throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
-  if (ahead) await copyToTeamMirror(ctx, caller.name, m.repository, m.branch);
+  if (ahead) {
+    await copyToTeamMirror(ctx, caller.name, m.repository, m.branch);
+    await recordPublished(git, m, from);
+  }
   const entry = d.journal.append(entryFields(caller, req, "ok", null, m), d.now());
   return { entry, reply: (id) => ({ ok: true, id }) };
+}
+
+// Après la copie : la pointe de la base (déjà fetchée), si la branche la
+// contient, est ce sur quoi elle est posée ; et le clone retient ce qu'il a
+// rendu (prepareBranch s'en sert). La branche est nommée par sa réf, jamais
+// par HEAD : le clone peut être ailleurs.
+async function recordPublished(git: ReturnType<typeof gitIn>, m: HeldMission, from: string): Promise<void> {
+  const tip = (await git(GIT_MS, "rev-parse", "--verify", "--quiet", `refs/remotes/${from}`)).stdout.trim();
+  if (SHA.test(tip) && (await git(GIT_MS, "merge-base", "--is-ancestor", tip, m.branch)).code === 0) {
+    setBuiltOn(m.repository, m.branch, tip);
+  }
+  await mustSucceed("record what was published",
+    git(GIT_MS, "update-ref", `${PUBLISHED}/${m.branch}`, `refs/heads/${m.branch}`));
 }
 
 // Git de l'hôte n'ouvre que le miroir des agents du dépôt, hooks coupés, et ne

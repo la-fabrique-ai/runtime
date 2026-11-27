@@ -13,7 +13,7 @@ import { Journal } from "../cli/lib/api/journal.ts";
 import { hostSocketPath, serveApi } from "../cli/lib/api/server.ts";
 import { handleMission, MISSION_FILES_DIR, MISSION_KEY, parseMissionRequest } from "../cli/lib/api/missions.ts";
 import { MISSION_DIR } from "../cli/lib/orchestrator/instruction.ts";
-import { readBranchRecords } from "../cli/lib/branch-records.ts";
+import { branchRecord, readBranchRecords, recordBranch, setBuiltOn } from "../cli/lib/branch-records.ts";
 import { socketHost, type HeldMission, type MissionSpec } from "../cli/lib/orchestrator/host.ts";
 import { CONTROL, executorName, projectMembers, repoTeamMirror } from "../cli/lib/project.ts";
 import { TRUST_SCRIPT, trustedDirs } from "../cli/lib/project-provision.ts";
@@ -165,7 +165,7 @@ test("assign of a first sub-task: git switch -c from origin/main in /workspace/w
   assert.ok(fetchTeam >= 0 && fetchOrigin > fetchTeam);
   assert.ok(calls.some((c) => c.includes("hc run") && c.includes("--cwd /workspace/web")));
   assert.deepEqual(JSON.parse(keys(E1)[MISSION_KEY]), held());
-  assert.deepEqual(readBranchRecords(), [{ branch: "agent/T-1.1", repository: "web", ticket: "T-1", subtask: "T-1.1", base: "origin/main", executor: E1 }]);
+  assert.deepEqual(readBranchRecords(), [{ branch: "agent/T-1.1", repository: "web", ticket: "T-1", subtask: "T-1.1", base: "origin/main", executor: E1, builtOn: null }]);
   const e = d.journal.entries()[0];
   assert.deepEqual([e.op, e.to, e.outcome, e.text, e.mission], ["assign", E1, "ok", "Fais la sous-tâche 1", held()]);
 });
@@ -718,9 +718,64 @@ test("a qa assign on a clone with tracked changes, or on a branch the team mirro
 test("a fix's dev mission works on the branch it fixes: its record keeps that sub-task; other branches and kinds are refused", async () => {
   setup([absent("refs/heads/agent/T-1.1")]);
   assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec({ subtask: "T-1.3", branch: "agent/T-1.1" }) }), { ok: true });
-  assert.deepEqual(readBranchRecords(), [{ branch: "agent/T-1.1", repository: "web", ticket: "T-1", subtask: "T-1.1", base: "origin/main", executor: E1 }]);
+  assert.deepEqual(readBranchRecords(), [{ branch: "agent/T-1.1", repository: "web", ticket: "T-1", subtask: "T-1.1", base: "origin/main", executor: E1, builtOn: null }]);
   const assign = (m: unknown) => () => parseMissionRequest(JSON.stringify({ op: "assign", to: E1, mission: m }), "control", []);
   assert.throws(assign(spec({ subtask: "T-1.3", branch: "agent/T-2.1" })), /assign: mission\.branch must be agent\/<a sub-task of T-1>/);
   assert.throws(assign(spec({ kind: "rebase", subtask: "T-1.2", branch: "agent/T-1.1", base: "origin/main" })), /assign: branch must be agent\/T-1\.2/);
   assert.throws(assign({ ...spec(), kind: "review" }), /assign: mission\.kind must be "dev", "rebase" or "qa"/);
+});
+
+// ------------------------------------------- ce sur quoi une branche est posée
+
+const SHA = "1".repeat(40);
+const OLD = "2".repeat(40);
+const record = (base = "origin/main") =>
+  recordBranch({ branch: "agent/T-1.1", repository: "web", ticket: "T-1", subtask: "T-1.1", base, executor: E1 });
+
+test("a done whose branch holds origin/main's tip records that commit and its published ref", async () => {
+  record();
+  hold(E1, held());
+  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "2\n" },
+    { match: "rev-parse --verify --quiet refs/remotes/origin/main", stdout: `${SHA}\n` }]);
+  assert.deepEqual(await call(E1, { op: "done" }), { ok: true, id: 1 });
+  assert.equal(branchRecord("web", "agent/T-1.1")?.builtOn, SHA);
+  const calls = joined();
+  assert.ok(calls.some((c) => c.endsWith(`${GIT} merge-base --is-ancestor ${SHA} agent/T-1.1`)), calls.join("\n"));
+  const ref = calls.find((c) => c.endsWith(`${GIT} update-ref refs/forge/published/agent/T-1.1 refs/heads/agent/T-1.1`));
+  assert.ok(ref?.includes(`exec ${E1} --user 1001 --group 1001`), calls.join("\n"));
+});
+
+test("a done on a branch that does not hold its base's tip leaves builtOn as it was", async () => {
+  record();
+  setBuiltOn("web", "agent/T-1.1", OLD);
+  hold(E1, held());
+  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "2\n" },
+    { match: "rev-parse --verify --quiet refs/remotes/origin/main", stdout: `${SHA}\n` }, notAncestor(SHA, "agent/T-1.1")]);
+  assert.deepEqual(await call(E1, { op: "done" }), { ok: true, id: 1 });
+  assert.equal(branchRecord("web", "agent/T-1.1")?.builtOn, OLD);
+});
+
+// Le clone garde une vieille copie d'une branche qu'un rebase a réécrite
+// ailleurs : s'il a tout rendu (sa branche est sa réf publiée), la branche
+// repart du miroir d'équipe ; sinon, le refus d'aujourd'hui.
+const published = (same: boolean): ExecRule => ({
+  match: "rev-parse refs/heads/agent/T-1.1 refs/forge/published/agent/T-1.1", stdout: same ? "abc\nabc\n" : "abc\ndef\n",
+});
+
+test("a local branch equal to its published ref, diverged from the team mirror, is recreated from it, on the branch or off it", async () => {
+  for (const rules of [
+    [onBranch, notAncestor(TEAM, "HEAD"), notAncestor("HEAD", TEAM)],
+    [{ match: "symbolic-ref --short HEAD", stdout: "main\n" }, notAncestor("agent/T-1.1", TEAM), notAncestor(TEAM, "agent/T-1.1")],
+  ] as ExecRule[][]) {
+    setup([...rules, published(true)]);
+    assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }), { ok: true });
+    assert.ok(joined().some((c) => c.endsWith(`${GIT} switch -C agent/T-1.1 team/agent/T-1.1`)), joined().join("\n"));
+    await call(CONTROL, { op: "release", to: E1 });
+  }
+});
+
+test("a local branch that differs from its published ref, diverged from the team mirror, is still refused", async () => {
+  setup([onBranch, notAncestor(TEAM, "HEAD"), notAncestor("HEAD", TEAM), published(false)]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }), { ok: false, error: DIVERGED });
+  assert.ok(!joined().some((c) => c.includes(" switch")));
 });

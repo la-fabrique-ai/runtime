@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { branchRecord, readBranchRecords, recordBranch, type BranchRecord } from "../cli/lib/branch-records.ts";
+import { branchRecord, readBranchRecords, recordBranch, setBuiltOn, type BranchRecord } from "../cli/lib/branch-records.ts";
 
 const rec = (over: Partial<BranchRecord> = {}): BranchRecord => ({
-  branch: "agent/t1", repository: "org/a", ticket: "T-1", subtask: "S-1", base: "abc123", executor: null, ...over,
+  branch: "agent/t1", repository: "org/a", ticket: "T-1", subtask: "S-1", base: "abc123", executor: null, builtOn: null, ...over,
 });
 const tmpFile = (): string => join(mkdtempSync(join(tmpdir(), "forge-br-")), "sub", "branches.json");
 
@@ -54,4 +54,17 @@ test("un rename qui échoue ne laisse aucun fichier temporaire", () => {
   mkdirSync(p, { recursive: true }); // un dossier à l'emplacement du fichier
   assert.throws(() => recordBranch(rec(), p));
   assert.deepEqual(readdirSync(join(p, "..")), ["branches.json"]);
+});
+
+test("une fiche de la partie 2, sans builtOn, se lit avec null ; setBuiltOn puis recordBranch gardent la valeur", () => {
+  const p = tmpFile();
+  const { builtOn: _b, ...old } = rec();
+  mkdirSync(join(p, ".."), { recursive: true });
+  writeFileSync(p, JSON.stringify({ version: 1, records: [old] }));
+  assert.deepEqual(readBranchRecords(p), [rec()]);
+  const sha = "a".repeat(40);
+  setBuiltOn("org/a", "agent/t1", sha, p);
+  assert.equal(branchRecord("org/a", "agent/t1", p)?.builtOn, sha);
+  recordBranch({ ...old, executor: "dev-2" }, p);
+  assert.deepEqual(readBranchRecords(p), [rec({ executor: "dev-2", builtOn: sha })]);
 });
