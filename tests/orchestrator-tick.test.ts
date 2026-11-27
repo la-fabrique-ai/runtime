@@ -64,7 +64,7 @@ class FakeHost implements HostApi {
     const e = this.executors.find((x) => x.name === name)!;
     const m = e.mission!;
     e.session = "done";
-    this.events_.push({ id: this.events_.length + 1, kind: "ask", executor: name, ticket: m.ticket, subtask: m.subtask, text, recommended });
+    this.events_.push({ id: this.events_.length + 1, kind: "ask", executor: name, ticket: m.ticket, subtask: m.subtask, text, recommended, mission: m.kind });
   }
   finish(name: string, o: { report?: string } = {}): void {
     const e = this.executors.find((x) => x.name === name)!;
@@ -816,4 +816,25 @@ test("le done d'une sous-tâche relu derrière un évènement en échec ne la pa
   host.executors[1].session = "working";
   await turn({ tickets: base, host, cursor });
   assert.equal(await status(tickets, "T-2.1"), "in-dev");
+});
+
+test("une QA qui pose une question : la demande sur le haut de la pile, l'exécuteur libéré, le ticket en qa qui attend ; la QA repart avec la réponse", async () => {
+  const { tickets, host, cursor } = await inQa();
+  await tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  host.ask("a", "Does an empty name greet the world?");
+  const r = await turn({ tickets, host, cursor });
+  assert.deepEqual(r.problems, []);
+  const [req] = await tickets.listRequests({ ticket: "T-2", open: true });
+  assert.deepEqual([req.subtask, req.text], ["T-2.2", "Does an empty name greet the world?"]);
+  assert.ok(host.calls.includes("release a"));
+  assert.equal(await status(tickets, "T-2.2"), "done");
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "qa");
+  assert.equal(host.assigned.length, 0);
+
+  await tickets.answerRequest({ ticket: "T-2", id: req.id, text: "yes" });
+  const r2 = await turn({ tickets, host, cursor });
+  assert.deepEqual(r2.qa, [{ ticket: "T-2", verdict: "started" }]);
+  const m = host.assigned.at(-1)!.mission;
+  assert.equal(m.kind, "qa");
+  assert.ok(m.instruction.includes("## Questions already answered\nQuestion:\nDoes an empty name greet the world?\nAnswer:\nyes"), m.instruction);
 });

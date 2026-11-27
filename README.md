@@ -433,7 +433,10 @@ goes back to `dev`. Once a fix is done, the sub-tasks above it are **rebased**
 one by one, each by a mission that replays its own commits onto the branch
 below, then the QA runs again. Before any QA, a stack whose base moved (a
 commit on `main`) is rebased first. A clean QA sends the ticket to
-`human-review`. The QA's report is kept in the ticket.
+`human-review`. The QA's report is kept in the ticket. A QA with a doubt the
+spec does not settle asks like a developer, `spec-reader` first, then you: the
+ticket stays in `qa` and waits for your answer, then the QA runs again with
+it.
 
 #### Your review
 

@@ -74,9 +74,12 @@ export type DoneEvent = {
   mission: MissionKind; qa: QaReport | null;
 };
 // Une question pour l'humain (décision 35) : le développeur a rendu son travail
-// en cours ; `recommended` est la réponse qu'il recommanderait, ou null.
+// en cours ; `recommended` est la réponse qu'il recommanderait, ou null ;
+// `mission` : le genre de la mission qui demande (une QA demande aussi, sans
+// rien rendre).
 export type AskEvent = {
   id: number; kind: "ask"; executor: string; ticket: string; subtask: string; text: string; recommended: string | null;
+  mission: MissionKind;
 };
 export type HostEvent = DoneEvent | AskEvent;
 
@@ -139,10 +142,10 @@ function parseEvent(e: unknown): HostEvent {
   }
   const base = { id: e.id, executor: e.executor, ticket: e.ticket, subtask: e.subtask };
   if (
-    e.kind === "ask" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "text", "recommended"]) &&
-    isStr(e.text) && (e.recommended === null || isStr(e.recommended))
+    e.kind === "ask" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "text", "recommended", "mission"]) &&
+    isStr(e.text) && (e.recommended === null || isStr(e.recommended)) && KINDS.includes(e.mission as string)
   ) {
-    return { ...base, kind: "ask", text: e.text, recommended: e.recommended as string | null };
+    return { ...base, kind: "ask", text: e.text, recommended: e.recommended as string | null, mission: e.mission as MissionKind };
   }
   if (
     e.kind === "done" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch", "report", "mission", "qa"]) &&

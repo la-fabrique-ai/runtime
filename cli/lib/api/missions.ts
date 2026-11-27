@@ -789,9 +789,9 @@ function events(d: ApiDeps, after: number): Outcome {
     .sort((a, b) => a.id - b.id)
     .map((e): HostEvent => {
       const base = { id: e.id, executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask };
-      if (e.op === "ask") return { ...base, kind: "ask", text: e.text ?? "", recommended: e.recommended ?? null };
       // Une ligne écrite par la partie 2 n'a pas d'autre genre que `dev`.
       const mission: MissionKind = (e.mission!.kind as MissionKind | undefined) ?? "dev";
+      if (e.op === "ask") return { ...base, kind: "ask", text: e.text ?? "", recommended: e.recommended ?? null, mission };
       return { ...base, kind: "done", branch: e.mission!.branch, report: e.text ?? null, mission, qa: e.qa ?? null };
     });
   return { reply: () => ({ ok: true, events: list, last }), quiet: true };
@@ -825,17 +825,16 @@ async function handBack(
   } else if (req.op === "done" && req.qa !== null) {
     throw new ForgeError("this is not a QA mission");
   }
-  if (req.op === "ask" && m.kind === "qa") {
-    throw new ForgeError("a QA mission does not ask: put what the spec does not settle in your QA report, then report done");
-  }
   for (const c of await cloneStates(ctx, caller.name, requireProject(d))) {
     if (c.state === "dirty") {
-      throw new ForgeError(`${caller.name}: ${cloneDir(c.repository)} has uncommitted changes: commit or discard them, then ${again}`);
+      // Une QA ne commite rien : elle ne peut que les défaire.
+      const fix = m.kind === "qa" ? "discard them" : "commit or discard them";
+      throw new ForgeError(`${caller.name}: ${cloneDir(c.repository)} has uncommitted changes: ${fix}, then ${again}`);
     }
     if (c.state === "unreadable") throw new ForgeError(`${caller.name}: git status in ${cloneDir(c.repository)} did not answer: try ${req.op} again`);
   }
-  if (qa !== undefined) {
-    // Une QA ne commite rien : rien à copier.
+  if (m.kind === "qa") {
+    // Une QA ne commite rien : ni son done ni son ask ne copient quoi que ce soit.
     const entry = d.journal.append(entryFields(caller, req, "ok", null, m, qa), d.now());
     return { entry, reply: (id) => ({ ok: true, id }) };
   }

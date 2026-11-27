@@ -659,7 +659,7 @@ test("ask with nothing committed is accepted and copies nothing; its event carri
   assert.ok(!mirrorFetch());
   const ev = await call(CONTROL, { op: "events", after: 0 });
   assert.deepEqual(ev, { ok: true, events: [{
-    id: r.id, kind: "ask", executor: E1, ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: "100 per page",
+    id: r.id, kind: "ask", executor: E1, ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: "100 per page", mission: "dev",
   }], last: r.id });
   // L'hôte ne libère pas : c'est l'orchestrateur qui le fait.
   assert.deepEqual(JSON.parse(keys(E1)[MISSION_KEY]), held());
@@ -811,11 +811,9 @@ test("a QA done with a valid ko report copies nothing, and its event carries the
   await withHost(async (host) => assert.deepEqual((await host.events(0)).events[0], (ev as { events: unknown[] }).events[0]));
 });
 
-test("a QA done without its report, a QA ask, a dev done carrying a report of QA: refused", async () => {
+test("a QA done without its report, a dev done carrying a report of QA: refused", async () => {
   hold(E1, qaHeld());
   assert.deepEqual(await call(E1, { op: "done" }), { ok: false, error: "a QA mission ends with forge-team done --qa-report-file <file>" });
-  assert.deepEqual(await call(E1, { op: "ask", text: "Which limit?" }), { ok: false, error:
-    "a QA mission does not ask: put what the spec does not settle in your QA report, then report done" });
   hold(E1, held());
   setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "2\n" }]);
   assert.deepEqual(await call(E1, { op: "done", qa: KO }), { ok: false, error: "this is not a QA mission" });
@@ -898,4 +896,22 @@ test("a fix done with nothing beyond what the team mirror holds of its branch is
   assert.ok(!ctx.calls.some((c) => c[0] === "git" && c.includes("src")));
   setup([inTeam, { match: "rev-list --count origin/main..agent/T-1.1", stdout: "3\n" }, { match: `rev-list --count ${TIP}..agent/T-1.1`, stdout: "1\n" }]);
   assert.deepEqual(await call(E1, { op: "done" }), { ok: true, id: 2 });
+});
+
+
+test("a QA may ask: nothing copied, its event says it is a QA's; on a dirty clone, refused", async () => {
+  hold(E1, qaHeld());
+  setup([{ match: "status --porcelain", stdout: " M greet.sh\n" }]);
+  const dirty = await call(E1, { op: "ask", text: "Does an empty name greet the world?" }) as { ok: boolean; error?: string };
+  assert.equal(dirty.ok, false);
+  assert.match(dirty.error!, /has uncommitted changes/);
+  setup([]);
+  const r = await call(E1, { op: "ask", text: "Does an empty name greet the world?" }) as unknown as { ok: boolean; id: number };
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(!ctx.calls.some((c) => c[0] === "git" && c.includes("fetch")), joined().join("\n"));
+  const ev = await call(CONTROL, { op: "events", after: 0 }) as unknown as { events: unknown[] };
+  assert.deepEqual(ev.events, [{
+    id: r.id, kind: "ask", executor: E1, ticket: "T-1", subtask: "T-1.2", text: "Does an empty name greet the world?", recommended: null, mission: "qa",
+  }]);
+  await withHost(async (host) => assert.deepEqual((await host.events(0)).events, ev.events));
 });

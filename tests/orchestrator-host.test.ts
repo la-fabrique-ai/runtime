@@ -133,7 +133,7 @@ test("un socket absent est une HostError", async () => {
 });
 
 test("events lit un ask avec sa réponse recommandée ; un ask sans recommended est refusé", async () => {
-  const ask = { id: 4, kind: "ask", executor: "e", ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: null };
+  const ask = { id: 4, kind: "ask", executor: "e", ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: null, mission: "qa" };
   await withServer(JSON.stringify({ ok: true, events: [ask], last: 4 }), async (path) => {
     assert.deepEqual(await socketHost(path).events(0), { events: [ask], last: 4 });
   });

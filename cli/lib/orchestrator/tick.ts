@@ -443,6 +443,7 @@ async function onQaDone(tickets: Connector, host: HostApi, ev: DoneEvent, report
 // rouvre pas une demande déjà là, et ne touche pas à une sous-tâche qu'un autre
 // exécuteur tient.
 async function onAsk(tickets: Connector, host: HostApi, ev: AskEvent, report: TickReport): Promise<void> {
+  if (ev.mission === "qa") return onQaAsk(tickets, host, ev);
   const subtasks = await tickets.listSubtasks({ ticket: ev.ticket });
   const s = subtasks.find((x) => x.id === ev.subtask);
   if (!s) return void report.problems.push(`${ev.ticket}: event ${ev.id}: sub-task not found: ${ev.subtask}`);
@@ -454,15 +455,33 @@ async function onAsk(tickets: Connector, host: HostApi, ev: AskEvent, report: Ti
   // La base Markdown garde une réponse recommandée d'une ligne dans l'en-tête
   // de la demande ; plus longue, elle va dans son texte. Un retour chariot
   // (un fichier en CRLF) compte comme un saut de ligne : l'en-tête refuse les deux.
+  await openOnce(tickets, ev, s.id);
+  if (holds) await host.release(ev.executor);
+  if (s.status !== "ready") await tickets.setSubtaskStatus({ id: s.id, status: "ready", ...keep(s) });
+}
+
+// La demande d'un ask, sur `subtask`, sauf si elle est déjà ouverte (relu).
+async function openOnce(tickets: Connector, ev: AskEvent, subtask: string): Promise<void> {
   const rec = ev.recommended;
   const multi = rec !== null && /[\r\n]/.test(rec);
   const text = multi ? `${ev.text}\n\nRecommended answer:\n${rec}` : ev.text;
   const open = await tickets.listRequests({ ticket: ev.ticket, open: true });
-  if (!open.some((r) => r.subtask === s.id && r.text === text)) {
-    await tickets.openRequest({ ticket: ev.ticket, subtask: s.id, text, ...(rec !== null && !multi ? { recommended: rec } : {}) });
+  if (!open.some((r) => r.subtask === subtask && r.text === text)) {
+    await tickets.openRequest({ ticket: ev.ticket, subtask, text, ...(rec !== null && !multi ? { recommended: rec } : {}) });
   }
-  if (holds) await host.release(ev.executor);
-  if (s.status !== "ready") await tickets.setSubtaskStatus({ id: s.id, status: "ready", ...keep(s) });
+}
+
+// L'ask d'une QA : la demande sur le ticket (sous-tâche : celle du haut, que la
+// QA tient), puis l'émetteur libéré s'il tient encore cette QA. Aucune
+// sous-tâche ne change : le ticket reste en `qa` et attend la réponse ; l'étape
+// de la QA la relance ensuite, la réponse dans « Questions already answered ».
+// Un ticket qui n'est plus en `qa` : rien.
+async function onQaAsk(tickets: Connector, host: HostApi, ev: AskEvent): Promise<void> {
+  const ticket = await tickets.getTicket({ id: ev.ticket });
+  if (ticket.status !== "qa") return;
+  await openOnce(tickets, ev, ev.subtask);
+  const holder = (await host.status()).find((e) => e.name === ev.executor);
+  if (holder?.mission?.kind === "qa" && holder.mission.ticket === ev.ticket) await host.release(ev.executor);
 }
 
 // Une mission dont la session est perdue : libérée, puis relancée sur le même
