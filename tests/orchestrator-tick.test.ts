@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
 import type { Connector } from "../cli/lib/tickets/connector.ts";
 import { HostError } from "../cli/lib/orchestrator/host.ts";
-import type { ExecutorStatus, HostApi, HostEvent, MissionSpec, SessionState, StackBranch, StackState } from "../cli/lib/orchestrator/host.ts";
+import type { ExecutorStatus, HostApi, HostEvent, MissionSpec, QaReport, SessionState, StackBranch, StackState } from "../cli/lib/orchestrator/host.ts";
 import { fileCursor, SILENT_SESSION_MS, tick } from "../cli/lib/orchestrator/tick.ts";
 import type { Cursor } from "../cli/lib/orchestrator/tick.ts";
 // Un tour : les tests passent leurs dépendances telles quelles.
@@ -70,6 +70,16 @@ class FakeHost implements HostApi {
     this.events_.push({
       id: this.events_.length + 1, kind: "done", executor: name, ticket: m.ticket, subtask: m.subtask, branch: m.branch,
       report: o.report ?? null, mission: m.kind, qa: null,
+    });
+  }
+  // L'agent de QA rend son compte rendu.
+  qaDone(name: string, qa: QaReport, report: string | null = "ran the checks"): void {
+    const e = this.executors.find((x) => x.name === name)!;
+    const m = e.mission!;
+    e.session = "done";
+    this.events_.push({
+      id: this.events_.length + 1, kind: "done", executor: name, ticket: m.ticket, subtask: m.subtask, branch: m.branch,
+      report, mission: "qa", qa,
     });
   }
   async stack(branches: StackBranch[]): Promise<StackState[]> {
@@ -566,4 +576,51 @@ test("a sub-task handed out again after a request is launched as a resumed missi
   const m = host.assigned.at(-1)!.mission;
   assert.equal(m.subtask, "T-2.1");
   assert.ok(m.instruction.includes("This mission resumes: your branch already holds the earlier work."), m.instruction);
+});
+
+// T-2 : ses deux sous-tâches finies, en qa, et `a` qui tient sa QA.
+async function inQa(names = ["a"]): Promise<{ tickets: Connector; host: FakeHost; cursor: Cursor & { value: number } }> {
+  const { tickets } = await setup();
+  for (const id of ["T-2.1", "T-2.2"]) await tickets.setSubtaskStatus({ id, status: "done" });
+  await tickets.setTicketStatus({ id: "T-2", status: "qa" });
+  const host = new FakeHost(names);
+  host.executors[0].mission = { kind: "qa", ticket: "T-2", subtask: "T-2.2", repository: "web", branch: "agent/T-2.2", base: "agent/T-2.1" };
+  host.executors[0].session = "working";
+  return { tickets, host, cursor: memCursor() };
+}
+
+test("QA ko : un correctif à la position de A, une sous-tâche en haut, le ticket en dev, le compte rendu gardé ; relu, rien de plus", async () => {
+  const { tickets, host, cursor } = await inQa();
+  host.qaDone("a", { verdict: "ko", defects: [{ subtask: "T-2.1", text: "the list is empty" }, { subtask: null, text: "slow" }] });
+  const r = await turn({ tickets, host, cursor });
+  assert.deepEqual(r.qa, [{ ticket: "T-2", verdict: "ko" }]);
+  const subs = await tickets.listSubtasks({ ticket: "T-2" });
+  assert.deepEqual(subs.slice(2).map((s) => [s.kind, s.fixes, s.position, s.text]), [
+    ["fix", "T-2.1", 1, "the list is empty"],
+    ["implementation", null, 3, "slow"],
+  ]);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "dev");
+  const { comments } = await tickets.listComments({ ticket: "T-2" });
+  assert.deepEqual(comments.map((c) => [c.kind, c.author, c.text]), [["qa-report", "a", "ran the checks"]]);
+  assert.ok(host.calls.includes("release a"));
+  cursor.value = 0;
+  await turn({ tickets, host, cursor });
+  assert.equal((await tickets.listSubtasks({ ticket: "T-2" })).length, 4);
+  assert.equal((await tickets.listComments({ ticket: "T-2" })).comments.length, 1);
+});
+
+test("QA ok : le ticket en human-review ; un done de QA pour un ticket en dev ne change rien", async () => {
+  const { tickets, host, cursor } = await inQa();
+  host.qaDone("a", { verdict: "ok", defects: [] });
+  const r = await turn({ tickets, host, cursor });
+  assert.deepEqual(r.qa, [{ ticket: "T-2", verdict: "ok" }]);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "human-review");
+
+  const other = await inQa();
+  await other.tickets.setTicketStatus({ id: "T-2", status: "dev" });
+  other.host.qaDone("a", { verdict: "ko", defects: [{ subtask: null, text: "x" }] });
+  const r2 = await turn(other);
+  assert.deepEqual(r2.qa, []);
+  assert.equal((await other.tickets.listSubtasks({ ticket: "T-2" })).length, 2);
+  assert.equal((await other.tickets.listComments({ ticket: "T-2" })).comments.length, 0);
 });

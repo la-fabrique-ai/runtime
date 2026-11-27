@@ -12,6 +12,7 @@ import type { AskEvent, DoneEvent, ExecutorStatus, HeldMission, HostApi, Mission
 import { branchOf, candidates, missionBase, RuleError } from "./rule.ts";
 import type { Candidate } from "./rule.ts";
 import { devInstruction, missionFiles } from "./instruction.ts";
+import { addFix } from "./fixes.ts";
 
 export type Cursor = { read(): number; write(id: number): void };
 
@@ -20,6 +21,8 @@ export type TickReport = {
   assigned: { subtask: string; executor: string }[];
   recovered: string[];
   problems: string[];
+  // Les QA de ce tour : lancées (`started`) ou rendues (`ok`, `ko`).
+  qa: { ticket: string; verdict: "ok" | "ko" | "started" }[];
 };
 
 type Picture = { ticket: Ticket; subtasks: Subtask[]; requests: Request[] };
@@ -86,7 +89,7 @@ type TickDeps = {
 };
 
 export async function tick(d: TickDeps): Promise<TickReport> {
-  const report: TickReport = { completed: [], assigned: [], recovered: [], problems: [] };
+  const report: TickReport = { completed: [], assigned: [], recovered: [], problems: [], qa: [] };
   try {
     await run(d, report);
   } catch (e) {
@@ -120,6 +123,7 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
   for (const ev of events) {
     try {
       if (ev.kind === "ask") await onAsk(tickets, host, ev, report);
+      else if (ev.mission === "qa") await onQaDone(tickets, host, ev, report);
       else await onDone(tickets, host, ev, report);
     } catch (e) {
       if (!local(e)) throw e;
@@ -302,6 +306,33 @@ async function onDone(tickets: Connector, host: HostApi, ev: DoneEvent, report: 
     const waits = (await tickets.listRequests({ ticket: ev.ticket, open: true })).length > 0;
     if (ticket.status === "dev" && !waits) await tickets.setTicketStatus({ id: ev.ticket, status: "qa" });
   }
+}
+
+// Le `done` d'une QA, dans cet ordre, chaque étape sans effet si on la rejoue :
+// le compte rendu libre gardé en commentaire `qa-report` ; `ko` : un correctif
+// par défaut, dans l'ordre du compte rendu, puis le ticket en `dev` ; `ok` : le
+// ticket en `human-review` ; puis l'émetteur libéré s'il tient encore cette QA.
+// Le statut du ticket change en dernier : un crash avant lui rejoue l'étape
+// entière, et addFix ne crée rien deux fois. Un ticket qui n'est plus en `qa`
+// (évènement relu) : rien.
+async function onQaDone(tickets: Connector, host: HostApi, ev: DoneEvent, report: TickReport): Promise<void> {
+  const ticket = await tickets.getTicket({ id: ev.ticket });
+  if (ticket.status !== "qa" || ev.qa === null) return;
+  const qa = ev.qa;
+  const text = ev.report ?? `QA verdict: ${qa.verdict} (no report).`;
+  // Rejouée, l'étape ne regarde que le dernier compte rendu : c'est le sien.
+  const { comments } = await tickets.listComments({ ticket: ev.ticket });
+  const last = comments.filter((c) => c.kind === "qa-report").at(-1);
+  if (!last || last.author !== ev.executor || last.text !== text) {
+    await tickets.addComment({ ticket: ev.ticket, author: ev.executor, kind: "qa-report", text });
+  }
+  if (qa.verdict === "ko") {
+    for (const d of qa.defects) await addFix(tickets, ticket, { fixes: d.subtask, text: d.text });
+  }
+  await tickets.setTicketStatus({ id: ev.ticket, status: qa.verdict === "ko" ? "dev" : "human-review" });
+  report.qa.push({ ticket: ev.ticket, verdict: qa.verdict });
+  const holder = (await host.status()).find((e) => e.name === ev.executor);
+  if (holder?.mission?.kind === "qa" && holder.mission.ticket === ev.ticket) await host.release(ev.executor);
 }
 
 // Un `ask` (décision 35) : le développeur a rendu son travail en cours avec une
