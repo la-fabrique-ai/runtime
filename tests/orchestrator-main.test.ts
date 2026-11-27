@@ -44,9 +44,16 @@ test("le processus distribue, puis sort 0 sur SIGTERM", async () => {
   const t = await tickets.createTicket({ title: "t", description: "d", priority: 1, repositories: [{ name: "web", base: "main" }] });
   await tickets.setTicketStatus({ id: t.id, status: "dev" });
   await tickets.createSubtask({ ticket: t.id, repository: "web", position: 1, rank: 1, kind: "implementation", text: "s" });
+  // T-2, fini et en qa : sa QA part dans le même tour.
+  const q = await tickets.createTicket({ title: "q", description: "d", priority: 2, repositories: [{ name: "web", base: "main" }] });
+  await tickets.setTicketStatus({ id: q.id, status: "dev" });
+  const qs = await tickets.createSubtask({ ticket: q.id, repository: "web", position: 1, rank: 1, kind: "implementation", text: "s" });
+  await tickets.setSubtaskStatus({ id: qs.id, status: "done" });
+  await tickets.setTicketStatus({ id: q.id, status: "qa" });
 
+  let assigns = 0;
   let onAssign: () => void = () => {};
-  const assigned = new Promise<void>((r) => (onAssign = r));
+  const assigned = new Promise<void>((r) => (onAssign = () => void (++assigns === 2 && r())));
   const sockets: import("node:net").Socket[] = [];
   const server = createServer((s) => {
     sockets.push(s);
@@ -58,7 +65,10 @@ test("le processus distribue, puis sort 0 sur SIGTERM", async () => {
       const req = JSON.parse(buf.split("\n")[0]!);
       buf = "";
       if (req.op === "status") {
-        s.write(JSON.stringify({ ok: true, executors: [{ name: "ex-1", mission: null, session: "none" }] }) + "\n");
+        s.write(JSON.stringify({ ok: true, executors: ["ex-1", "ex-2"].map((name) => ({ name, mission: null, session: "none" })) }) + "\n");
+      } else if (req.op === "stack") {
+        const branches = req.branches.map((b: { branch: string }) => ({ branch: b.branch, current: true, builtOn: null }));
+        s.write(JSON.stringify({ ok: true, branches }) + "\n");
       } else if (req.op === "events") {
         s.write(JSON.stringify({ ok: true, events: [], last: 0 }) + "\n");
       } else {
@@ -89,7 +99,8 @@ test("le processus distribue, puis sort 0 sur SIGTERM", async () => {
     assert.deepEqual(JSON.parse(reply), { ok: true, problems: [] });
     child.kill("SIGTERM");
     assert.equal(await exited, 0);
-    assert.match(out, /\[orchestrator\] assigned T-1\.1 to ex-1/);
+    assert.match(out, /\[orchestrator\] qa T-2: started/);
+    assert.match(out, /\[orchestrator\] assigned T-1\.1 to ex-2/);
     assert.equal(statSync(state).mode & 0o777, 0o700);
   } finally {
     child.kill("SIGKILL");

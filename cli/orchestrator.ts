@@ -110,6 +110,7 @@ async function main(): Promise<number> {
       for (const a of r.assigned) console.log(`[orchestrator] assigned ${a.subtask} to ${a.executor}`);
       for (const s of r.completed) console.log(`[orchestrator] completed ${s}`);
       for (const s of r.recovered) console.log(`[orchestrator] recovered ${s}`);
+      for (const q of r.qa) console.log(`[orchestrator] qa ${q.ticket}: ${q.verdict}`);
       const now = new Set(r.problems);
       for (const p of now) if (!previous.has(p)) console.log(`[orchestrator] problem: ${p}`);
       previous = now;

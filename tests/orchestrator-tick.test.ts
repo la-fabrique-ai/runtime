@@ -22,6 +22,8 @@ class FakeHost implements HostApi {
   loseReply: ((m: MissionSpec) => boolean) | null = null;
   failStatus: Error | null = null;
   failEvents = false;
+  // L'état de chaque branche que rend `stack` (par défaut : à jour, jamais enregistrée).
+  stackStates = new Map<string, { current: boolean; builtOn: string | null }>();
   // Le plus grand id du journal ; `null` : celui du dernier évènement.
   last: number | null = null;
   constructor(names: string[]) {
@@ -84,7 +86,7 @@ class FakeHost implements HostApi {
   }
   async stack(branches: StackBranch[]): Promise<StackState[]> {
     this.calls.push(`stack ${branches.map((b) => b.branch).join(" ")}`);
-    return branches.map((b) => ({ branch: b.branch, current: true, builtOn: null }));
+    return branches.map((b) => ({ branch: b.branch, current: true, builtOn: null, ...this.stackStates.get(b.branch) }));
   }
 }
 
@@ -168,7 +170,10 @@ test("rattrapage : un exécuteur qui tient une sous-tâche done est libéré, un
   const r = await turn({ tickets, host, cursor: memCursor() });
   assert.ok(host.calls.includes("release a"));
   assert.equal((await tickets.getTicket({ id: "T-1" })).status, "qa");
-  assert.deepEqual(r.assigned, [{ subtask: "T-2.1", executor: "a" }]);
+  // Le ticket passé en qa reçoit sa QA d'abord (a), puis T-2.1 part sur b.
+  assert.deepEqual(r.qa, [{ ticket: "T-1", verdict: "started" }]);
+  assert.deepEqual(host.assigned.map((x) => [x.to, x.mission.kind]), [["a", "qa"], ["b", "dev"]]);
+  assert.deepEqual(r.assigned, [{ subtask: "T-2.1", executor: "b" }]);
 });
 
 test("assign accepté mais réponse perdue : la sous-tâche repasse in-dev au tour suivant, son done est compté", async () => {
@@ -229,17 +234,19 @@ test("un seul exécuteur, un candidat prioritaire toujours refusé : le suivant 
   assert.deepEqual(r1.assigned, [{ subtask: "T-1.1", executor: "a" }]);
   assert.equal(await status(tickets, "T-2.1"), "ready");
   // a finit T-1.1 ; au tour suivant, T-2.1 est encore dans son délai : rien ne
-  // lui est tenté, elle ne repasse pas in-dev, a reste libre.
+  // lui est tenté, elle ne repasse pas in-dev ; a prend la QA de T-1.
   host.finish("a");
   host.calls = [];
   t = 60_000;
   const r2 = await turn({ tickets, host, cursor, refusals, now });
   assert.deepEqual(r2.completed, ["T-1.1"]);
   assert.deepEqual(r2.assigned, []);
-  assert.ok(!host.calls.some((c) => c.startsWith("assign")), host.calls.join("\n"));
+  assert.deepEqual(r2.qa, [{ ticket: "T-1", verdict: "started" }]);
+  assert.ok(!host.calls.includes("assign a T-2.1"), host.calls.join("\n"));
   assert.equal(await status(tickets, "T-2.1"), "ready");
-  // Le délai passé, elle est retentée.
+  // Le délai passé, et la QA de T-1 rendue à l'humain, elle est retentée.
   host.failAssign = null;
+  await tickets.setTicketStatus({ id: "T-1", status: "human-review" });
   t = 6 * 60_000;
   const r3 = await turn({ tickets, host, cursor, refusals, now });
   assert.deepEqual(r3.assigned, [{ subtask: "T-2.1", executor: "a" }]);
@@ -617,10 +624,102 @@ test("QA ok : le ticket en human-review ; un done de QA pour un ticket en dev ne
   assert.equal((await tickets.getTicket({ id: "T-2" })).status, "human-review");
 
   const other = await inQa();
+  await other.tickets.setSubtaskStatus({ id: "T-2.2", status: "ready" });
   await other.tickets.setTicketStatus({ id: "T-2", status: "dev" });
   other.host.qaDone("a", { verdict: "ko", defects: [{ subtask: null, text: "x" }] });
   const r2 = await turn(other);
   assert.deepEqual(r2.qa, []);
   assert.equal((await other.tickets.listSubtasks({ ticket: "T-2" })).length, 2);
   assert.equal((await other.tickets.listComments({ ticket: "T-2" })).comments.length, 0);
+});
+
+const sub2 = async (c: Connector, id: string) => (await c.listSubtasks({ ticket: id.split(".")[0] })).find((s) => s.id === id)!;
+
+test("tour : une QA prend l'exécuteur libre avant une sous-tâche prête d'un ticket plus prioritaire", async () => {
+  const { tickets } = await setup();
+  await tickets.setSubtaskStatus({ id: "T-1.1", status: "done" });
+  await tickets.setTicketStatus({ id: "T-1", status: "qa" });
+  const host = new FakeHost(["a"]);
+  const r = await turn({ tickets, host, cursor: memCursor() });
+  assert.deepEqual(r.problems, []);
+  assert.deepEqual(r.qa, [{ ticket: "T-1", verdict: "started" }]);
+  const [m] = host.assigned;
+  assert.deepEqual([m.mission.kind, m.mission.subtask, m.mission.branch, m.mission.base], ["qa", "T-1.1", "agent/T-1.1", "origin/main"]);
+  assert.match(m.mission.instruction, /^\[forge\] mission qa T-1\n/);
+  assert.equal(await status(tickets, "T-2.1"), "ready");
+  assert.equal((await tickets.getTicket({ id: "T-1" })).status, "qa");
+});
+
+test("tour : une pile qui n'est plus à jour est rebasée avant la QA, puis la QA repart", async () => {
+  const { tickets, host, cursor } = await inQa();
+  host.executors[0].mission = null;
+  host.executors[0].session = "none";
+  await tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  host.stackStates.set("agent/T-2.2", { current: false, builtOn: "abc123" });
+  const r1 = await turn({ tickets, host, cursor });
+  assert.equal(host.assigned.length, 0);
+  assert.deepEqual(r1.qa, []);
+  const b = await sub2(tickets, "T-2.2");
+  assert.deepEqual([b.status, b.reason], ["ready", "rebase"]);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "dev");
+
+  await turn({ tickets, host, cursor });
+  const [m] = host.assigned;
+  assert.deepEqual([m.mission.kind, m.mission.subtask, m.mission.branch, m.mission.base], ["rebase", "T-2.2", "agent/T-2.2", "agent/T-2.1"]);
+  assert.ok(m.mission.instruction.includes("git rebase --onto team/agent/T-2.1 abc123"), m.mission.instruction);
+  assert.deepEqual([(await sub2(tickets, "T-2.2")).status, (await sub2(tickets, "T-2.2")).reason], ["in-dev", "rebase"]);
+
+  host.stackStates.clear();
+  host.finish("a");
+  const r3 = await turn({ tickets, host, cursor });
+  assert.deepEqual(r3.qa, [{ ticket: "T-2", verdict: "started" }]);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "qa");
+  assert.equal(host.assigned.at(-1)!.mission.kind, "qa");
+  assert.equal((await sub2(tickets, "T-2.2")).reason, null);
+});
+
+test("tour : un rebase arrêté par une question reste un rebase après la réponse", async () => {
+  const { tickets } = await setup();
+  await tickets.setSubtaskStatus({ id: "T-2.1", status: "done" });
+  await tickets.setSubtaskStatus({ id: "T-2.2", status: "ready", reason: "rebase" });
+  await tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  const host = new FakeHost(["a"]);
+  const cursor = memCursor();
+  await turn({ tickets, host, cursor });
+  assert.equal(host.assigned[0].mission.kind, "rebase");
+  host.ask("a", "Which side of the conflict?");
+  await turn({ tickets, host, cursor });
+  const b = await sub2(tickets, "T-2.2");
+  assert.deepEqual([b.status, b.reason], ["ready", "rebase"]);
+  const [req] = await tickets.listRequests({ ticket: "T-2" });
+  await tickets.answerRequest({ ticket: "T-2", id: req.id, text: "keep both" });
+  await turn({ tickets, host, cursor });
+  const last = host.assigned.at(-1)!.mission;
+  assert.deepEqual([last.kind, last.subtask], ["rebase", "T-2.2"]);
+});
+
+test("tour : une QA tenue n'est pas libérée tant que le ticket est en qa, puis l'est ; une QA perdue repart en QA", async () => {
+  const { tickets, host, cursor } = await inQa();
+  await turn({ tickets, host, cursor });
+  assert.ok(!host.calls.includes("release a"));
+  await tickets.setTicketStatus({ id: "T-2", status: "human-review" });
+  await turn({ tickets, host, cursor });
+  assert.ok(host.calls.includes("release a"));
+
+  const lost = await inQa();
+  lost.host.executors[0].session = "exited";
+  const r = await turn(lost);
+  assert.deepEqual(r.problems, []);
+  const [m] = lost.host.assigned;
+  assert.deepEqual([m.to, m.mission.kind, m.mission.subtask], ["a", "qa", "T-2.2"]);
+});
+
+test("tour : un ticket en qa dont une demande attend ne reçoit pas de QA", async () => {
+  const { tickets, host, cursor } = await inQa();
+  host.executors[0].mission = null;
+  host.executors[0].session = "none";
+  await tickets.openRequest({ ticket: "T-2", subtask: "T-2.2", text: "Which limit?" });
+  const r = await turn({ tickets, host, cursor });
+  assert.deepEqual(host.assigned.map((x) => x.mission.subtask), ["T-1.1"]);
+  assert.deepEqual(r.qa, []);
 });
