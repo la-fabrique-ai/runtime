@@ -4,7 +4,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFi
 import { dirname, join } from "node:path";
 import { ForgeError } from "../context.ts";
 import { apiDataDir } from "../paths.ts";
-import type { HeldMission } from "../orchestrator/host.ts";
+import type { HeldMission, QaReport } from "../orchestrator/host.ts";
 import type { MissionVerb } from "./missions.ts";
 
 // Les verbes de mission (api/missions.ts). Un journal tenu avant le modèle à
@@ -28,6 +28,8 @@ export type Entry = {
   mission?: HeldMission;
   // La réponse recommandée d'un ask, quand le développeur en donne une.
   recommended?: string;
+  // Le compte rendu structuré du `done` d'une QA.
+  qa?: QaReport;
 };
 
 export type NewEntry = Omit<Entry, "id" | "time">;

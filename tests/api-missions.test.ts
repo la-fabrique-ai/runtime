@@ -11,7 +11,7 @@ import { parseConfig } from "../cli/lib/config.ts";
 import type { ApiDeps } from "../cli/lib/api/missions.ts";
 import { Journal } from "../cli/lib/api/journal.ts";
 import { hostSocketPath, serveApi } from "../cli/lib/api/server.ts";
-import { handleMission, MISSION_FILES_DIR, MISSION_KEY, parseMissionRequest } from "../cli/lib/api/missions.ts";
+import { handleMission, MISSION_FILES_DIR, MISSION_KEY, parseMissionRequest, parseQaReport } from "../cli/lib/api/missions.ts";
 import { MISSION_DIR } from "../cli/lib/orchestrator/instruction.ts";
 import { branchRecord, readBranchRecords, recordBranch, setBuiltOn } from "../cli/lib/branch-records.ts";
 import { socketHost, type HeldMission, type MissionSpec } from "../cli/lib/orchestrator/host.ts";
@@ -778,4 +778,59 @@ test("a local branch that differs from its published ref, diverged from the team
   setup([onBranch, notAncestor(TEAM, "HEAD"), notAncestor("HEAD", TEAM), published(false)]);
   assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec() }), { ok: false, error: DIVERGED });
   assert.ok(!joined().some((c) => c.includes(" switch")));
+});
+
+// ------------------------------------------------ le rendu selon le genre
+
+test("a QA report is checked field by field, each refusal naming its field", () => {
+  const qa = (v: unknown) => () => parseQaReport(v, "T-1", ["tok-123"]);
+  const defect = (over: Record<string, unknown> = {}) => ({ subtask: "T-1.1", text: "the list is empty", ...over });
+  assert.throws(qa({ verdict: "ko", defects: [defect()], extra: 1 }), /qa: unknown field: "extra"/);
+  assert.throws(qa({ verdict: "ko", defects: [] }), /qa\.defects: a ko report has 1 to 50 defects/);
+  assert.throws(qa({ verdict: "ok", defects: [defect()] }), /qa\.defects: an ok report has no defect/);
+  assert.throws(qa({ verdict: "ko", defects: [defect({ subtask: "T-2.1" })] }), /qa\.defects\[0\]\.subtask is not a sub-task of T-1/);
+  assert.throws(qa({ verdict: "ko", defects: [defect(), defect({ text: "voici tok-123" })] }), /qa\.defects\[1\]\.text.*secret/);
+  assert.throws(qa({ verdict: "ko", defects: Array.from({ length: 51 }, () => defect()) }), /qa\.defects: a ko report has 1 to 50 defects/);
+  assert.throws(qa({ verdict: "maybe", defects: [] }), /qa\.verdict must be "ok" or "ko"/);
+  assert.deepEqual(parseQaReport({ verdict: "ko", defects: [defect(), defect({ subtask: null })] }, "T-1", []),
+    { verdict: "ko", defects: [defect(), defect({ subtask: null })] });
+});
+
+const qaHeld = () => held({ kind: "qa", subtask: "T-1.2", branch: "agent/T-1.2", base: "agent/T-1.1" });
+const rebaseHeld = () => held({ kind: "rebase", subtask: "T-1.2", branch: "agent/T-1.2", base: "agent/T-1.1" });
+const KO = { verdict: "ko", defects: [{ subtask: "T-1.1", text: "empty" }, { subtask: null, text: "slow" }] };
+
+test("a QA done with a valid ko report copies nothing, and its event carries the kind and the defects", async () => {
+  hold(E1, qaHeld());
+  assert.deepEqual(await call(E1, { op: "done", report: "ran it", qa: KO }), { ok: true, id: 1 });
+  assert.ok(!ctx.calls.some((c) => c[0] === "git" && c.includes("fetch")), joined().join("\n"));
+  const ev = await call(CONTROL, { op: "events", after: 0 });
+  assert.deepEqual(ev, { ok: true, last: 1, events: [{
+    id: 1, kind: "done", executor: E1, ticket: "T-1", subtask: "T-1.2", branch: "agent/T-1.2", report: "ran it", mission: "qa", qa: KO,
+  }] });
+  await withHost(async (host) => assert.deepEqual((await host.events(0)).events[0], (ev as { events: unknown[] }).events[0]));
+});
+
+test("a QA done without its report, a QA ask, a dev done carrying a report of QA: refused", async () => {
+  hold(E1, qaHeld());
+  assert.deepEqual(await call(E1, { op: "done" }), { ok: false, error: "a QA mission ends with forge-team done --qa-report-file <file>" });
+  assert.deepEqual(await call(E1, { op: "ask", text: "Which limit?" }), { ok: false, error:
+    "a QA mission does not ask: put what the spec does not settle in your QA report, then report done" });
+  hold(E1, held());
+  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "2\n" }]);
+  assert.deepEqual(await call(E1, { op: "done", qa: KO }), { ok: false, error: "this is not a QA mission" });
+  assert.ok(d.journal.entries().every((e) => e.outcome !== "ok"));
+});
+
+test("a rebase done must stand on its base's tip: refused and nothing copied otherwise; accepted with no commit of its own", async () => {
+  hold(E1, rebaseHeld());
+  setup([notAncestor("team/agent/T-1.1", "agent/T-1.2"), { match: "rev-list --count", stdout: "0\n" }]);
+  assert.deepEqual(await call(E1, { op: "done" }), { ok: false, error: "agent/T-1.2 does not stand on agent/T-1.1: rebase it, then report done again" });
+  assert.ok(!ctx.calls.some((c) => c[0] === "git" && c.includes("fetch")));
+  setup([{ match: "rev-list --count", stdout: "0\n" }]);
+  // Le refus d'avant a pris l'id 1 du journal.
+  assert.deepEqual(await call(E1, { op: "done", report: "no conflict" }), { ok: true, id: 2 });
+  assert.ok(ctx.calls.some((c) => c[0] === "git" && c.at(-1) === "+refs/heads/agent/T-1.2:refs/heads/agent/T-1.2"));
+  const ev = await call(CONTROL, { op: "events", after: 0 }) as unknown as { events: { mission: string }[] };
+  assert.equal(ev.events[0].mission, "rebase");
 });

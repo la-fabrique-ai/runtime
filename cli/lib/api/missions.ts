@@ -17,7 +17,7 @@ import { recordBranch, setBuiltOn } from "../branch-records.ts";
 import { clearMessages, hcArgv, sessionState, startSession, stopSession } from "../hc-session.ts";
 import { configGet, configSet, configUnset, execAsAgentArgv, incus, listInstances, pushText } from "../incus.ts";
 import { ensureBareTeamMirror, HOST_GIT_CWD } from "../mirror.ts";
-import type { ExecutorStatus, HeldMission, HostEvent, MissionFiles, MissionKind, MissionSpec, SessionState } from "../orchestrator/host.ts";
+import type { ExecutorStatus, HeldMission, HostEvent, MissionFiles, MissionKind, MissionSpec, QaReport, SessionState } from "../orchestrator/host.ts";
 import { forgeCommand } from "../paths.ts";
 import { CONTROL, projectMembers, repoTeamMirror, type ProjectMember } from "../project.ts";
 import { cloneDir } from "../project-provision.ts";
@@ -55,7 +55,9 @@ export type MissionRequest =
   | { op: "assign"; to: string; mission: MissionSpec }
   | { op: "release"; to: string }
   | { op: "events"; after: number }
-  | { op: "done"; report: string | null }
+  // `qa` : le compte rendu structuré d'une QA, lu ici tel quel ; il se valide
+  // contre la mission tenue (parseQaReport), que la requête ne connaît pas.
+  | { op: "done"; report: string | null; qa: unknown }
   | { op: "ask"; text: string; recommended: string | null };
 
 type Kind = ProjectMember["kind"];
@@ -68,7 +70,7 @@ const VERBS: Record<Kind, readonly MissionVerb[]> = {
 };
 // Les champs exacts de chaque verbe ; `op` est lu à part.
 const FIELDS: Record<MissionVerb, readonly string[]> = {
-  status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: ["report"], ask: ["text", "recommended"],
+  status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: ["report", "qa"], ask: ["text", "recommended"],
 };
 const MISSION_FIELDS = ["kind", "ticket", "subtask", "repository", "branch", "base", "instruction"] as const;
 const KINDS = ["dev", "rebase", "qa"] as const;
@@ -227,7 +229,7 @@ export function parseMissionRequest(line: string, from: Kind, secrets: readonly 
       if (raw !== null && typeof raw !== "string") throw new ForgeError("done: report must be a string or null");
       const report = raw === null || raw.trim() === "" ? null : raw;
       if (report !== null) checkText(report, INSTRUCTION_MAX, "report", secrets);
-      return { op: "done", report };
+      return { op: "done", report, qa: json.qa ?? null };
     }
     case "ask": {
       const text = json.text;
@@ -242,6 +244,37 @@ export function parseMissionRequest(line: string, from: Kind, secrets: readonly 
     default:
       return { op: "status" };
   }
+}
+
+// Le compte rendu structuré d'une QA, écrit par un agent : exactement
+// `verdict` et `defects` ; `ok` sans défaut, `ko` avec 1 à 50 ; un défaut est
+// exactement `subtask` (null : transverse, ou une sous-tâche de `ticket`) et
+// `text` (non vide, au plus QA_DEFECT_MAX octets, sans secret).
+const QA_DEFECTS_MAX = 50;
+const QA_DEFECT_MAX = 8_192;
+export function parseQaReport(v: unknown, ticket: string, secrets: readonly string[]): QaReport {
+  if (!isObj(v)) throw new ForgeError("done: qa must be an object");
+  unknownFields("done: qa", v, ["verdict", "defects"]);
+  if (v.verdict !== "ok" && v.verdict !== "ko") throw new ForgeError('done: qa.verdict must be "ok" or "ko"');
+  if (!Array.isArray(v.defects)) throw new ForgeError("done: qa.defects must be a list");
+  const list = v.defects as unknown[];
+  if (v.verdict === "ok" && list.length > 0) throw new ForgeError("done: qa.defects: an ok report has no defect");
+  if (v.verdict === "ko" && (list.length === 0 || list.length > QA_DEFECTS_MAX)) {
+    throw new ForgeError(`done: qa.defects: a ko report has 1 to ${QA_DEFECTS_MAX} defects`);
+  }
+  const defects = list.map((d, i) => {
+    const where = `qa.defects[${i}]`;
+    if (!isObj(d)) throw new ForgeError(`done: ${where} must be an object`);
+    unknownFields(`done: ${where}`, d, ["subtask", "text"]);
+    const sub = d.subtask;
+    if (sub !== null && (!isSubtaskId(sub) || sub.slice(0, sub.indexOf(".")) !== ticket)) {
+      throw new ForgeError(`done: ${where}.subtask is not a sub-task of ${ticket}`);
+    }
+    if (typeof d.text !== "string") throw new ForgeError(`done: ${where}.text must be a string`);
+    checkText(d.text, QA_DEFECT_MAX, `${where}.text`, secrets);
+    return { subtask: sub as string | null, text: d.text };
+  });
+  return { verdict: v.verdict, defects };
 }
 
 // ---------------------------------------------------------------- l'état tenu
@@ -298,7 +331,9 @@ export async function handleMission(d: ApiDeps, caller: ProjectMember, line: str
   }
 }
 
-function entryFields(caller: ProjectMember, req: MissionRequest | null, outcome: Entry["outcome"], error: string | null, held?: HeldMission): NewEntry {
+function entryFields(
+  caller: ProjectMember, req: MissionRequest | null, outcome: Entry["outcome"], error: string | null, held?: HeldMission, qa?: QaReport,
+): NewEntry {
   const mission = req?.op === "assign" ? heldOf(req.mission) : held;
   return {
     caller: caller.name, op: req?.op ?? null,
@@ -311,6 +346,7 @@ function entryFields(caller: ProjectMember, req: MissionRequest | null, outcome:
           : req.op === "ask" ? req.text : null,
     ...(mission === undefined ? {} : { mission }),
     ...(req?.op === "ask" && req.recommended !== null ? { recommended: req.recommended } : {}),
+    ...(qa === undefined ? {} : { qa }),
   };
 }
 
@@ -690,7 +726,9 @@ function events(d: ApiDeps, after: number): Outcome {
     .map((e): HostEvent => {
       const base = { id: e.id, executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask };
       if (e.op === "ask") return { ...base, kind: "ask", text: e.text ?? "", recommended: e.recommended ?? null };
-      return { ...base, kind: "done", branch: e.mission!.branch, report: e.text ?? null, mission: "dev", qa: null };
+      // Une ligne écrite par la partie 2 n'a pas d'autre genre que `dev`.
+      const mission: MissionKind = (e.mission!.kind as MissionKind | undefined) ?? "dev";
+      return { ...base, kind: "done", branch: e.mission!.branch, report: e.text ?? null, mission, qa: e.qa ?? null };
     });
   return { reply: () => ({ ok: true, events: list, last }), quiet: true };
 }
@@ -705,7 +743,8 @@ function events(d: ApiDeps, after: number): Outcome {
 // un done accepté sur un clone sale libérerait un exécuteur que `status` dit
 // ensuite `unknown`, et qui ne recevrait plus de mission.
 async function handBack(
-  d: ApiDeps, caller: ProjectMember, req: { op: "done"; report: string | null } | { op: "ask"; text: string; recommended: string | null },
+  d: ApiDeps, caller: ProjectMember,
+  req: { op: "done"; report: string | null; qa: unknown } | { op: "ask"; text: string; recommended: string | null },
 ): Promise<Outcome> {
   const { ctx } = d;
   const again = req.op === "done" ? "report done again" : "ask again";
@@ -714,11 +753,27 @@ async function handBack(
     throw new ForgeError(`${caller.name} holds no mission: there is nothing to ${req.op === "done" ? "report done" : "ask about"}`);
   }
   if (m === "unreadable") throw new ForgeError(`${caller.name}'s mission key is unreadable: ask for it to be released`);
+  // Le compte rendu d'une QA, validé contre la mission tenue avant tout git.
+  let qa: QaReport | undefined;
+  if (req.op === "done" && m.kind === "qa") {
+    if (req.qa === null) throw new ForgeError("a QA mission ends with forge-team done --qa-report-file <file>");
+    qa = parseQaReport(req.qa, m.ticket, d.secrets);
+  } else if (req.op === "done" && req.qa !== null) {
+    throw new ForgeError("this is not a QA mission");
+  }
+  if (req.op === "ask" && m.kind === "qa") {
+    throw new ForgeError("a QA mission does not ask: put what the spec does not settle in your QA report, then report done");
+  }
   for (const c of await cloneStates(ctx, caller.name, requireProject(d))) {
     if (c.state === "dirty") {
       throw new ForgeError(`${caller.name}: ${cloneDir(c.repository)} has uncommitted changes: commit or discard them, then ${again}`);
     }
     if (c.state === "unreadable") throw new ForgeError(`${caller.name}: git status in ${cloneDir(c.repository)} did not answer: try ${req.op} again`);
+  }
+  if (qa !== undefined) {
+    // Une QA ne commite rien : rien à copier.
+    const entry = d.journal.append(entryFields(caller, req, "ok", null, m, qa), d.now());
+    return { entry, reply: (id) => ({ ok: true, id }) };
   }
   const git = gitIn(ctx, caller.name, m.repository);
   // La base, à jour dans le clone : `origin/<b>` après `git fetch origin`,
@@ -727,8 +782,17 @@ async function handBack(
   await mustSucceed(stacked ? "git fetch team" : "git fetch origin", git(FETCH_MS, "fetch", stacked ? "team" : "origin"));
   const from = stacked ? `team/${m.base}` : m.base;
   const count = await mustSucceed("git rev-list", git(GIT_MS, "rev-list", "--count", `${from}..${m.branch}`));
-  const ahead = Number.parseInt(count.stdout.trim(), 10) > 0;
-  if (!ahead && req.op === "done") throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
+  let ahead = Number.parseInt(count.stdout.trim(), 10) > 0;
+  if (m.kind === "rebase") {
+    // Un rebase n'ajoute pas de commit : il doit seulement être posé sur la
+    // pointe de sa base, et la branche réécrite est toujours copiée.
+    if ((await git(GIT_MS, "merge-base", "--is-ancestor", from, m.branch)).code !== 0) {
+      throw new ForgeError(`${m.branch} does not stand on ${m.base}: rebase it, then ${again}`);
+    }
+    ahead = true;
+  } else if (!ahead && req.op === "done") {
+    throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
+  }
   if (ahead) {
     await copyToTeamMirror(ctx, caller.name, m.repository, m.branch);
     await recordPublished(git, m, from);
