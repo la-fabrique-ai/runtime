@@ -752,13 +752,17 @@ async function status(ctx: Context, p: ProjectConfig): Promise<ExecutorStatus[]>
 // d'origine (`origin/<b>`) ou d'équipe (`agent/<x>`) ; elle est à jour quand sa
 // fiche dit qu'elle était posée sur cette pointe. Lu à chaque tour, comme
 // `events` : aucune ligne au journal.
+// La pointe d'une réf dans un miroir de l'hôte, par le git de l'hôte : null si
+// elle n'y est pas.
+async function mirrorTip(ctx: Context, mirror: string, ref: string): Promise<string | null> {
+  const r = await ctx.exec(["git", `--git-dir=${mirror}`, "rev-parse", "--verify", "--quiet", ref],
+    { cwd: HOST_GIT_CWD, env: { GIT_TERMINAL_PROMPT: "0" }, timeoutMs: GIT_MS });
+  if (r.timedOut) throw new ForgeError(`git rev-parse in ${mirror} timed out after ${GIT_MS / 1000} s`);
+  return r.code === 0 ? r.stdout.trim() : null;
+}
+
 async function stack(ctx: Context, branches: StackBranch[]): Promise<StackState[]> {
-  const tip = async (mirror: string, ref: string): Promise<string | null> => {
-    const r = await ctx.exec(["git", `--git-dir=${mirror}`, "rev-parse", "--verify", "--quiet", ref],
-      { cwd: HOST_GIT_CWD, env: { GIT_TERMINAL_PROMPT: "0" }, timeoutMs: GIT_MS });
-    if (r.timedOut) throw new ForgeError(`git rev-parse in ${mirror} timed out after ${GIT_MS / 1000} s`);
-    return r.code === 0 ? r.stdout.trim() : null;
-  };
+  const tip = (mirror: string, ref: string) => mirrorTip(ctx, mirror, ref);
   const out: StackState[] = [];
   for (const b of branches) {
     const team = repoTeamMirror(b.repository);
@@ -843,17 +847,27 @@ async function handBack(
   const from = stacked ? `team/${m.base}` : m.base;
   const count = await mustSucceed("git rev-list", git(GIT_MS, "rev-list", "--count", `${from}..${m.branch}`));
   let ahead = Number.parseInt(count.stdout.trim(), 10) > 0;
+  if (!ahead && req.op === "done") throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
   if (m.kind === "rebase" && req.op === "done") {
-    // Un rebase n'ajoute pas de commit : il doit seulement être posé sur la
-    // pointe de sa base, et la branche réécrite est toujours copiée. Un rebase
-    // arrêté par une question (abandonné, donc pas encore posé) rend sa branche
-    // comme tout `ask`.
+    // Un rebase garde au moins un commit au-delà de sa base (plus haut) ; il
+    // doit être posé sur la pointe de sa base, et la branche réécrite est
+    // toujours copiée. Un rebase arrêté par une question (abandonné, donc pas
+    // encore posé) rend sa branche comme tout `ask`.
     if ((await git(GIT_MS, "merge-base", "--is-ancestor", from, m.branch)).code !== 0) {
       throw new ForgeError(`${m.branch} does not stand on ${m.base}: rebase it, then ${again}`);
     }
     ahead = true;
-  } else if (!ahead && req.op === "done") {
-    throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
+  } else if (m.kind === "dev" && req.op === "done" && m.branch !== `agent/${m.subtask}`) {
+    // Un correctif travaille sur la branche de la sous-tâche qu'il corrige, qui
+    // porte déjà ses commits : il doit en ajouter au-delà de ce que le miroir
+    // d'équipe en a.
+    const tip = await mirrorTip(ctx, repoTeamMirror(m.repository), `refs/heads/${m.branch}`);
+    if (tip !== null && SHA.test(tip)) {
+      const beyond = await mustSucceed("git rev-list", git(GIT_MS, "rev-list", "--count", `${tip}..${m.branch}`));
+      if (!(Number.parseInt(beyond.stdout.trim(), 10) > 0)) {
+        throw new ForgeError(`nothing committed on ${m.branch} beyond team/${m.branch}: a fix adds its own commits`);
+      }
+    }
   }
   if (ahead) {
     await copyToTeamMirror(ctx, caller.name, m.repository, m.branch);

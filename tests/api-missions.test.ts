@@ -822,14 +822,18 @@ test("a QA done without its report, a QA ask, a dev done carrying a report of QA
   assert.ok(d.journal.entries().every((e) => e.outcome !== "ok"));
 });
 
-test("a rebase done must stand on its base's tip: refused and nothing copied otherwise; accepted with no commit of its own", async () => {
+test("a rebase done must stand on its base's tip, with a commit beyond it: refused and nothing copied otherwise", async () => {
   hold(E1, rebaseHeld());
-  setup([notAncestor("team/agent/T-1.1", "agent/T-1.2"), { match: "rev-list --count", stdout: "0\n" }]);
+  setup([notAncestor("team/agent/T-1.1", "agent/T-1.2"), { match: "rev-list --count", stdout: "1\n" }]);
   assert.deepEqual(await call(E1, { op: "done" }), { ok: false, error: "agent/T-1.2 does not stand on agent/T-1.1: rebase it, then report done again" });
   assert.ok(!ctx.calls.some((c) => c[0] === "git" && c.includes("fetch")));
+  // Rendu vide : rien au-delà de la base, rien de copié.
   setup([{ match: "rev-list --count", stdout: "0\n" }]);
-  // Le refus d'avant a pris l'id 1 du journal.
-  assert.deepEqual(await call(E1, { op: "done", report: "no conflict" }), { ok: true, id: 2 });
+  assert.deepEqual(await call(E1, { op: "done" }), { ok: false, error: "nothing committed on agent/T-1.2 beyond agent/T-1.1" });
+  assert.ok(!ctx.calls.some((c) => c[0] === "git" && c.includes("fetch") && c.includes("src")));
+  setup([{ match: "rev-list --count", stdout: "1\n" }]);
+  // Les refus d'avant ont pris les ids 1 et 2 du journal.
+  assert.deepEqual(await call(E1, { op: "done", report: "no conflict" }), { ok: true, id: 3 });
   assert.ok(ctx.calls.some((c) => c[0] === "git" && c.at(-1) === "+refs/heads/agent/T-1.2:refs/heads/agent/T-1.2"));
   const ev = await call(CONTROL, { op: "events", after: 0 }) as unknown as { events: { mission: string }[] };
   assert.equal(ev.events[0].mission, "rebase");
@@ -879,4 +883,19 @@ test("a rebase mission stopped by a question (rebase aborted, so not on its base
   hold(E1, rebaseHeld());
   setup([notAncestor("team/agent/T-1.1", "agent/T-1.2"), { match: "rev-list --count", stdout: "1\n" }]);
   assert.deepEqual(await call(E1, { op: "ask", text: "Which side of the conflict?" }), { ok: true, id: 1 });
+});
+
+// Un correctif travaille sur la branche de la sous-tâche qu'il corrige : ses
+// commits à elle sont déjà au-delà de la base.
+test("a fix done with nothing beyond what the team mirror holds of its branch is refused; with a commit, accepted", async () => {
+  const fix = held({ subtask: "T-1.3", branch: "agent/T-1.1" });
+  hold(E1, fix);
+  const TIP = "4".repeat(40);
+  const inTeam = tipRule(repoTeamMirror("web"), "refs/heads/agent/T-1.1", TIP);
+  setup([inTeam, { match: "rev-list --count origin/main..agent/T-1.1", stdout: "2\n" }, { match: `rev-list --count ${TIP}..agent/T-1.1`, stdout: "0\n" }]);
+  assert.deepEqual(await call(E1, { op: "done" }), { ok: false, error:
+    "nothing committed on agent/T-1.1 beyond team/agent/T-1.1: a fix adds its own commits" });
+  assert.ok(!ctx.calls.some((c) => c[0] === "git" && c.includes("src")));
+  setup([inTeam, { match: "rev-list --count origin/main..agent/T-1.1", stdout: "3\n" }, { match: `rev-list --count ${TIP}..agent/T-1.1`, stdout: "1\n" }]);
+  assert.deepEqual(await call(E1, { op: "done" }), { ok: true, id: 2 });
 });
