@@ -196,3 +196,9 @@ test("create-ticket: a todo ticket with the repositories of its origin, its text
   assert.deepEqual(await ask(d, { op: "create-ticket", from: "T-1", title: "two\nlines", text: "x" }),
     { ok: false, error: "create-ticket: title must be one line of at most 200 bytes" });
 });
+
+test("tickets gives each ticket the number of its requests without an answer", async () => {
+  const { d } = await setup();
+  const r = await ask(d, { op: "tickets" }) as unknown as { tickets: { id: string; waiting: number }[] };
+  assert.deepEqual(r.tickets.map((t) => [t.id, t.waiting]), [["T-1", 1]]);
+});

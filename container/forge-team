@@ -32,7 +32,7 @@ const SOCKET = CONTROL ? CHANNEL_SOCKET : API_SOCKET;
 const EXECUTOR_USAGE = `usage: forge-team done [--report-file <file>] [--qa-report-file <file>]
        forge-team ask [--recommended-file <file>]   (the question for the human on stdin)
        forge-team status`;
-const CONTROL_USAGE = `usage: forge-team tickets [<status>…]
+const CONTROL_USAGE = `usage: forge-team tickets [--json] [<status>…]
        forge-team ticket <id>
        forge-team mission <id> <spec|answers|split>
        forge-team problems [--json]
@@ -66,8 +66,10 @@ function controlRequest(command, args) {
     if (args.length !== n) usage(`${command} takes ${shape}`);
   };
   switch (command) {
-    case "tickets":
-      return args.length === 0 ? { op: "tickets" } : { op: "tickets", status: args };
+    case "tickets": {
+      const statuses = args.filter((a) => a !== "--json");
+      return statuses.length === 0 ? { op: "tickets" } : { op: "tickets", status: statuses };
+    }
     case "ticket":
       exactly(1, "a ticket id");
       return { op: "ticket", id: args[0] };
@@ -214,7 +216,8 @@ function printControl(req, reply) {
   const w = (s) => process.stdout.write(`${s}\n`);
   switch (req.op) {
     case "tickets":
-      for (const t of reply.tickets) w(`${t.id}\t${t.status}\tP${t.priority}\t${t.title}`);
+      if (process.argv.includes("--json")) return w(JSON.stringify(reply.tickets));
+      for (const t of reply.tickets) w(`${t.id}\t${t.status}\tP${t.priority}\t${t.title}${t.waiting > 0 ? `\t(waits for ${t.waiting})` : ""}`);
       for (const p of reply.problems) w(`problem: ${p}`);
       return;
     case "ticket": {

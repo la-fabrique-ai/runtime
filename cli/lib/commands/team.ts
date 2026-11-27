@@ -55,8 +55,10 @@ export type ProjectMemberStatus = {
   orchestrator?: OrchestratorState;
 };
 // `problems` : ceux du dernier tour de l'orchestrateur, lus par son canal ;
-// null quand ils n'ont pas pu être lus (ou avec --quick).
-export type ProjectStatus = { members: ProjectMemberStatus[]; problems: string[] | null };
+// `tickets` : les tickets en cours, lus de même ; null quand ils n'ont pas pu
+// être lus (ou avec --quick).
+export type TicketLine = { id: string; title: string; status: string; priority: number; waiting: number };
+export type ProjectStatus = { members: ProjectMemberStatus[]; problems: string[] | null; tickets: TicketLine[] | null };
 
 const SUBCOMMANDS = ["converge", "status", "sync", "assign", "release", "for-repo", "task-base", "upload-pack"];
 
@@ -231,6 +233,26 @@ async function orchestratorProblems(ctx: Context, running: boolean): Promise<str
   }
 }
 
+// Les tickets en cours (de `spec` à `pr-review`), par priorité, lus comme les
+// problèmes ; null si le contrôle ou le canal ne répond pas.
+const UNDER_WAY = ["spec", "dev", "qa", "human-review", "pr-review"];
+async function ticketsUnderWay(ctx: Context, running: boolean): Promise<TicketLine[] | null> {
+  if (!running) return null;
+  const r = await execAsAgentArgv(ctx, CONTROL, ["forge-team", "tickets", "--json", ...UNDER_WAY], { timeoutMs: PROBLEMS_MS });
+  if (r.timedOut || r.code !== 0) return null;
+  try {
+    const v: unknown = JSON.parse(r.stdout);
+    const ok = (t: unknown): t is TicketLine => {
+      const o = t as Record<string, unknown>;
+      return typeof t === "object" && t !== null && typeof o.id === "string" && typeof o.title === "string" &&
+        typeof o.status === "string" && typeof o.priority === "number" && Number.isSafeInteger(o.waiting);
+    };
+    return Array.isArray(v) && v.every(ok) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 // Aucun miroir à rafraîchir en mode projet. `--quick` ne demande pas les
 // problèmes de l'orchestrateur.
 async function status(ctx: Context, p: ProjectConfig, json: boolean, quick: boolean): Promise<number> {
@@ -267,13 +289,27 @@ async function status(ctx: Context, p: ProjectConfig, json: boolean, quick: bool
     members.push(row);
     rows.push([m.name, m.kind, inst?.status ?? "Missing", session, label]);
   }
-  const problems = quick ? null : await orchestratorProblems(ctx, instances.get(CONTROL)?.status === "Running");
+  const controlUp = instances.get(CONTROL)?.status === "Running";
+  const problems = quick ? null : await orchestratorProblems(ctx, controlUp);
+  const tickets = quick ? null : await ticketsUnderWay(ctx, controlUp);
   if (json) {
-    ctx.out(JSON.stringify({ members, problems } satisfies ProjectStatus));
+    ctx.out(JSON.stringify({ members, problems, tickets } satisfies ProjectStatus));
     return 0;
   }
   printTable(ctx, rows, ["NAME", "KIND", "STATUS", "SESSION", "MISSION"]);
   if (quick) return 0;
+  if (tickets === null) {
+    ctx.out("tickets: unavailable");
+  } else if (tickets.length > 0) {
+    ctx.out("");
+    ctx.out("TICKETS");
+    const idWidth = Math.max(...tickets.map((t) => t.id.length));
+    const statusWidth = Math.max(...tickets.map((t) => t.status.length));
+    for (const t of tickets) {
+      const waits = t.waiting > 0 ? `  (waits for ${t.waiting} answer${t.waiting === 1 ? "" : "s"})` : "";
+      ctx.out(printableText(`${t.id.padEnd(idWidth)}  ${t.status.padEnd(statusWidth)}  ${t.title}${waits}`));
+    }
+  }
   if (problems === null) {
     ctx.out("orchestrator's problems: unavailable");
   } else if (problems.length > 0) {

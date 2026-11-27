@@ -94,13 +94,13 @@ test("status --json of a project prints its members: kind, presence, the mission
     { name: "agent-control", kind: "control", present: true, mission: null, session: "idle", orchestrator: "failed" },
     { name: "agent-executor-1", kind: "executor", present: true, mission: HELD, session: "idle" },
     { name: "agent-executor-2", kind: "executor", present: false, mission: null, session: "none" },
-  ], problems: null });
+  ], problems: null, tickets: null });
   const text = project(fake, [LIVE_IDLE, ORCH_FAILED]).ctx;
   assert.equal(await cmdTeam(text, ["status"]), 0);
   assert.deepEqual(text.out_lines.map((l) => l.split(/\s+/).join(" ").trim()), [
     "NAME KIND STATUS SESSION MISSION", "agent-control control Running idle orchestrator failed",
     "agent-executor-1 executor Running idle T-1.2 (web)", "agent-executor-2 executor Missing none free",
-    "orchestrator's problems: unavailable",
+    "tickets: unavailable", "orchestrator's problems: unavailable",
   ]);
 });
 
@@ -327,4 +327,32 @@ test("status shows the kind of a mission that is not dev", async () => {
   const rows = ctx.out_lines.map((l) => l.split(/\s+/).join(" ").trim());
   assert.ok(rows.includes("agent-executor-1 executor Running idle qa T-1 (web)"), rows.join("\n"));
   assert.ok(rows.includes("agent-executor-2 executor Running idle rebase T-1.2 (web)"), rows.join("\n"));
+});
+
+test("status prints the tickets under way, by priority, and says when one waits for an answer; unreachable, unavailable", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  const list = [
+    { id: "T-2", title: "Spinner\u001b[31m", status: "human-review", priority: 1, waiting: 0 },
+    { id: "T-1", title: "Paginate", status: "dev", priority: 2, waiting: 1 },
+  ];
+  const tickets: ExecRule = { match: "forge-team tickets --json", stdout: JSON.stringify(list) };
+  const problems: ExecRule = { match: "forge-team problems --json", stdout: "[]" };
+  const { ctx } = project(fake, [LIVE_IDLE, tickets, problems]);
+  assert.equal(await cmdTeam(ctx, ["status"]), 0);
+  const out = ctx.out_lines.map((l) => l.split(/\s+/).join(" ").trim());
+  const at = out.indexOf("TICKETS");
+  assert.ok(at > 0, out.join("\n"));
+  assert.deepEqual(out.slice(at + 1, at + 3), ["T-2 human-review Spinner[31m", "T-1 dev Paginate (waits for 1 answer)"]);
+  const call = ctx.calls.map((c) => c.join(" ")).find((c) => c.includes("forge-team tickets"))!;
+  assert.ok(call.includes("exec agent-control --user 1001") && call.endsWith("tickets --json spec dev qa human-review pr-review"), call);
+  const json = project(fake, [LIVE_IDLE, tickets, problems]).ctx;
+  await cmdTeam(json, ["status"], { json: true });
+  assert.deepEqual(JSON.parse(json.out_lines[0]).tickets, list);
+  const stopped = FakeIncus.withRuntime();
+  stopped.addInstance("agent-forge", "agent-control", { status: "Stopped", config: { "user.forge.role": "control" } });
+  const down = project(stopped, [LIVE_IDLE]).ctx;
+  assert.equal(await cmdTeam(down, ["status"]), 0);
+  assert.ok(down.out_lines.some((l) => /^agent-control\s+control\s+Stopped/.test(l)), down.out_lines.join("\n"));
+  assert.ok(down.out_lines.includes("tickets: unavailable"));
 });
