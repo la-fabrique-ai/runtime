@@ -316,3 +316,15 @@ test("converge: a running Pilot is left alone, and a change of its instructions 
   assert.equal(await cmdTeam(none, ["converge"]), 0);
   assert.ok(none.calls.some((c) => c.join(" ").includes("exec agent-control") && c.join(" ").includes("-- hc run ")), none.calls.map((c) => c.join(" ")).join("\n"));
 });
+
+test("status shows the kind of a mission that is not dev", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  fake.addInstance("agent-forge", "agent-executor-1", { status: "Running", config: { "user.forge.mission": JSON.stringify({ ...HELD, kind: "qa" }) } });
+  fake.addInstance("agent-forge", "agent-executor-2", { status: "Running", config: { "user.forge.mission": JSON.stringify({ ...HELD, kind: "rebase" }) } });
+  const { ctx } = project(fake, [LIVE_IDLE, ORCH_FAILED]);
+  assert.equal(await cmdTeam(ctx, ["status"]), 0);
+  const rows = ctx.out_lines.map((l) => l.split(/\s+/).join(" ").trim());
+  assert.ok(rows.includes("agent-executor-1 executor Running idle qa T-1 (web)"), rows.join("\n"));
+  assert.ok(rows.includes("agent-executor-2 executor Running idle rebase T-1.2 (web)"), rows.join("\n"));
+});

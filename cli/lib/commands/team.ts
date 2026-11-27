@@ -152,7 +152,10 @@ const heldMission = (i: Instance | undefined) => readHeld(i?.config[MISSION_KEY]
 function missionLabel(m: ProjectMember, held: HeldMission | null | "unreadable"): string {
   if (m.kind === "control") return "-";
   if (held === "unreadable") return "unreadable";
-  return held === null ? "free" : `${held.subtask} (${held.repository})`;
+  if (held === null) return "free";
+  // Une mission dev se lit comme avant ; une autre dit son genre (une QA, son ticket).
+  if (held.kind === "qa") return `qa ${held.ticket} (${held.repository})`;
+  return `${held.kind === "rebase" ? "rebase " : ""}${held.subtask} (${held.repository})`;
 }
 
 // Les miroirs de chaque dépôt (l'agent SSH transmis), puis chaque membre :

@@ -10,8 +10,9 @@
 // fichiers de mission et leur pile, répondre (voir CONTROL_USAGE). Ailleurs,
 // celles d'un exécuteur, vers l'API de l'hôte :
 //
-//   forge-team done [--report-file <fichier>]
-//                                       ta mission est faite et commitée ; le compte rendu est gardé
+//   forge-team done [--report-file <fichier>] [--qa-report-file <fichier>]
+//                                       ta mission est faite et commitée ; le compte rendu est gardé ;
+//                                       une QA rend son compte rendu structuré (JSON) par le second
 //   forge-team ask [--recommended-file <fichier>]
 //                                       une question pour l'humain (sur stdin) : ton travail en cours,
 //                                       commité, est rendu, et ce container va être libéré
@@ -27,7 +28,7 @@ const API_SOCKET = process.env.FORGE_API_SOCKET || "/var/lib/forge/api.sock";
 const CHANNEL_SOCKET = process.env.FORGE_CHANNEL_SOCKET || "/run/forge-orch/channel.sock";
 const CONTROL = fs.existsSync(CHANNEL_SOCKET);
 const SOCKET = CONTROL ? CHANNEL_SOCKET : API_SOCKET;
-const EXECUTOR_USAGE = `usage: forge-team done [--report-file <file>]
+const EXECUTOR_USAGE = `usage: forge-team done [--report-file <file>] [--qa-report-file <file>]
        forge-team ask [--recommended-file <file>]   (the question for the human on stdin)
        forge-team status`;
 const CONTROL_USAGE = `usage: forge-team tickets [<status>…]
@@ -135,14 +136,24 @@ function request() {
     }
     case "done": {
       let report = null;
+      let qa;
       for (let i = 0; i < args.length; i++) {
         if (args[i] === "--report-file" && report === null && args[i + 1] !== undefined) {
           report = readFile(args[++i], "report file");
+        } else if (args[i] === "--qa-report-file" && qa === undefined && args[i + 1] !== undefined) {
+          const file = args[++i];
+          const text = readFile(file, "QA report file");
+          try {
+            qa = JSON.parse(text);
+          } catch {
+            usage(`done: the --qa-report-file ${file} is not JSON`);
+          }
         } else {
           usage(`done: unexpected argument ${args[i]}`);
         }
       }
-      return { op: "done", report };
+      // Sans compte rendu de QA, la requête de la partie 2, telle quelle.
+      return qa === undefined ? { op: "done", report } : { op: "done", report, qa };
     }
     default:
       usage(command === undefined ? "a command is required" : `unknown command ${command}`);
@@ -255,8 +266,10 @@ function printControl(req, reply) {
   if (CONTROL) return printControl(raw, reply);
   if (req.op === "status" && "mission" in reply) {
     const m = reply.mission;
+    // Une mission dev se lit comme avant ; une autre dit son genre.
     process.stdout.write(m === null ? "ok\nmission: none\n"
-      : `ok\nmission: ${m.subtask} ticket=${m.ticket} repository=${m.repository} branch=${m.branch} base=${m.base}\n`);
+      : m.kind === "dev" ? `ok\nmission: ${m.subtask} ticket=${m.ticket} repository=${m.repository} branch=${m.branch} base=${m.base}\n`
+        : `ok\nmission: ${m.kind} ${m.kind === "qa" ? m.ticket : m.subtask} (${m.repository}) branch=${m.branch} base=${m.base}\n`);
   } else if (req.op === "status" && Array.isArray(reply.executors)) {
     // La réponse du contrôle : une ligne par exécuteur.
     process.stdout.write("ok\n");
