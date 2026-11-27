@@ -10,6 +10,7 @@ import { requireHookBlocks } from "../cli/lib/commands/provision.ts";
 import { installAgentFiles, requirePlugins, type AgentFiles } from "../cli/lib/agent-files.ts";
 import { AIUSER_SOCKET } from "../cli/lib/api/access.ts";
 import { referenceKit } from "../cli/lib/reference-kit.ts";
+import { MISSION_DIR } from "../cli/lib/orchestrator/instruction.ts";
 
 beforeEach(() => {
   process.env.FORGE_REPO_DIR = process.cwd();
@@ -78,4 +79,17 @@ test("settings: no plugins, no enabledPlugins; a kit without memory turns the au
   const kit = settingsOf(executor.fake);
   assert.equal(kit.autoMemoryEnabled, false);
   assert.deepEqual(kit.enabledPlugins, { "tool@claude-plugins-official": true });
+});
+
+// Sans cette règle, la première lecture d'un fichier de mission ouvre un
+// dialogue de permission qui bloque la session (recette de la PR 195) ; elle
+// n'ouvre que ce dossier, en lecture, hors des clones.
+test("settings: reads of the mission files are allowed, and no other read outside the clones", async () => {
+  const { ctx, fake } = setup([BLOCKS]);
+  await installAgentFiles(ctx, files(), AIUSER_SOCKET);
+  const perms = settingsOf(fake).permissions as Record<string, unknown>;
+  assert.ok((perms.allow as string[]).includes(`Read(/${MISSION_DIR}/**)`));
+  assert.ok((perms.allow as string[]).every((r) => r !== "Read" && !r.startsWith("Read(//") || r === `Read(/${MISSION_DIR}/**)`));
+  assert.equal("additionalDirectories" in perms, false);
+  assert.equal("blockReadsOutsideWorkingDirectories" in perms, false);
 });
