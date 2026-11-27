@@ -91,8 +91,13 @@ class FakeHost implements HostApi {
   }
 }
 
-const memCursor = (): Cursor & { value: number } => {
-  const c = { value: 0, read: () => c.value, write: (id: number) => void (c.value = id) };
+// `value` : le dernier évènement traité sans trou ; `seen` : ceux traités au-delà.
+const memCursor = (): Cursor & { value: number; seen: number[] } => {
+  const c = {
+    value: 0, seen: [] as number[],
+    read: () => ({ after: c.value, seen: c.seen }),
+    write: (s: { after: number; seen: number[] }) => void ((c.value = s.after), (c.seen = s.seen)),
+  };
   return c;
 };
 
@@ -416,16 +421,18 @@ test("un ticket illisible est signalé, pas ignoré en silence", async () => {
   assert.match(r.problems[0], /^T-9: /);
 });
 
-test("fileCursor : absent ou illisible vaut 0, écrit puis relu", () => {
+test("fileCursor : absent ou illisible vaut 0, écrit puis relu, avec les ids vus au-delà", () => {
   const dir = mkdtempSync(join(tmpdir(), "forge-cursor-"));
   const path = join(dir, "cursor");
   const c = fileCursor(path);
-  assert.equal(c.read(), 0);
-  c.write(42);
-  assert.equal(c.read(), 42);
-  assert.equal(fileCursor(path).read(), 42);
+  assert.deepEqual(c.read(), { after: 0, seen: [] });
+  c.write({ after: 42, seen: [] });
+  assert.deepEqual(fileCursor(path).read(), { after: 42, seen: [] });
+  c.write({ after: 42, seen: [44, 45] });
+  assert.equal(readFileSync(path, "utf8"), "42 44,45\n");
+  assert.deepEqual(fileCursor(path).read(), { after: 42, seen: [44, 45] });
   writeFileSync(path, "abc");
-  assert.equal(c.read(), 0);
+  assert.deepEqual(c.read(), { after: 0, seen: [] });
 });
 
 test("fileCursor : un rename en échec ne laisse pas de temporaire", () => {
@@ -433,7 +440,7 @@ test("fileCursor : un rename en échec ne laisse pas de temporaire", () => {
   const path = join(dir, "cursor");
   mkdirSync(path); // un dossier non vide à la place du fichier : le rename échoue
   writeFileSync(join(path, "x"), "");
-  assert.throws(() => fileCursor(path).write(3));
+  assert.throws(() => fileCursor(path).write({ after: 3, seen: [] }));
   assert.deepEqual(readdirSync(dir), ["cursor"]);
 });
 
@@ -587,7 +594,7 @@ test("a sub-task handed out again after a request is launched as a resumed missi
 });
 
 // T-2 : ses deux sous-tâches finies, en qa, et `a` qui tient sa QA.
-async function inQa(names = ["a"]): Promise<{ tickets: Connector; host: FakeHost; cursor: Cursor & { value: number } }> {
+async function inQa(names = ["a"]): Promise<{ tickets: Connector; host: FakeHost; cursor: Cursor & { value: number; seen: number[] } }> {
   const { tickets } = await setup();
   for (const id of ["T-2.1", "T-2.2"]) await tickets.setSubtaskStatus({ id, status: "done" });
   await tickets.setTicketStatus({ id: "T-2", status: "qa" });
@@ -751,4 +758,62 @@ test("une QA dont la session est perdue repasse par la pile : sur une pile péri
   await turn(lost);
   assert.ok(!lost.host.assigned.some((x) => x.mission.kind === "qa"));
   assert.equal((await sub2(lost.tickets, "T-2.2")).reason, "rebase");
+});
+
+// Un évènement qui échoue à chaque tour (sa sous-tâche illisible) bloque le
+// curseur : les évènements d'après sont relus à chaque tour. Ils restent sans
+// effet, par leur id.
+const stuck = (tickets: Connector, ticket: string): Connector => ({
+  ...tickets,
+  listSubtasks: async (a) => {
+    if (a.ticket === ticket) throw new ConnectorError(`${ticket}: unreadable`);
+    return tickets.listSubtasks(a);
+  },
+});
+const brokenDone = (host: FakeHost, ticket: string): void => {
+  host.events_.push({
+    id: host.events_.length + 1, kind: "done", executor: "z", ticket, subtask: `${ticket}.1`, branch: `agent/${ticket}.1`,
+    report: null, mission: "dev", qa: null,
+  });
+};
+
+test("une QA ko relue derrière un évènement en échec ne recrée pas ses correctifs et ne libère pas la QA suivante", async () => {
+  const { tickets, host, cursor } = await inQa();
+  const base = stuck(tickets, "T-1");
+  brokenDone(host, "T-1");
+  host.qaDone("a", { verdict: "ko", defects: [{ subtask: "T-2.1", text: "the list is empty" }] });
+  await turn({ tickets: base, host, cursor });
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "dev");
+  const fix = (await tickets.listSubtasks({ ticket: "T-2" }))[2];
+  assert.equal(fix.kind, "fix");
+  // Le correctif fait, le ticket revient en qa et `a` tient sa nouvelle QA.
+  await tickets.setSubtaskStatus({ id: fix.id, status: "done" });
+  await tickets.setTicketStatus({ id: "T-2", status: "qa" });
+  host.executors[0].mission = { kind: "qa", ticket: "T-2", subtask: "T-2.2", repository: "web", branch: "agent/T-2.2", base: "agent/T-2.1" };
+  host.executors[0].session = "working";
+  host.calls = [];
+  await turn({ tickets: base, host, cursor });
+  assert.equal((await tickets.listSubtasks({ ticket: "T-2" })).length, 3);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "qa");
+  assert.ok(!host.calls.includes("release a"), host.calls.join(","));
+});
+
+test("le done d'une sous-tâche relu derrière un évènement en échec ne la passe pas done pendant son rebase", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a", "b"]);
+  const cursor = memCursor();
+  await tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  await turn({ tickets, host, cursor });
+  assert.equal(host.executors[0].mission?.subtask, "T-2.1");
+  const base = stuck(tickets, "T-1");
+  brokenDone(host, "T-1");
+  host.finish("a");
+  await turn({ tickets: base, host, cursor });
+  assert.equal(await status(tickets, "T-2.1"), "done");
+  // Plus tard, T-2.1 est rebasée par b.
+  await tickets.setSubtaskStatus({ id: "T-2.1", status: "in-dev", reason: "rebase" });
+  host.executors[1].mission = { kind: "rebase", ticket: "T-2", subtask: "T-2.1", repository: "web", branch: "agent/T-2.1", base: "origin/main" };
+  host.executors[1].session = "working";
+  await turn({ tickets: base, host, cursor });
+  assert.equal(await status(tickets, "T-2.1"), "in-dev");
 });

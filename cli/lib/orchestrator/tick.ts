@@ -14,7 +14,11 @@ import type { Candidate, QaCandidate } from "./rule.ts";
 import { devInstruction, missionFiles, qaInstruction, rebaseInstruction } from "./instruction.ts";
 import { addFix } from "./fixes.ts";
 
-export type Cursor = { read(): number; write(id: number): void };
+// Le curseur : `after`, le dernier évènement traité sans trou avant lui ; `seen`,
+// les ids traités au-delà d'un évènement en échec. Chaque évènement n'a d'effet
+// qu'une fois, par son id : relu derrière un évènement bloqué, il est sauté.
+export type CursorState = { after: number; seen: number[] };
+export type Cursor = { read(): CursorState; write(s: CursorState): void };
 
 export type TickReport = {
   completed: string[];
@@ -27,23 +31,27 @@ export type TickReport = {
 
 type Picture = { ticket: Ticket; subtasks: Subtask[]; requests: Request[] };
 
-// Le curseur dans un fichier. Un fichier absent ou illisible vaut 0 : relire
-// les évènements est sans effet (une sous-tâche déjà `done` est sautée).
+// Le curseur dans un fichier : `<after>`, puis les ids de `seen` séparés par
+// des virgules (`12 14,15`). Un fichier absent ou illisible vaut 0 : tout est
+// relu, et seul l'état des tickets protège alors d'un double effet.
 export function fileCursor(path: string): Cursor {
+  const ZERO: CursorState = { after: 0, seen: [] };
   return {
     read() {
       try {
-        const text = readFileSync(path, "utf8").trim();
-        const n = Number(text);
-        return /^[0-9]+$/.test(text) && Number.isSafeInteger(n) ? n : 0;
+        const m = /^([0-9]+)(?: ([0-9]+(?:,[0-9]+)*))?$/.exec(readFileSync(path, "utf8").trim());
+        if (!m) return ZERO;
+        const nums = [m[1], ...(m[2]?.split(",") ?? [])].map(Number);
+        if (!nums.every(Number.isSafeInteger)) return ZERO;
+        return { after: nums[0], seen: nums.slice(1).filter((n) => n > nums[0]) };
       } catch {
-        return 0;
+        return ZERO;
       }
     },
-    write(id) {
+    write(c) {
       // Temporaire du même dossier puis rename : jamais de curseur à moitié écrit.
       const tmp = join(dirname(path), `.${basename(path)}.tmp-${randomUUID()}`);
-      writeFileSync(tmp, `${id}\n`, { flag: "wx" });
+      writeFileSync(tmp, `${c.after}${c.seen.length > 0 ? ` ${c.seen.join(",")}` : ""}\n`, { flag: "wx" });
       try {
         renameSync(tmp, path);
       } catch (e) {
@@ -107,34 +115,48 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
   const now = d.now ?? Date.now;
 
   // 1. Évènements.
-  const after = cursor.read();
-  let reply = await host.events(after);
-  if (reply.last < after) {
-    // Le journal de l'hôte est reparti de zéro : le curseur aussi, et on relit
-    // tout dans le même tour (relire un évènement déjà traité est sans effet).
-    cursor.write(0);
+  let state = cursor.read();
+  let reply = await host.events(state.after);
+  if (reply.last < state.after) {
+    // Le journal de l'hôte est reparti de zéro : ses ids aussi. Le curseur
+    // repart à 0, sans ids vus, et on lit le nouveau journal dans le même tour.
+    state = { after: 0, seen: [] };
+    cursor.write(state);
     reply = await host.events(0);
   }
   const events = reply.events;
   // Le curseur n'avance que jusqu'au premier évènement en échec : celui-ci
   // sera relu au tour suivant. Les suivants sont traités quand même (un
-  // ticket illisible ne bloque pas les autres) et relus sans effet.
+  // ticket illisible ne bloque pas les autres) et leurs ids retenus dans
+  // `seen` : relus, ils sont sautés.
   let advance = true;
+  const seen = new Set(state.seen);
   // Les tickets dont un évènement a échoué ce tour : leur statut ne bouge pas
   // avant qu'il soit relu (une QA `ko` à moitié traitée garde le ticket en `qa`).
   const pending = new Set<string>();
   for (const ev of events) {
-    try {
-      if (ev.kind === "ask") await onAsk(tickets, host, ev, report);
-      else if (ev.mission === "qa") await onQaDone(tickets, host, ev, report);
-      else await onDone(tickets, host, ev, report);
-    } catch (e) {
-      if (!local(e)) throw e;
-      report.problems.push(`${ev.ticket}: event ${ev.id} (${ev.subtask}): ${message(e)}`);
-      pending.add(ev.ticket);
-      advance = false;
+    let ok = true;
+    if (!seen.has(ev.id)) {
+      try {
+        if (ev.kind === "ask") await onAsk(tickets, host, ev, report);
+        else if (ev.mission === "qa") await onQaDone(tickets, host, ev, report);
+        else await onDone(tickets, host, ev, report);
+      } catch (e) {
+        if (!local(e)) throw e;
+        report.problems.push(`${ev.ticket}: event ${ev.id} (${ev.subtask}): ${message(e)}`);
+        pending.add(ev.ticket);
+        ok = false;
+      }
     }
-    if (advance) cursor.write(ev.id);
+    if (!ok) advance = false;
+    if (advance) {
+      state = { after: ev.id, seen: [...seen].filter((id) => id > ev.id) };
+      seen.delete(ev.id);
+    } else if (ok) {
+      seen.add(ev.id);
+      state = { after: state.after, seen: [...seen].sort((a, b) => a - b) };
+    } else continue;
+    cursor.write(state);
   }
 
   // 2. Photographie.
