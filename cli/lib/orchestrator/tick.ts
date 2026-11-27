@@ -552,8 +552,9 @@ async function launch(
     const requests = (await tickets.listRequests({ ticket: c.ticket.id })).filter((r) => r.subtask === s.id);
     const answered = requests.filter((r) => r.answer !== null);
     // Une sous-tâche qui a déjà une demande a été rendue en cours (ask) : sa
-    // branche porte le travail d'avant, la mission reprend.
-    if (requests.length > 0) resumed = true;
+    // branche porte le travail d'avant, la mission dev reprend. Un rebase
+    // arrêté par une question a été abandonné : il repart de zéro.
+    if (requests.length > 0 && c.kind === "dev") resumed = true;
     let instruction: string;
     if (c.kind === "rebase") {
       // Le commit sur lequel la branche était posée, que l'hôte a retenu.
@@ -566,7 +567,7 @@ async function launch(
         report.problems.push(`${c.ticket.id}: ${s.id}: stack: ${e.message}`);
         return false;
       }
-      instruction = rebaseInstruction(c, builtOn, resumed);
+      instruction = rebaseInstruction(c, builtOn, resumed, answered);
     } else {
       instruction = devInstruction(c, resumed, { answered, files });
     }

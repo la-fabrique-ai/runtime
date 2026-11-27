@@ -124,9 +124,14 @@ export function devInstruction(
 // Une mission de rebase : rejouer les commits de la sous-tâche sur la branche
 // d'en dessous, qui a changé. `builtOn` : le commit de la base sur lequel la
 // branche était posée (null : inconnu, un rebase simple).
-export function rebaseInstruction(c: Candidate, builtOn: string | null, resumed: boolean): string {
+// `resumed` : une mission de rebase perdue en route, relancée ; `answered` : les
+// réponses déjà données à la sous-tâche (celle d'un rebase arrêté par une
+// question comprise).
+export function rebaseInstruction(c: Candidate, builtOn: string | null, resumed: boolean, answered: Request[] = []): string {
   const { ticket, subtask } = c;
   const marker = `[cut: read the ticket ${ticket.id} in full]`;
+  const blocks = answerBlocks(answered);
+  let dropped = 0;
   const fromOrigin = c.base.startsWith("origin/");
   const ref = fromOrigin ? c.base : `team/${c.base}`;
   const rebase = builtOn === null ? `git rebase ${ref}` : `git rebase --onto ${ref} ${builtOn}`;
@@ -142,6 +147,7 @@ export function rebaseInstruction(c: Candidate, builtOn: string | null, resumed:
       "",
       `The ticket's mission files, when it has them, are under ${MISSION_DIR}.`,
       "",
+      ...answersSection(blocks, dropped, marker),
       "## Branch",
       branchLine(c),
       "",
@@ -154,6 +160,7 @@ export function rebaseInstruction(c: Candidate, builtOn: string | null, resumed:
       "",
     ].join("\n");
   const parts: Parts = { text: subtask.text };
+  while (bytes(render(parts)) > MAX_BYTES && dropped < blocks.length) dropped++;
   fit(parts, ["text"], render, marker);
   return render(parts);
 }

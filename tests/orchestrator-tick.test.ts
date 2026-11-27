@@ -704,6 +704,9 @@ test("tour : un rebase arrêté par une question reste un rebase après la répo
   await turn({ tickets, host, cursor });
   const last = host.assigned.at(-1)!.mission;
   assert.deepEqual([last.kind, last.subtask], ["rebase", "T-2.2"]);
+  // Le rebase repart de zéro (il a été abandonné), avec la réponse de l'humain.
+  assert.ok(!last.instruction.includes("This mission resumes"), last.instruction);
+  assert.ok(last.instruction.includes("## Questions already answered\nQuestion:\nWhich side of the conflict?\nAnswer:\nkeep both"), last.instruction);
 });
 
 test("tour : une QA tenue n'est pas libérée tant que le ticket est en qa, puis l'est ; une QA perdue repart en QA", async () => {
