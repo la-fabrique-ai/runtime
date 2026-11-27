@@ -51,12 +51,19 @@ test("a second process waits for the first one's change, then runs its own", asy
   const script = `import { withMissionLock } from ${JSON.stringify(join(import.meta.dirname, "..", "cli", "lib", "api", "mission-lock.ts"))};
 await withMissionLock(async () => { console.log("held"); await new Promise((r) => setTimeout(r, 600)); }, { path: ${JSON.stringify(lock)} });`;
   const first = spawn("node", ["--input-type=module", "-e", script]);
-  await new Promise<void>((resolve) => first.stdout.on("data", () => resolve()));
+  // Les écouteurs d'abord : sous charge, le premier peut avoir fini (et son
+  // évènement `close` être passé) avant que le second ait rendu le verrou.
+  let stderr = "";
+  first.stderr.on("data", (d) => { stderr += d; });
+  const closed = new Promise<number | null>((resolve) => first.on("close", resolve));
+  const held = new Promise<void>((resolve) => first.stdout.on("data", () => resolve()));
+  // Un premier qui meurt avant de tenir le verrou fait échouer le test, au lieu de le bloquer.
+  await Promise.race([held, closed.then((code) => { throw new Error(`the first process ended (${code}) before holding the lock: ${stderr}`); })]);
   const start = Date.now();
   await withMissionLock(async () => {
     assert.ok(Date.now() - start >= 300, "the second one waited");
   }, { path: lock });
-  await new Promise((resolve) => first.on("close", resolve));
+  assert.equal(await closed, 0, stderr);
 });
 
 test("a lock whose holder is dead is taken over at once", async () => {
