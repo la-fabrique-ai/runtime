@@ -96,8 +96,12 @@ export async function instanceExists(ctx: Context, name: string): Promise<boolea
   return (await ctx.exec(incus("info", name))).code === 0;
 }
 
-export async function configGet(ctx: Context, name: string, key: string): Promise<string> {
-  const r = await ctx.exec(incus("config", "get", name, key));
+// `timeoutMs` : un appel de l'API, dans sa file ; dépassé, c'est un refus qui
+// nomme l'étape plutôt qu'une valeur vide.
+export async function configGet(ctx: Context, name: string, key: string, opts: { timeoutMs?: number } = {}): Promise<string> {
+  const argv = incus("config", "get", name, key);
+  const r = opts.timeoutMs === undefined ? await ctx.exec(argv) : await ctx.exec(argv, { timeoutMs: opts.timeoutMs });
+  if (r.timedOut) throw new ForgeError(`incus config get ${key} of ${name} timed out after ${(opts.timeoutMs ?? 0) / 1000} s`);
   return r.code === 0 ? r.stdout.trim() : "";
 }
 
@@ -255,6 +259,29 @@ export async function imageFingerprint(ctx: Context, alias: string): Promise<str
   } catch {
     return null;
   }
+}
+
+// Écrit un fichier en aiuser, dans un dossier qu'aiuser possède : le contenu
+// arrive sur stdin, jamais dans un argv ni dans une chaîne de shell. Root n'écrit
+// jamais là (incus file push suit un lien symbolique planté par l'agent, et
+// donne la cible au propriétaire demandé). Le fichier est écrit à côté puis
+// renommé : un lien symbolique à sa place est remplacé, jamais suivi. Mode 600.
+export const AGENT_WRITE_SCRIPT = `
+const fs = require("fs");
+const path = require("path");
+const file = process.argv[1];
+fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+const tmp = file + ".forge-" + process.pid;
+fs.writeFileSync(tmp, fs.readFileSync(0), { mode: 0o600, flag: "wx" });
+fs.renameSync(tmp, file);
+`;
+
+export function writeAsAgent(
+  ctx: Context, name: string, file: string, content: string, opts: { timeoutMs?: number } = {},
+): Promise<ExecResult> {
+  const argv = incus("exec", name, "--user", "1001", "--group", "1001", "--env", "HOME=/home/aiuser", "--",
+    "node", "-e", AGENT_WRITE_SCRIPT, file);
+  return ctx.exec(argv, opts.timeoutMs === undefined ? { input: content } : { input: content, timeoutMs: opts.timeoutMs });
 }
 
 // Comme execAsAgent, mais sans shell : chaque valeur est un élément d'argv.

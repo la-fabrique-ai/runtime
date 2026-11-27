@@ -27,7 +27,7 @@ import { connect } from "node:net";
 // mission : l'hôte la reconnaît au clone, déjà sur `agent/<sous-tâche>`, dont
 // il garde le travail tel quel, même non commité.
 //
-// `session` : `none` = container démarré, hc joignable, aucun terminal ;
+// `session` (de l'état d'un exécuteur) : `none` = container démarré, hc joignable, aucun terminal ;
 // un container arrêté, un exec en échec ou hors délai vaut `unknown`, comme un
 // exécuteur libre dont un clone a des changements suivis (il refuserait tout). Seuls `lost` et
 // `exited` déclenchent une reprise ; un exécuteur `unknown` n'est pas libre
@@ -43,16 +43,29 @@ export type MissionSpec = {
   branch: string;
   base: string;
   instruction: string;
+  files: MissionFiles;
 };
 
-export type HeldMission = Omit<MissionSpec, "instruction">;
+// Les fichiers de mission du ticket, copiés tels quels (null : absent).
+export type MissionFiles = { spec: string | null; answers: string | null; split: string | null };
+
+export type HeldMission = Omit<MissionSpec, "instruction" | "files">;
 
 // `blocked` : l'agent attend une réponse à son écran ; l'orchestrateur le signale.
 export type SessionState = "none" | "idle" | "working" | "done" | "blocked" | "exited" | "lost" | "unknown";
 
 export type ExecutorStatus = { name: string; mission: HeldMission | null; session: SessionState };
 
-export type HostEvent = { id: number; kind: "done"; executor: string; ticket: string; subtask: string; branch: string };
+// `report` : le compte rendu final de l'agent, tel quel.
+export type DoneEvent = {
+  id: number; kind: "done"; executor: string; ticket: string; subtask: string; branch: string; report: string | null;
+};
+// Une question pour l'humain (décision 35) : le développeur a rendu son travail
+// en cours ; `recommended` est la réponse qu'il recommanderait, ou null.
+export type AskEvent = {
+  id: number; kind: "ask"; executor: string; ticket: string; subtask: string; text: string; recommended: string | null;
+};
+export type HostEvent = DoneEvent | AskEvent;
 
 export interface HostApi {
   status(): Promise<ExecutorStatus[]>;
@@ -78,6 +91,7 @@ function exact(v: unknown, keys: string[]): v is Obj {
 }
 
 const isStr = (v: unknown): v is string => typeof v === "string";
+const isId = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
 
 function parseHeld(v: unknown): HeldMission | null {
   if (v === null) return null;
@@ -89,11 +103,33 @@ function parseHeld(v: unknown): HeldMission | null {
 function parseExecutors(v: unknown): ExecutorStatus[] {
   if (!Array.isArray(v)) throw new Error("executors n'est pas un tableau");
   return v.map((e) => {
-    if (!exact(e, ["name", "mission", "session"]) || !isStr(e.name) || !isStr(e.session) || !SESSIONS.includes(e.session)) {
+    if (
+      !exact(e, ["name", "mission", "session"]) || !isStr(e.name) || !isStr(e.session) || !SESSIONS.includes(e.session)
+    ) {
       throw new Error("exécuteur invalide");
     }
     return { name: e.name, mission: parseHeld(e.mission), session: e.session as SessionState };
   });
+}
+
+function parseEvent(e: unknown): HostEvent {
+  if (!isObj(e) || !isId(e.id) || !isStr(e.executor) || !isStr(e.ticket) || !isStr(e.subtask)) {
+    throw new Error("évènement invalide");
+  }
+  const base = { id: e.id, executor: e.executor, ticket: e.ticket, subtask: e.subtask };
+  if (
+    e.kind === "ask" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "text", "recommended"]) &&
+    isStr(e.text) && (e.recommended === null || isStr(e.recommended))
+  ) {
+    return { ...base, kind: "ask", text: e.text, recommended: e.recommended as string | null };
+  }
+  if (
+    e.kind === "done" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch", "report"]) &&
+    isStr(e.branch) && (e.report === null || isStr(e.report))
+  ) {
+    return { ...base, kind: "done", branch: e.branch, report: e.report as string | null };
+  }
+  throw new Error("évènement invalide");
 }
 
 // La réponse entière : ses clés sont exactement `ok`, `events` et `last`.
@@ -102,16 +138,7 @@ function parseEvents(r: Obj): { events: HostEvent[]; last: number } {
   const { events: v, last } = r;
   if (!Number.isSafeInteger(last) || (last as number) < 0) throw new Error("last invalide");
   if (!Array.isArray(v)) throw new Error("events n'est pas un tableau");
-  const events = v.map((e): HostEvent => {
-    if (
-      !exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch"]) ||
-      !Number.isInteger(e.id) || (e.id as number) < 0 || e.kind !== "done" ||
-      !isStr(e.executor) || !isStr(e.ticket) || !isStr(e.subtask) || !isStr(e.branch)
-    ) {
-      throw new Error("évènement invalide");
-    }
-    return { id: e.id as number, kind: "done", executor: e.executor, ticket: e.ticket, subtask: e.subtask, branch: e.branch };
-  });
+  const events = v.map(parseEvent);
   // Par id croissant, aucun au-delà de `last` : le curseur ne fait qu'avancer.
   events.forEach((e, i) => {
     if ((i > 0 && e.id <= events[i - 1]!.id) || e.id > (last as number)) throw new Error("évènements hors d'ordre");

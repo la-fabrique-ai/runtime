@@ -39,6 +39,7 @@ async function withServer(
 
 const mission: MissionSpec = {
   kind: "dev", ticket: "T-1", subtask: "a", repository: "r", branch: "agent/x", base: "main", instruction: "do it",
+  files: { spec: "# spec", answers: null, split: null },
 };
 
 test("status renvoie les exécuteurs validés", async () => {
@@ -69,7 +70,7 @@ test("release et events", async () => {
     await socketHost(path).release("e1");
     assert.equal(received[0], '{"op":"release","to":"e1"}');
   });
-  const ev = { id: 3, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b" };
+  const ev = { id: 3, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b", report: null };
   await withServer(JSON.stringify({ ok: true, events: [ev], last: 5 }), async (path, received) => {
     assert.deepEqual(await socketHost(path).events(2), { events: [ev], last: 5 });
     assert.equal(received[0], '{"op":"events","after":2}');
@@ -87,7 +88,7 @@ test("une réponse mal formée est refusée", async () => {
     await assert.rejects(socketHost(path).events(0), HostError);
   });
   // `last` absent, négatif ou non entier ; des évènements hors d'ordre ou au-delà de `last`.
-  const ev = (id: number) => ({ id, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b" });
+  const ev = (id: number) => ({ id, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b", report: null });
   for (const bad of [
     { ok: true, events: [] },
     { ok: true, events: [], last: -1 },
@@ -129,4 +130,15 @@ test("assign a son propre délai, séparé de celui des autres ops", async () =>
 
 test("un socket absent est une HostError", async () => {
   await assert.rejects(socketHost("/nonexistent/forge.sock").status(), HostError);
+});
+
+test("events lit un ask avec sa réponse recommandée ; un ask sans recommended est refusé", async () => {
+  const ask = { id: 4, kind: "ask", executor: "e", ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: null };
+  await withServer(JSON.stringify({ ok: true, events: [ask], last: 4 }), async (path) => {
+    assert.deepEqual(await socketHost(path).events(0), { events: [ask], last: 4 });
+  });
+  const { recommended: _r, ...bare } = ask;
+  await withServer(JSON.stringify({ ok: true, events: [bare], last: 4 }), async (path) => {
+    await assert.rejects(socketHost(path).events(0), HostError);
+  });
 });

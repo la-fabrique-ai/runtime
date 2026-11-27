@@ -11,7 +11,8 @@ import { parseConfig } from "../cli/lib/config.ts";
 import type { ApiDeps } from "../cli/lib/api/missions.ts";
 import { Journal } from "../cli/lib/api/journal.ts";
 import { hostSocketPath, serveApi } from "../cli/lib/api/server.ts";
-import { handleMission, MISSION_KEY, parseMissionRequest } from "../cli/lib/api/missions.ts";
+import { handleMission, MISSION_FILES_DIR, MISSION_KEY, parseMissionRequest } from "../cli/lib/api/missions.ts";
+import { MISSION_DIR } from "../cli/lib/orchestrator/instruction.ts";
 import { readBranchRecords } from "../cli/lib/branch-records.ts";
 import { socketHost, type HeldMission, type MissionSpec } from "../cli/lib/orchestrator/host.ts";
 import { CONTROL, executorName, projectMembers, repoTeamMirror } from "../cli/lib/project.ts";
@@ -30,10 +31,10 @@ const member = (name: string) => projectMembers(cfg.project!).find((m) => m.name
 
 const spec = (over: Partial<MissionSpec> = {}): MissionSpec => ({
   kind: "dev", ticket: "T-1", subtask: "T-1.1", repository: "web", branch: "agent/T-1.1", base: "origin/main",
-  instruction: "Fais la sous-tâche 1", ...over,
+  instruction: "Fais la sous-tâche 1", files: { spec: null, answers: null, split: null }, ...over,
 });
 const held = (over: Partial<MissionSpec> = {}): HeldMission => {
-  const { instruction: _, ...rest } = spec(over);
+  const { instruction: _, files: _f, ...rest } = spec(over);
   return rest;
 };
 
@@ -491,7 +492,7 @@ test("done fetches the branch into repo-web.agents.git, and events(0) returns it
   assert.ok(fetch.some((a) => a.startsWith("remote.src.uploadpack=FORGE_SIDE=host ") && a.endsWith(` upload-pack ${E1}`)));
   assert.equal(fetch.at(-1), "+refs/heads/agent/T-1.1:refs/heads/agent/T-1.1");
   const ev = await call(CONTROL, { op: "events", after: 0 });
-  assert.deepEqual(ev, { ok: true, events: [{ id: 1, kind: "done", executor: E1, ticket: "T-1", subtask: "T-1.1", branch: "agent/T-1.1" }], last: 1 });
+  assert.deepEqual(ev, { ok: true, events: [{ id: 1, kind: "done", executor: E1, ticket: "T-1", subtask: "T-1.1", branch: "agent/T-1.1", report: null }], last: 1 });
   // Les lectures acceptées du contrôle ne vont pas au journal : `last` ne bouge pas.
   assert.deepEqual(await call(CONTROL, { op: "events", after: 1 }), { ok: true, events: [], last: 1 });
   await call(CONTROL, { op: "status" });
@@ -524,7 +525,7 @@ test("status and events replies pass the orchestrator's client", async () => {
     const status = await host.status();
     assert.deepEqual(status.map((e) => [e.name, e.mission?.subtask ?? null]), [[E1, "T-1.1"], [E2, null]]);
     const ev = await host.events(0);
-    assert.deepEqual(ev.events.map((e) => [e.executor, e.branch]), [[E1, "agent/T-1.1"]]);
+    assert.deepEqual(ev.events.map((e) => [e.executor, e.kind === "done" ? e.branch : null]), [[E1, "agent/T-1.1"]]);
     await host.release(E1);
   });
 });
@@ -577,4 +578,113 @@ test("with a project, the server opens one socket per project container and answ
     await served;
     delete process.env.FORGE_API_RUNTIME;
   }
+});
+
+const mirrorFetch = () => ctx.calls.some((c) => c[0] === "git" && c.includes("fetch") && c.some((a) => a.startsWith("--git-dir=")));
+
+test("done with a report gives an event with that report; {op:done} alone still works; an unknown field is refused", async () => {
+  hold(E1, held());
+  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "1\n" }]);
+  const r = await call(E1, { op: "done", report: "Did x; checked y." }) as unknown as { id: number };
+  const ev = await call(CONTROL, { op: "events", after: 0 }) as unknown as { events: { report: string | null }[] };
+  assert.equal(ev.events[0].report, "Did x; checked y.");
+  assert.ok(r.id > 0);
+  hold(E2, held({ subtask: "T-1.2", branch: "agent/T-1.2" }));
+  setup([{ match: "rev-list --count", stdout: "1\n" }]);
+  assert.equal((await call(E2, { op: "done" })).ok, true);
+  assert.deepEqual(await call(E2, { op: "done", force: true }), { ok: false, error: 'done: unknown field: "force"' });
+});
+
+// --------------------------------------------------------------- les fichiers de mission (plan 2b)
+
+const FRESH = [absent("refs/remotes/team/agent/T-1.1"), absent("refs/heads/agent/T-1.1")];
+const files = (over: Partial<MissionSpec["files"]> = {}) => ({ spec: null, answers: null, split: null, ...over });
+
+test("the mission files folder is the one the instruction names", () => {
+  assert.equal(MISSION_FILES_DIR, MISSION_DIR);
+});
+
+test("assign with files.spec: the folder is reset as root, spec.md pushed by root in mode 444, no answers.md; the key holds no files", async () => {
+  setup(FRESH);
+  const r = await call(CONTROL, { op: "assign", to: E1, mission: spec({ files: files({ spec: "# The spec" }) }) });
+  assert.deepEqual(r, { ok: true });
+  const calls = joined();
+  const rm = calls.findIndex((c) => c === `incus --project agent-forge exec ${E1} -- rm -rf -- ${MISSION_FILES_DIR}`);
+  const mk = calls.findIndex((c) => c === `incus --project agent-forge exec ${E1} -- mkdir -m 755 -- ${MISSION_FILES_DIR}`);
+  const push = calls.findIndex((c) => c.includes("file push") && c.includes(`${E1}${MISSION_FILES_DIR}/spec.md`));
+  const run = calls.findIndex((c) => c.includes("-- hc run "));
+  assert.ok(rm >= 0 && mk > rm && push > mk && run > push, calls.join("\n"));
+  assert.ok(calls[push].includes("--uid 0 --gid 0 --mode 444"), calls[push]);
+  assert.ok(!calls.some((c) => c.includes("answers.md")));
+  assert.deepEqual(JSON.parse(keys(E1)[MISSION_KEY]), held());
+  assert.ok(!readFileSync(join(home, "api", "journal.jsonl"), "utf8").includes("# The spec"));
+});
+
+test("Review Focus 4: an assign with no file, and a release, empty the folder and push nothing", async () => {
+  setup(FRESH);
+  await call(CONTROL, { op: "assign", to: E1, mission: spec() });
+  assert.ok(joined().some((c) => c.endsWith(`-- rm -rf -- ${MISSION_FILES_DIR}`)));
+  assert.ok(!joined().some((c) => c.includes("file push") && c.includes(MISSION_FILES_DIR)));
+  setup();
+  await call(CONTROL, { op: "release", to: E1 });
+  assert.ok(joined().some((c) => c.endsWith(`-- rm -rf -- ${MISSION_FILES_DIR}`)));
+});
+
+test("a mission file over 262 144 bytes, or holding a secret, is refused", async () => {
+  const over = await call(CONTROL, { op: "assign", to: E1, mission: spec({ files: files({ split: "x".repeat(262_145) }) }) });
+  assert.deepEqual(over, { ok: false, error: "assign: mission.files.split is longer than 262144 bytes" });
+  const secret = await call(CONTROL, { op: "assign", to: E1, mission: spec({ files: files({ answers: "tok-123" }) }) });
+  assert.equal(secret.ok, false);
+  assert.match((secret as { error: string }).error, /mission\.files\.answers holds a secret/);
+});
+
+test("the mission files live under /etc/forge, a root-owned parent outside aiuser's home, created by root first", async () => {
+  assert.equal(MISSION_FILES_DIR, "/etc/forge/mission");
+  setup(FRESH);
+  await call(CONTROL, { op: "assign", to: E1, mission: spec() });
+  const calls = joined();
+  const parent = calls.findIndex((c) => c === `incus --project agent-forge exec ${E1} -- install -d -o root -g root -m 755 -- /etc/forge`);
+  const mk = calls.findIndex((c) => c.endsWith(`-- mkdir -m 755 -- ${MISSION_FILES_DIR}`));
+  assert.ok(parent >= 0 && mk > parent, calls.join("\n"));
+  assert.ok(!calls.some((c) => c.includes("file push") && c.includes("/home/aiuser")), calls.join("\n"));
+});
+
+// --------------------------------------------------------------- ask : une question pour l'humain (décision 35)
+
+test("ask with nothing committed is accepted and copies nothing; its event carries the question and the recommended answer", async () => {
+  hold(E1, held());
+  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "0\n" }]);
+  const r = await call(E1, { op: "ask", text: "Which limit?", recommended: "100 per page" }) as unknown as { ok: boolean; id: number };
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(!mirrorFetch());
+  const ev = await call(CONTROL, { op: "events", after: 0 });
+  assert.deepEqual(ev, { ok: true, events: [{
+    id: r.id, kind: "ask", executor: E1, ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: "100 per page",
+  }], last: r.id });
+  // L'hôte ne libère pas : c'est l'orchestrateur qui le fait.
+  assert.deepEqual(JSON.parse(keys(E1)[MISSION_KEY]), held());
+});
+
+test("ask with commits copies the branch to the team mirror; recommended is optional (null)", async () => {
+  hold(E1, held());
+  setup([{ match: "rev-list --count origin/main..agent/T-1.1", stdout: "2\n" }]);
+  assert.equal((await call(E1, { op: "ask", text: "Which limit?" })).ok, true);
+  assert.ok(mirrorFetch());
+  const ev = await call(CONTROL, { op: "events", after: 0 }) as unknown as { events: { recommended: string | null }[] };
+  assert.equal(ev.events[0].recommended, null);
+});
+
+test("ask on a dirty clone, without a mission, from the control, or holding a secret: refused, nothing journaled as ok", async () => {
+  hold(E1, held());
+  setup([{ match: "/workspace/web -c core.fsmonitor=false", stdout: " M a.ts\n" }]);
+  const dirty = await call(E1, { op: "ask", text: "q" });
+  assert.equal(dirty.ok, false);
+  assert.match((dirty as { error: string }).error, /uncommitted changes: commit or discard them, then ask again/);
+  setup();
+  assert.deepEqual(await call(E2, { op: "ask", text: "q" }), { ok: false, error: `${E2} holds no mission: there is nothing to ask about` });
+  assert.deepEqual(await call(CONTROL, { op: "ask", text: "q" }), { ok: false, error: "ask is not a verb of the control container" });
+  const secret = await call(E1, { op: "ask", text: "q", recommended: "use tok-123" });
+  assert.equal(secret.ok, false);
+  assert.ok(!readFileSync(join(home, "api", "journal.jsonl"), "utf8").includes("tok-123"));
+  assert.ok(d.journal.entries().every((e) => e.outcome === "refused"));
 });

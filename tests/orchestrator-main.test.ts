@@ -13,8 +13,13 @@ const script = resolve(import.meta.dirname, "..", "cli", "orchestrator.ts");
 test("parseArgs lit toutes les options", () => {
   assert.deepEqual(
     parseArgs(["--base", "/b", "--socket", "/s", "--state", "/st", "--prefix", "X", "--poll-seconds", "5"]),
-    { base: "/b", socket: "/s", state: "/st", prefix: "X", pollSeconds: 5 },
+    { base: "/b", socket: "/s", state: "/st", prefix: "X", pollSeconds: 5, channel: null, channelGroup: null },
   );
+  assert.deepEqual(
+    parseArgs(["--base", "/b", "--socket", "/s", "--state", "/st", "--channel", "/c.sock", "--channel-group", "1001"]),
+    { base: "/b", socket: "/s", state: "/st", prefix: "T", pollSeconds: 10, channel: "/c.sock", channelGroup: 1001 },
+  );
+  assert.throws(() => parseArgs(["--base", "/b", "--socket", "/s", "--state", "/st", "--channel-group", "1001"]));
 });
 
 test("parseArgs : valeurs par défaut", () => {
@@ -63,12 +68,25 @@ test("le processus distribue, puis sort 0 sur SIGTERM", async () => {
     });
   });
   await new Promise<void>((r) => server.listen(sock, r));
-  const child = spawn(process.execPath, [script, "--base", base, "--socket", sock, "--state", state], { stdio: ["ignore", "pipe", "pipe"] });
+  const channel = join(dir, "channel.sock");
+  const child = spawn(process.execPath, [script, "--base", base, "--socket", sock, "--state", state, "--channel", channel], { stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   child.stdout.on("data", (d) => (out += d));
   const exited = new Promise<number | null>((r) => child.on("exit", (code) => r(code)));
   try {
     await assigned;
+    // Le canal local répond, avec les problèmes du dernier tour.
+    const { connect } = await import("node:net");
+    const reply = await new Promise<string>((resolve, reject) => {
+      const c = connect(channel);
+      let o = "";
+      c.setEncoding("utf8");
+      c.on("connect", () => c.write('{"op":"problems"}\n'));
+      c.on("data", (d: string) => (o += d));
+      c.on("close", () => resolve(o));
+      c.on("error", reject);
+    });
+    assert.deepEqual(JSON.parse(reply), { ok: true, problems: [] });
     child.kill("SIGTERM");
     assert.equal(await exited, 0);
     assert.match(out, /\[orchestrator\] assigned T-1\.1 to ex-1/);

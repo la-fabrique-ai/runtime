@@ -206,9 +206,9 @@ test("a clone whose team remote is missing (an interrupted provisioning) gets it
   assert.ok(calls.some((c) => c.includes("git -C /workspace/web remote add team /forge/teams/web.git")), calls.join("\n"));
 });
 
-test("the control: the ticket base mounted under forge-orch's home, group 1001 and setgid, the ACL, a socket for uid 1002, no clone", async () => {
+test("the control: the ticket base mounted under forge-orch's home, group 1001 and setgid, the ACL, a socket for uid 1002, the Pilot's workspace and clones", async () => {
   const cfg = config();
-  const { fake, ctx } = setup();
+  const { fake, ctx } = setup(NO_CLONE);
   await provisionControl(ctx, cfg, member(cfg, CONTROL));
 
   const base = join(home, "tickets");
@@ -234,9 +234,11 @@ test("the control: the ticket base mounted under forge-orch's home, group 1001 a
     type: "proxy", bind: "instance", listen: "unix:/var/lib/forge/api.sock",
     connect: `unix:/run/user/1000/forge-api/${CONTROL}.sock`, uid: "1002", gid: "1002", mode: "0600",
   });
-  assert.ok(!calls.some((c) => c.includes("git clone")));
-  assert.equal(devices.workspace, undefined);
-  assert.equal(fake.files.get(`agent-forge/${CONTROL}/home/aiuser/.claude/skills/.forge-kit`), undefined);
+  for (const repo of ["web", "api"]) {
+    assert.ok(calls.some((c) => c.includes(`exec ${CONTROL} --user 1001`) && c.includes(`git clone --no-local /forge/origins/${repo}.git /workspace/${repo}`)), repo);
+  }
+  assert.deepEqual(devices.workspace, { type: "disk", source: join(home, "workspaces", CONTROL), path: "/workspace" });
+  assert.ok(fake.files.get(`agent-forge/${CONTROL}/home/aiuser/.claude/skills/split/SKILL.md`));
   assert.ok(!calls.some((c) => c.includes("hc run")));
   assert.equal(fake.instances.get("agent-forge")!.get(CONTROL)!.config["user.forge.provisioning"], undefined);
 });
@@ -326,7 +328,9 @@ test("the control's first provisioning pushes the orchestrator (root, 0644), its
   }
   const unit = file(UNIT)!.content;
   for (const line of ["User=forge-orch", "SupplementaryGroups=1001", "Restart=always", "RestartSec=5", "UMask=0007",
-    "ExecStart=/usr/bin/node /opt/forge/orchestrator.ts --base /var/lib/forge-orch/tickets --socket /var/lib/forge/api.sock --state /var/lib/forge-orch/state --prefix Q"]) {
+    "RuntimeDirectory=forge-orch", "RuntimeDirectoryMode=0755",
+    "ExecStart=/usr/bin/node /opt/forge/orchestrator.ts --base /var/lib/forge-orch/tickets --socket /var/lib/forge/api.sock --state /var/lib/forge-orch/state --prefix Q" +
+      " --channel /run/forge-orch/channel.sock --channel-group 1001"]) {
     assert.ok(unit.split("\n").includes(line), `${line}\n${unit}`);
   }
   const calls = flat(ctx);
@@ -378,7 +382,7 @@ test("a changed orchestrator source, or a changed prefix, restarts the service a
     const prefixed = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY, ...HOOK_BLOCKS] });
     await convergeControl(prefixed, renamed, member(renamed, CONTROL));
     assert.equal(restarts(prefixed).length, 1);
-    assert.ok(fake.files.get(`agent-forge/${CONTROL}${UNIT}`)!.content.includes("--prefix R\n"));
+    assert.ok(fake.files.get(`agent-forge/${CONTROL}${UNIT}`)!.content.includes("--prefix R "));
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
@@ -395,5 +399,29 @@ test("the instructions of project members are the mission text, with the executo
   assert.ok(fake.files.get(`agent-forge/${executorName(1)}/home/aiuser/.claude/agents/scout.md`));
   assert.ok(fake.files.get(`agent-forge/${executorName(1)}/home/aiuser/.claude/skills/verify-before-report/SKILL.md`));
   await provisionControl(ctx, cfg, member(cfg, CONTROL));
-  assert.equal(claudeMd(CONTROL), mission);
+  const control = readFileSync(join(process.cwd(), "teams", "reference", "prompts", "control.md"), "utf8");
+  assert.equal(claudeMd(CONTROL), `${mission}\n${control}`);
+});
+
+test("Review Focus 3: converging a control of part 1 adds its workspace, its clones and its kit; once there, nothing is added", async () => {
+  const cfg = config();
+  const { fake, ctx } = setup(NO_CLONE);
+  fake.addInstance("agent-forge", CONTROL, {
+    status: "Running", profiles: ["agent-forge"], config: { "user.forge.role": "control" },
+    devices: { tickets: { type: "disk", source: join(home, "tickets"), path: TICKETS_MOUNT } },
+  });
+  await convergeControl(ctx, cfg, member(cfg, CONTROL));
+  const calls = flat(ctx);
+  assert.ok(calls.some((c) => c.includes(`config device add ${CONTROL} workspace disk`)), calls.join("\n"));
+  assert.ok(calls.some((c) => c.includes("git clone --no-local /forge/origins/web.git /workspace/web")));
+  assert.ok(calls.some((c) => c.includes("git clone --no-local /forge/origins/api.git /workspace/api")));
+  assert.ok(calls.some((c) => c.includes("node -e") && c.includes(" /workspace /workspace/web /workspace/api")), "trust /workspace and the clones");
+  assert.ok(fake.files.get(`agent-forge/${CONTROL}/home/aiuser/.claude/skills/design/SKILL.md`));
+  assert.ok(!calls.some((c) => c.includes(" delete ") || c.includes(" launch ")));
+
+  const again = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY, ...HOOK_BLOCKS] });
+  await convergeControl(again, cfg, member(cfg, CONTROL));
+  const second = flat(again);
+  assert.ok(!second.some((c) => c.includes("config device add")), second.join("\n"));
+  assert.ok(!second.some((c) => c.includes("git clone")), second.join("\n"));
 });

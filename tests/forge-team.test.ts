@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,9 +48,12 @@ afterEach(async () => {
 });
 
 // Lance forge-team contre la socket de test, `stdin` sur son entrée standard.
-function run(args: string[], stdin: string, socket = join(dir, "api.sock")): Promise<{ code: number | null; stdout: string; stderr: string }> {
+// `channel` : la socket du canal local (le container de contrôle) ; absente par défaut.
+function run(
+  args: string[], stdin: string, socket = join(dir, "api.sock"), channel = join(dir, "no-channel.sock"),
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn("node", [forgeTeam, ...args], { env: { ...process.env, FORGE_API_SOCKET: socket } });
+    const child = spawn("node", [forgeTeam, ...args], { env: { ...process.env, FORGE_API_SOCKET: socket, FORGE_CHANNEL_SOCKET: channel } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (c) => (stdout += c));
@@ -63,7 +66,7 @@ function run(args: string[], stdin: string, socket = join(dir, "api.sock")): Pro
 test("done sends the bare verb; status prints the mission when the reply has its shape", async () => {
   const r = await run(["done"], "");
   assert.deepEqual([r.code, r.stdout], [0, "ok 7\n"]);
-  assert.equal(received[0], '{"op":"done"}');
+  assert.equal(received[0], '{"op":"done","report":null}');
   answer = '{"ok":true,"mission":{"kind":"dev","ticket":"T-1","subtask":"T-1.1","repository":"web","branch":"agent/T-1.1","base":"origin/main"}}';
   const held = await run(["status"], "");
   assert.deepEqual([held.code, held.stdout],
@@ -88,12 +91,75 @@ test("a connection closed without an answer says the request may have gone throu
   assert.match(r.stderr, /no answer from the forge API: the request may have been carried out; check forge-team status/);
 });
 
-test("only done and status exist: any other verb prints the usage and exits 64, without a request", async () => {
-  for (const args of [["message", "agent-x", "Salut"], ["assign", "x", "t"], ["release", "x"], ["ask", "Quoi ?"], ["bogus"], [], ["done", "extra"]]) {
+test("any other verb, or a bad argument, prints the usage and exits 64, without a request", async () => {
+  for (const args of [["message", "agent-x", "Salut"], ["assign", "x", "t"], ["release", "x"], ["ask", "Quoi ?"], ["ask", "--recommended-file"], ["bogus"], [], ["done", "extra"], ["status", "x"]]) {
     const r = await run(args, "texte");
     assert.equal(r.code, 64, args.join(" "));
-    assert.match(r.stderr, /usage: forge-team done.*\n\s+forge-team status/);
+    assert.match(r.stderr, /usage: forge-team done \[--report-file <file>\]\n\s+forge-team ask \[--recommended-file <file>\].*\n\s+forge-team status/);
   }
   assert.deepEqual(received, []);
   assert.equal(probes, 0);
+});
+
+test("done --report-file sends the file; a missing report file exits 64 and sends nothing", async () => {
+  const report = join(dir, "r.md");
+  writeFileSync(report, "Did x.\n");
+  await run(["done", "--report-file", report], "");
+  assert.equal(received[0], JSON.stringify({ op: "done", report: "Did x.\n" }));
+  const missing = await run(["done", "--report-file", join(dir, "missing.md")], "");
+  assert.equal(missing.code, 64);
+  assert.equal(received.length, 1);
+});
+
+// Le container de contrôle : la socket du canal existe (ici, celle du faux serveur).
+const control = (args: string[], stdin = "") => run(args, stdin, join(dir, "absent.sock"), join(dir, "api.sock"));
+
+test("control: create-stack sends the JSON array read on stdin; a stdin that is not an array exits 64", async () => {
+  answer = '{"ok":true,"subtasks":["T-1.1","T-1.2"]}';
+  const list = [{ repository: "web", text: "one" }, { repository: "api", text: "two" }];
+  const r = await control(["create-stack", "T-1"], JSON.stringify(list));
+  assert.deepEqual([r.code, r.stdout], [0, "ok T-1.1 T-1.2\n"]);
+  assert.equal(received[0], JSON.stringify({ op: "create-stack", id: "T-1", subtasks: list }));
+  assert.equal((await control(["create-stack", "T-1"], '{"a":1}')).code, 64);
+  assert.equal(received.length, 1);
+});
+
+test("control: ticket prints a request without answer as WAITING", async () => {
+  answer = JSON.stringify({
+    ok: true,
+    ticket: { id: "T-1", title: "Paginate", description: "d", status: "dev", priority: 2, repositories: [{ name: "web", base: "main" }] },
+    subtasks: [], comments: [],
+    requests: [{ id: "1", ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: null, answer: null }],
+  });
+  const r = await control(["ticket", "T-1"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /request 1 on T-1\.1: WAITING\nWhich limit\?\n/);
+});
+
+test("with the channel's socket, done is a usage error; without it, tickets is", async () => {
+  const done = await control(["done"]);
+  assert.equal(done.code, 64);
+  assert.match(done.stderr, /usage: forge-team tickets/);
+  const tickets = await run(["tickets"], "");
+  assert.equal(tickets.code, 64);
+  assert.deepEqual(received, []);
+});
+
+test("ask sends stdin as the question and the file as recommended, trailing newlines (and carriage returns) removed; it says the container is about to be released", async () => {
+  const file = join(dir, "r.md");
+  writeFileSync(file, "100 per page\n\n");
+  const r = await run(["ask", "--recommended-file", file], "Which limit?\n");
+  assert.equal(received[0], JSON.stringify({ op: "ask", text: "Which limit?", recommended: "100 per page" }));
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /^ok 7\n.*goes to the human.*released/s);
+  await run(["ask"], "Which limit?");
+  assert.equal(received[1], JSON.stringify({ op: "ask", text: "Which limit?", recommended: null }));
+  writeFileSync(file, "100 per page\r\n");
+  await run(["ask", "--recommended-file", file], "Which limit?\r\n");
+  assert.equal(received[2], JSON.stringify({ op: "ask", text: "Which limit?", recommended: "100 per page" }));
+  const empty = await run(["ask"], "\n");
+  assert.equal(empty.code, 64);
+  const missing = await run(["ask", "--recommended-file", join(dir, "none.md")], "q");
+  assert.equal(missing.code, 64);
+  assert.equal(received.length, 3);
 });

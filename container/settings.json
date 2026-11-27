@@ -13,7 +13,7 @@
     ]
   },
   "permissions": {
-    "allow": ["Read(~/.forge/messages/**)", "Bash(forge-team:*)"]
+    "allow": ["Read(~/.forge/messages/**)", "Read(//etc/forge/mission/**)", "Bash(forge-team:*)"]
   },
   "autoUpdatesChannel": "stable"
 }

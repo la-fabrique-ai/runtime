@@ -224,6 +224,11 @@ The events it reacts to:
 
 ### 2.6 A developer's question
 
+*Superseded by decision 35: there are no question sessions. A developer's
+doubt goes first to its `spec-reader` sub-agent; what it does not settle goes
+to the human through `forge-team ask`, which hands the work in progress back
+and becomes a request in the ticket. The section below is kept as written.*
+
 1. The developer asks through the forge API (`forge-team ask`, §6.5).
 2. The API passes it to the orchestrator, which opens a fresh question session
    in the control container, with the ticket's context: spec, sub-task,
@@ -357,6 +362,16 @@ Settled after the review and the reading of the console's last version:
 33. **No autonomous mode.** forge runs supervised only: the human ships with
     `forge ship` and merges on GitHub. Decision 26 is withdrawn, §6.13 says
     what stays, and the delivery has four parts (§8).
+34. **Part 2 ships without the screens** (maintainer, 2026-11-26). The human
+    answers a request through the Pilot, or by writing the answer in the
+    ticket base; the screens' small slice of decision 32 follows part 2, with
+    the colleague who iterates on it.
+35. **No question sessions** (maintainer, 2026-11-26). A developer's doubt
+    goes first to a sub-agent in its own container, which reads the mission
+    files and the code. What it cannot settle goes to the human: `forge-team
+    ask` hands the work in progress back and opens the request. Nothing a
+    developer writes enters the control container. This supersedes the
+    question sessions of §6.4 to §6.6.
 
 ## 4. Goals, non-goals, anti-goals
 
@@ -567,7 +582,7 @@ session is alive). Only cursors (the comments already read) are kept on disk,
 and losing them costs a re-read, nothing more.
 
 **Polling**: the manager at a regular interval (decision 14; the interval is
-the builder's, configurable); the API's events (questions, mission ends) at
+the builder's, configurable); the API's events (questions, mission ends; *a question is now a work in progress handed back, decision 35*) at
 each poll too, through a verb that returns what came since a cursor.
 
 **Missions.** The orchestrator `assign`s a mission to a free execution
@@ -605,13 +620,13 @@ unplanned stop loses only uncommitted work).
 
 | Caller | Verb | What it does |
 |---|---|---|
-| execution container | `ask` | a question about the current mission; returned to the orchestrator as an event |
+| execution container | `ask` | a question about the current mission; returned to the orchestrator as an event (*decision 35: it hands the work in progress back, and the question becomes a request for the human*) |
 | execution container | `done` | the mission is finished (branch published, or the QA report as body); the host fetches the branch into the team mirror first |
 | execution container | `status` | its own mission |
 | control (orchestrator) | `assign`, `release` | a mission to an execution container (kind, ticket, sub-task, branch, base, instruction) |
 | control (orchestrator) | `events` | the questions and mission ends since a cursor |
-| control (orchestrator) | `answer` | delivers an answer into the asking container's session |
-| control (orchestrator) | `session` | starts a fresh question session in the control container, as `aiuser`, with a given instruction |
+| control (orchestrator) | `answer` | delivers an answer into the asking container's session (*superseded by decision 35*) |
+| control (orchestrator) | `session` | starts a fresh question session in the control container, as `aiuser`, with a given instruction (*superseded by decision 35*) |
 | control (orchestrator) | `status` | every container: mission, session state |
 
 `message`, `ask-human` and the Inbox go. The API still identifies the caller by
@@ -627,10 +642,11 @@ and keeps its journal.
 | Pilot | `write-mission` | the mission files of a ticket (spec, answers, split), and the spec's summary in the ticket |
 | Pilot | `create-stack` | after the human's approval: the sub-tasks of a ticket, per repository, with their order; the ticket goes to Dev |
 | Pilot | `create-subtask`, `create-ticket`, `comment` | fixes from the review or peer comments; non-blocking points; a written answer |
-| question session | `answer` | the answer to its question |
-| question session | `escalate` | the question needs the human |
+| question session | `answer` | the answer to its question (*superseded by decision 35*) |
+| question session | `escalate` | the question needs the human (*superseded by decision 35*) |
 
-A question session's verbs act only on its own question: the channel knows
+*Decision 35: there are no question sessions; the next paragraph no longer
+applies.* A question session's verbs act only on its own question: the channel knows
 which session the orchestrator opened for which question (a token in the
 session's first instruction, or a socket per session: the builder's choice).
 All these sessions run as `aiuser`, which can read another session's
@@ -657,6 +673,8 @@ container).
   a question escalated to the human, the orchestrator waits for the
   developer's `done` (with a work-in-progress flag) before releasing it; the
   builder sets a timeout after which the orchestrator releases anyway.
+  *Superseded by decision 35: `forge-team ask` itself hands the work in
+  progress back; there is no wait and no timeout.*
 - **Docker services** per container, as today.
 
 ### 6.7 Stacks on the host
@@ -881,11 +899,11 @@ the old system kept on a LAN host.
    Markdown files are implemented sub-task after sub-task by several
    containers in parallel.*
 2. **The Pilot and the questions.** The local channel; the Pilot's launch on a
-   ticket, the mission files, `create-stack`; question sessions, requests,
+   ticket, the mission files, `create-stack`; question sessions (*superseded
+   by decision 35*), requests,
    Waiting for human, the answer back to Ready. *End state: the human
-   specifies a ticket with the Pilot and answers questions.* It needs the
-   screens' small slice (§6.12, decision 32): the list of tickets and the
-   answer to a request.
+   specifies a ticket with the Pilot and answers questions.* It ships without
+   the screens' small slice (decision 34).
 3. **QA, fixes, cascade, ship.** QA missions and their report, fix sub-tasks,
    rebase missions and the base check before QA, `forge fetch <ticket>`,
    `forge ship <ticket>` with the lease and the GitHub stack, the import of

@@ -16,12 +16,13 @@ import { loadConfig } from "../config.ts";
 import { provisioningMarker } from "../containers.ts";
 import { readEnvFile } from "../dotenv.ts";
 import { sessionState, type SessionState } from "../hc-session.ts";
-import { forgeProject, listInstances, type Instance } from "../incus.ts";
+import { execAsAgentArgv, forgeProject, listInstances, type Instance } from "../incus.ts";
 import { fetchMirrorLfs, refreshMirror } from "../mirror.ts";
 import type { HeldMission } from "../orchestrator/host.ts";
 import { configPath } from "../paths.ts";
 import { printableText } from "../printable.ts";
-import { ensureRepoMirrors, projectMembers, repoOriginMirror, repoTeamMirror, type ProjectMember } from "../project.ts";
+import { ensurePilot } from "../pilot.ts";
+import { CONTROL, ensureRepoMirrors, projectMembers, repoOriginMirror, repoTeamMirror, type ProjectMember } from "../project.ts";
 import type { ProjectConfig } from "../project-config.ts";
 import {
   convergeControl, convergeExecutor, orchestratorState, provisionControl, provisionExecutor, type OrchestratorState,
@@ -53,7 +54,9 @@ export type ProjectMemberStatus = {
   // quand le container est absent ou arrêté.
   orchestrator?: OrchestratorState;
 };
-export type ProjectStatus = { members: ProjectMemberStatus[] };
+// `problems` : ceux du dernier tour de l'orchestrateur, lus par son canal ;
+// null quand ils n'ont pas pu être lus (ou avec --quick).
+export type ProjectStatus = { members: ProjectMemberStatus[]; problems: string[] | null };
 
 const SUBCOMMANDS = ["converge", "status", "sync", "assign", "release", "for-repo", "task-base", "upload-pack"];
 
@@ -74,7 +77,7 @@ export async function cmdTeam(ctx: Context, args: string[], opts: TeamOptions = 
   const p = cfg.project;
   switch (sub) {
     case "converge": return converge(ctx, p, cfg, a, opts);
-    case "status": return status(ctx, p, opts.json === true);
+    case "status": return status(ctx, p, opts.json === true, opts.quick === true);
     case "sync": return sync(ctx, p, a);
     case "assign": return assignCommand(ctx, p, a, b, opts);
     case "release": return releaseCommand(ctx, p, a);
@@ -119,6 +122,8 @@ async function assignCommand(
   const mission = {
     kind: "dev", ticket: subtask.slice(0, Math.max(0, subtask.indexOf("."))), subtask, repository,
     branch: `agent/${subtask}`, base, instruction,
+    // La main de l'humain n'envoie aucun fichier de mission.
+    files: { spec: null, answers: null, split: null },
   };
   await humanAssign(ctx, p, Journal.open(journalPath()), handedOutSecrets(ctx), to, mission);
   ctx.out(`Assigned ${subtask} to ${to} (${repository}, from ${base}).`);
@@ -166,9 +171,12 @@ async function converge(ctx: Context, p: ProjectConfig, cfg: ForgeConfig, team: 
 
   const existing = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
   const wanted = projectMembers(p);
+  // Le contrôle, prêt pour la session du Pilote ; ses instructions ont-elles changé ?
+  let control: { changed: boolean } | null = null;
   for (const m of wanted) {
     if (!existing.has(m.name)) {
       await (m.kind === "control" ? provisionControl : provisionExecutor)(ctx, cfg, m);
+      if (m.kind === "control") control = { changed: false };
       continue;
     }
     if (await provisioningMarker(ctx, m.name) !== null) {
@@ -176,10 +184,12 @@ async function converge(ctx: Context, p: ProjectConfig, cfg: ForgeConfig, team: 
       continue;
     }
     ctx.out(`Updating ${m.name}...`);
-    await (m.kind === "control" ? convergeControl : convergeExecutor)(ctx, cfg, m);
+    const r = await (m.kind === "control" ? convergeControl : convergeExecutor)(ctx, cfg, m);
+    if (m.kind === "control") control = { changed: r.instructionsChanged };
   }
   // Le service ne connaît que les membres de la config qu'il a lue au démarrage.
   await restartApiService(ctx);
+  if (control !== null) await pilotSession(ctx, control.changed);
 
   const instances = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
   printTable(ctx, wanted.map((m) => [m.name, m.kind, instances.get(m.name)?.status ?? "Missing", missionLabel(m, heldMission(instances.get(m.name)))]));
@@ -202,8 +212,25 @@ function printTable(ctx: Context, rows: string[][], head = ["NAME", "KIND", "STA
   for (const row of table) ctx.out(formatRow(row, widths));
 }
 
-// Aucun miroir à rafraîchir en mode projet : `--quick` ne retire rien.
-async function status(ctx: Context, p: ProjectConfig, json: boolean): Promise<number> {
+// Les problèmes du dernier tour de l'orchestrateur, demandés à son canal par
+// aiuser dans le contrôle (`forge-team problems --json`) ; null si le contrôle
+// ou le canal ne répond pas, ce qui n'est pas une erreur.
+const PROBLEMS_MS = 8_000;
+async function orchestratorProblems(ctx: Context, running: boolean): Promise<string[] | null> {
+  if (!running) return null;
+  const r = await execAsAgentArgv(ctx, CONTROL, ["forge-team", "problems", "--json"], { timeoutMs: PROBLEMS_MS });
+  if (r.timedOut || r.code !== 0) return null;
+  try {
+    const v: unknown = JSON.parse(r.stdout);
+    return Array.isArray(v) && v.every((x) => typeof x === "string") ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+// Aucun miroir à rafraîchir en mode projet. `--quick` ne demande pas les
+// problèmes de l'orchestrateur.
+async function status(ctx: Context, p: ProjectConfig, json: boolean, quick: boolean): Promise<number> {
   const instances = new Map((await listInstances(ctx)).map((i) => [i.name, i]));
   const members: ProjectMemberStatus[] = [];
   const rows: string[][] = [];
@@ -237,17 +264,50 @@ async function status(ctx: Context, p: ProjectConfig, json: boolean): Promise<nu
     members.push(row);
     rows.push([m.name, m.kind, inst?.status ?? "Missing", session, label]);
   }
+  const problems = quick ? null : await orchestratorProblems(ctx, instances.get(CONTROL)?.status === "Running");
   if (json) {
-    ctx.out(JSON.stringify({ members } satisfies ProjectStatus));
+    ctx.out(JSON.stringify({ members, problems } satisfies ProjectStatus));
     return 0;
   }
   printTable(ctx, rows, ["NAME", "KIND", "STATUS", "SESSION", "MISSION"]);
+  if (quick) return 0;
+  if (problems === null) {
+    ctx.out("orchestrator's problems: unavailable");
+  } else if (problems.length > 0) {
+    ctx.out("");
+    ctx.out("PROBLEMS");
+    for (const line of problems) ctx.out(printableText(line));
+  }
   return 0;
+}
+
+// La session du Pilote : lancée si elle ne tourne pas ; une session qui parle
+// avec l'humain n'est jamais coupée, un changement de ses instructions se dit.
+// Une session qui ne démarre pas est un avertissement : le reste du projet tourne.
+async function pilotSession(ctx: Context, instructionsChanged: boolean): Promise<void> {
+  try {
+    if ((await ensurePilot(ctx)) === "started") {
+      ctx.out(`Started the Pilot's session in ${CONTROL}.`);
+    } else if (instructionsChanged) {
+      ctx.out("NOTE: the Pilot's instructions changed; its session keeps the old ones until you run forge pilot <ticket> --fresh.");
+    }
+  } catch (e) {
+    if (!(e instanceof ForgeError)) throw e;
+    ctx.err(`WARNING: the Pilot's session did not start: ${e.message}`);
+  }
 }
 
 // Le miroir d'origine d'un dépôt, depuis GitHub par l'agent SSH transmis.
 async function sync(ctx: Context, p: ProjectConfig, name: string | undefined): Promise<number> {
   const repo = requireRepository(p, name);
+  await refreshOriginMirror(ctx, p, repo);
+  ctx.out(`Synced ${repo}.`);
+  return 0;
+}
+
+// Rafraîchit le miroir d'origine d'un dépôt déclaré (et ses objets LFS) ; un
+// échec dit comment faire passer l'agent SSH. `forge pilot` l'appelle aussi.
+export async function refreshOriginMirror(ctx: Context, p: ProjectConfig, repo: string): Promise<void> {
   const { repo: ownerRepo, lfs } = p.repositories[repo];
   // Avant tout fetch : sans le paquet, l'étape LFS échouerait sur un message de git.
   if (lfs) await requireHostLfs(ctx);
@@ -259,8 +319,6 @@ async function sync(ctx: Context, p: ProjectConfig, name: string | undefined): P
     if (l.code !== 0) throw new ForgeError(`fetching the LFS objects of ${ownerRepo} failed: ${l.stderr.trim() || `exit code ${l.code}`}\n${hint}`);
     if (l.warning) ctx.err(`WARNING: ${l.warning}`);
   }
-  ctx.out(`Synced ${repo}.`);
-  return 0;
 }
 
 // Le laptop demande quel dépôt du projet est son clone : le nom sur stdout

@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
 import { hcArgv, typeNotice, INSTRUCTION_PATH, sessionState, startSession } from "../cli/lib/hc-session.ts";
+import { AGENT_WRITE_SCRIPT } from "../cli/lib/incus.ts";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -27,21 +28,23 @@ test("hcArgv runs hc as the agent, in /workspace, with the core's session bus", 
   ]);
 });
 
-test("startSession: old session removed, instruction pushed as a file, then hc run; the text is in no argv", async () => {
-  const { fake, ctx } = setup();
+test("startSession: old session removed, instruction written as aiuser from stdin, then hc run; the text is in no argv", async () => {
+  const { ctx } = setup();
   const text = "Corrige le login $(id) 'quoted'";
   await startSession(ctx, { name: DEV }, "fix-login", text);
   const calls = ctx.calls.map((c) => c.join(" "));
   const kill = calls.findIndex((c) => c.endsWith("-- hc kill agent"));
   const rm = calls.findIndex((c) => c.endsWith("-- hc rm agent"));
-  const push = calls.findIndex((c) => c.includes("file push") && c.includes("/home/aiuser/.forge/instruction.md"));
+  // Écrite par aiuser (jamais par root dans son home), le texte sur stdin.
+  const push = calls.findIndex((c) => c.includes(`exec ${DEV} --user 1001 --group 1001`) && c.includes("node -e") &&
+    c.endsWith("/home/aiuser/.forge/instruction.md"));
   const run = calls.findIndex((c) => c.includes("-- hc run --bg --name agent "));
   assert.ok(kill >= 0 && rm > kill && push > rm && run > push, calls.join("\n"));
   assert.ok(calls[run].includes(`forge-agent --forge-task ${DEV}-fix-login `), calls[run]);
   // Herdr App ne montre que les terminaux qui portent ces deux étiquettes.
   assert.ok(calls[run].includes("--label herdr.space=forge --label herdr.tab=agent "), calls[run]);
-  const file = fake.files.get(`agent-forge/${DEV}/home/aiuser/.forge/instruction.md`)!;
-  assert.deepEqual([file.content, file.uid, file.mode], [text, "1001", "600"]);
+  assert.equal(ctx.execOptions[push]?.input, text);
+  assert.ok(!calls.some((c) => c.includes("file push")));
   assert.ok(!ctx.calls.some((c) => c.some((a) => a.includes("Corrige"))));
 });
 
@@ -169,4 +172,23 @@ test("typeNotice gives up after ten attempts, and refuses a finished terminal", 
   const c = scriptedSend(withLead(), [startingJson, OK]);
   assert.equal(await typeNotice(c.ctx, LEAD, "Fini"), 3);
   assert.equal(c.sleeps.length, 1);
+});
+
+test("the script that writes as aiuser replaces a planted symbolic link instead of following it, and writes mode 600", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-write-"));
+  try {
+    const target = join(dir, "elsewhere.txt");
+    writeFileSync(target, "keep\n");
+    const path = join(dir, "sub", "instruction.md");
+    mkdirSync(join(dir, "sub"));
+    symlinkSync(target, path);
+    const r = spawnSync("node", ["-e", AGENT_WRITE_SCRIPT, path], { input: "the instruction", encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(target, "utf8"), "keep\n");
+    assert.equal(readFileSync(path, "utf8"), "the instruction");
+    assert.ok(!lstatSync(path).isSymbolicLink());
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

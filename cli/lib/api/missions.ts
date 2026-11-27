@@ -10,15 +10,16 @@
 // `assign`, `release` et `done` passent un à la fois (`exclusive()`), et l'id
 // d'un `done` se prend en l'écrivant au journal, dans cette file : un
 // évènement d'id plus petit n'apparaît jamais après un plus grand.
+import { dirname } from "node:path";
 import type { Context, ExecResult } from "../context.ts";
 import { ForgeError, inTime, mustSucceed } from "../context.ts";
 import { recordBranch } from "../branch-records.ts";
 import { clearMessages, hcArgv, sessionState, startSession, stopSession } from "../hc-session.ts";
-import { configGet, configSet, configUnset, execAsAgentArgv, listInstances } from "../incus.ts";
+import { configGet, configSet, configUnset, execAsAgentArgv, incus, listInstances, pushText } from "../incus.ts";
 import { ensureBareTeamMirror, HOST_GIT_CWD } from "../mirror.ts";
-import type { ExecutorStatus, HeldMission, HostEvent, MissionSpec, SessionState } from "../orchestrator/host.ts";
+import type { ExecutorStatus, HeldMission, HostEvent, MissionFiles, MissionSpec, SessionState } from "../orchestrator/host.ts";
 import { forgeCommand } from "../paths.ts";
-import { projectMembers, repoTeamMirror, type ProjectMember } from "../project.ts";
+import { CONTROL, projectMembers, repoTeamMirror, type ProjectMember } from "../project.ts";
 import { cloneDir } from "../project-provision.ts";
 import { REPO_NAME, type ProjectConfig } from "../project-config.ts";
 import { ensureRunning } from "../session.ts";
@@ -54,7 +55,8 @@ export type MissionRequest =
   | { op: "assign"; to: string; mission: MissionSpec }
   | { op: "release"; to: string }
   | { op: "events"; after: number }
-  | { op: "done" };
+  | { op: "done"; report: string | null }
+  | { op: "ask"; text: string; recommended: string | null };
 
 type Kind = ProjectMember["kind"];
 export type MissionVerb = MissionRequest["op"];
@@ -62,11 +64,11 @@ export type MissionVerb = MissionRequest["op"];
 // Les verbes de chaque socket : un exécuteur ne confie rien, le contrôle ne finit rien.
 const VERBS: Record<Kind, readonly MissionVerb[]> = {
   control: ["status", "assign", "release", "events"],
-  executor: ["done", "status"],
+  executor: ["done", "status", "ask"],
 };
 // Les champs exacts de chaque verbe ; `op` est lu à part.
 const FIELDS: Record<MissionVerb, readonly string[]> = {
-  status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: [],
+  status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: ["report"], ask: ["text", "recommended"],
 };
 const MISSION_FIELDS = ["kind", "ticket", "subtask", "repository", "branch", "base", "instruction"] as const;
 const HELD_FIELDS = MISSION_FIELDS.filter((k) => k !== "instruction");
@@ -99,7 +101,8 @@ function checkBase(base: string, subtask: string): void {
 
 function parseMission(v: unknown, secrets: readonly string[]): MissionSpec {
   if (!isObj(v)) throw new ForgeError("assign: mission must be an object");
-  unknownFields("assign: mission", v, MISSION_FIELDS);
+  // `files` n'est pas une chaîne : il est lu à part (parseFiles).
+  unknownFields("assign: mission", v, [...MISSION_FIELDS, "files"]);
   for (const k of MISSION_FIELDS) {
     if (typeof v[k] !== "string") throw new ForgeError(`assign: mission.${k} must be a string`);
   }
@@ -116,7 +119,61 @@ function parseMission(v: unknown, secrets: readonly string[]): MissionSpec {
   if (m.branch !== `agent/${m.subtask}`) throw new ForgeError(`assign: branch must be agent/${m.subtask}`);
   checkBase(m.base, m.subtask);
   checkText(m.instruction, INSTRUCTION_MAX, "instruction", secrets);
-  return { kind: "dev", ticket: m.ticket, subtask: m.subtask, repository: m.repository, branch: m.branch, base: m.base, instruction: m.instruction };
+  return {
+    kind: "dev", ticket: m.ticket, subtask: m.subtask, repository: m.repository, branch: m.branch, base: m.base, instruction: m.instruction,
+    files: parseFiles(v.files, secrets),
+  };
+}
+
+// Les fichiers de mission : exactement `spec`, `answers` et `split`, chacun
+// null ou un texte d'au plus MISSION_FILE_MAX octets, sans secret.
+const FILE_NAMES = ["spec", "answers", "split"] as const;
+export const MISSION_FILE_MAX = 262_144;
+
+function parseFiles(v: unknown, secrets: readonly string[]): MissionFiles {
+  if (!isObj(v)) throw new ForgeError("assign: mission.files must be an object");
+  unknownFields("assign: mission.files", v, FILE_NAMES);
+  const out: MissionFiles = { spec: null, answers: null, split: null };
+  for (const k of FILE_NAMES) {
+    const f = v[k];
+    if (f === null) continue;
+    if (typeof f !== "string") throw new ForgeError(`assign: mission.files.${k} must be a string or null`);
+    if (Buffer.byteLength(f, "utf8") > MISSION_FILE_MAX) {
+      throw new ForgeError(`assign: mission.files.${k} is longer than ${MISSION_FILE_MAX} bytes`);
+    }
+    if (hasSecret(f, secrets)) throw new ForgeError(`assign: mission.files.${k} holds a secret forge handed out: remove it`);
+    out[k] = f;
+  }
+  return out;
+}
+
+// La copie en lecture seule des fichiers de mission, dans l'exécuteur : un
+// dossier à root (755), chaque fichier à root (444) ; l'agent les lit et ne
+// peut pas les changer (décision 29 : la base reste la vérité). Hors du home
+// d'aiuser, sous un parent à root (/etc/forge) : root n'écrit jamais dans un
+// dossier qu'aiuser possède, où un lien symbolique planté détournerait
+// l'écriture. Le même chemin que MISSION_DIR de
+// cli/lib/orchestrator/instruction.ts (un test le vérifie).
+export const MISSION_FILES_DIR = "/etc/forge/mission";
+
+// En root, dans le container : /etc/forge (sous /etc, à root), puis le dossier
+// retiré et recréé neuf.
+async function resetMissionFiles(ctx: Context, to: string): Promise<void> {
+  const asRoot = (step: string, argv: string[]) =>
+    mustSucceed(step, inTime(`${step} in ${to}`, INCUS_MS, ctx.exec(incus("exec", to, "--", ...argv), { timeoutMs: INCUS_MS })));
+  await asRoot("create /etc/forge", ["install", "-d", "-o", "root", "-g", "root", "-m", "755", "--", dirname(MISSION_FILES_DIR)]);
+  await asRoot("remove the mission files", ["rm", "-rf", "--", MISSION_FILES_DIR]);
+  await asRoot("create the mission files folder", ["mkdir", "-m", "755", "--", MISSION_FILES_DIR]);
+}
+
+async function pushMissionFiles(ctx: Context, to: string, files: MissionFiles): Promise<void> {
+  await resetMissionFiles(ctx, to);
+  for (const k of FILE_NAMES) {
+    const text = files[k];
+    if (text === null) continue;
+    await mustSucceed(`push ${k}.md`, inTime(`push ${k}.md to ${to}`, INCUS_MS,
+      pushText(ctx, to, `${MISSION_FILES_DIR}/${k}.md`, text, { uid: 0, gid: 0, mode: "444" }, { timeoutMs: INCUS_MS })));
+  }
 }
 
 export function parseMissionRequest(line: string, from: Kind, secrets: readonly string[]): MissionRequest {
@@ -156,8 +213,24 @@ export function parseMissionRequest(line: string, from: Kind, secrets: readonly 
       }
       return { op: "events", after };
     }
-    case "done":
-      return { op: "done" };
+    case "done": {
+      // Le champ est facultatif : le forge-team de la partie 1 envoie `{"op":"done"}`.
+      const raw = json.report ?? null;
+      if (raw !== null && typeof raw !== "string") throw new ForgeError("done: report must be a string or null");
+      const report = raw === null || raw.trim() === "" ? null : raw;
+      if (report !== null) checkText(report, INSTRUCTION_MAX, "report", secrets);
+      return { op: "done", report };
+    }
+    case "ask": {
+      const text = json.text;
+      if (typeof text !== "string") throw new ForgeError("ask: text must be a string");
+      checkText(text, INSTRUCTION_MAX, "question", secrets);
+      const raw = json.recommended ?? null;
+      if (raw !== null && typeof raw !== "string") throw new ForgeError("ask: recommended must be a string or null");
+      const recommended = raw === null || raw.trim() === "" ? null : raw;
+      if (recommended !== null) checkText(recommended, INSTRUCTION_MAX, "recommended answer", secrets);
+      return { op: "ask", text, recommended };
+    }
     default:
       return { op: "status" };
   }
@@ -165,7 +238,7 @@ export function parseMissionRequest(line: string, from: Kind, secrets: readonly 
 
 // ---------------------------------------------------------------- l'état tenu
 
-const held = (m: MissionSpec): HeldMission => ({
+const heldOf = (m: MissionSpec): HeldMission => ({
   kind: m.kind, ticket: m.ticket, subtask: m.subtask, repository: m.repository, branch: m.branch, base: m.base,
 });
 
@@ -216,15 +289,19 @@ export async function handleMission(d: ApiDeps, caller: ProjectMember, line: str
   }
 }
 
-function entryFields(caller: ProjectMember, req: MissionRequest | null, outcome: Entry["outcome"], error: string | null, done?: HeldMission): NewEntry {
-  const mission = req?.op === "assign" ? held(req.mission) : done;
+function entryFields(caller: ProjectMember, req: MissionRequest | null, outcome: Entry["outcome"], error: string | null, held?: HeldMission): NewEntry {
+  const mission = req?.op === "assign" ? heldOf(req.mission) : held;
   return {
     caller: caller.name, op: req?.op ?? null,
     to: req !== null && "to" in req ? req.to : null,
     task: mission?.subtask ?? null,
     outcome, error, summary: null,
-    text: req?.op === "assign" ? req.mission.instruction : null,
+    text: req === null ? null
+      : req.op === "assign" ? req.mission.instruction
+        : req.op === "done" ? req.report
+          : req.op === "ask" ? req.text : null,
     ...(mission === undefined ? {} : { mission }),
+    ...(req?.op === "ask" && req.recommended !== null ? { recommended: req.recommended } : {}),
   };
 }
 
@@ -266,7 +343,10 @@ async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Prom
     case "events":
       return events(d, req.after);
     case "done":
-      return exclusive(() => withMissionLock(() => done(d, caller)));
+    case "ask": {
+      const r = req;
+      return exclusive(() => withMissionLock(() => handBack(d, caller, r)));
+    }
   }
 }
 
@@ -304,7 +384,7 @@ export async function humanAssign(
   await asHuman(journal, entry, async () => {
     requireHumanTarget(p, to);
     const mission = parseMission(spec, secrets);
-    Object.assign(entry, { task: mission.subtask, text: mission.instruction, mission: held(mission) });
+    Object.assign(entry, { task: mission.subtask, text: mission.instruction, mission: heldOf(mission) });
     if (!Object.hasOwn(p.repositories, mission.repository)) {
       throw new ForgeError(`repository ${mission.repository} is not declared in the project`);
     }
@@ -347,8 +427,10 @@ async function assign(ctx: Context, p: ProjectConfig, to: string, m: MissionSpec
   await prepareBranch(ctx, to, m);
   recordBranch({ branch: m.branch, repository: m.repository, ticket: m.ticket, subtask: m.subtask, base: m.base, executor: to });
   await mustSucceed("record the mission",
-    inTime(`recording the mission of ${to}`, INCUS_MS, configSet(ctx, to, MISSION_KEY, JSON.stringify(held(m)), { timeoutMs: INCUS_MS })));
+    inTime(`recording the mission of ${to}`, INCUS_MS, configSet(ctx, to, MISSION_KEY, JSON.stringify(heldOf(m)), { timeoutMs: INCUS_MS })));
   try {
+    // Les fichiers de la mission précédente partent, ceux de celle-ci arrivent.
+    await pushMissionFiles(ctx, to, m.files);
     await startSession(ctx, { name: to }, m.subtask, m.instruction, { cwd: cloneDir(m.repository), timeoutMs: INCUS_MS });
   } catch (e) {
     // Une session qui ne démarre pas ne laisse pas l'exécuteur marqué occupé.
@@ -495,6 +577,12 @@ async function release(ctx: Context, to: string): Promise<void> {
   }
   if (!stopped) ctx.err(`WARNING: could not stop ${to}'s session: it stays as it is until the next assign.`);
   await clearMessages(ctx, to, { timeoutMs: INCUS_MS });
+  try {
+    await resetMissionFiles(ctx, to);
+  } catch (e) {
+    if (!(e instanceof ForgeError)) throw e;
+    ctx.err(`WARNING: could not empty ${to}'s mission files: the next assign replaces them.`);
+  }
 }
 
 // Le contrat de `session` (orchestrator/host.ts) : `none` seulement pour un
@@ -535,35 +623,47 @@ async function status(ctx: Context, p: ProjectConfig): Promise<ExecutorStatus[]>
   }));
 }
 
-// Les `done` acceptés d'id > after, par id croissant ; `last` est le plus
-// grand id du journal (0 s'il est vide), lu dans le même instant.
+// Les `done` et les `ask` acceptés d'id > after, par id croissant ; `last` est
+// le plus grand id du journal (0 s'il est vide), lu dans le même instant.
 function events(d: ApiDeps, after: number): Outcome {
   d.journal.refresh();
   const entries = d.journal.entries();
   const last = entries.reduce((max, e) => Math.max(max, e.id), 0);
   const list: HostEvent[] = entries
-    .filter((e) => e.op === "done" && e.outcome === "ok" && e.id > after && e.mission !== undefined)
+    .filter((e) => (e.op === "done" || e.op === "ask") && e.outcome === "ok" && e.id > after && e.mission !== undefined)
     .sort((a, b) => a.id - b.id)
-    .map((e) => ({ id: e.id, kind: "done", executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask, branch: e.mission!.branch }));
+    .map((e): HostEvent => {
+      const base = { id: e.id, executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask };
+      if (e.op === "ask") return { ...base, kind: "ask", text: e.text ?? "", recommended: e.recommended ?? null };
+      return { ...base, kind: "done", branch: e.mission!.branch, report: e.text ?? null };
+    });
   return { reply: () => ({ ok: true, events: list, last }), quiet: true };
 }
 
-// Une mission tenue, des clones sans changements suivis, au moins un commit
-// au-delà de sa base, la branche copiée dans le miroir d'équipe du dépôt ;
-// puis la ligne du journal, dont l'id est celui de l'évènement. Les clones
+// `done` et `ask` rendent la mission : une mission tenue, des clones sans
+// changements suivis, la branche copiée dans le miroir d'équipe du dépôt ;
+// puis la ligne du journal, dont l'id est celui de l'évènement. `done` exige
+// au moins un commit au-delà de la base ; `ask` (décision 35 : une question
+// pour l'humain, avec le travail en cours) l'accepte sans commit, et ne copie
+// alors rien. L'hôte ne libère pas l'exécuteur : l'orchestrateur le fait. Les clones
 // sont lus comme `status` les lit (tous, pas seulement celui de la mission) :
 // un done accepté sur un clone sale libérerait un exécuteur que `status` dit
 // ensuite `unknown`, et qui ne recevrait plus de mission.
-async function done(d: ApiDeps, caller: ProjectMember): Promise<Outcome> {
+async function handBack(
+  d: ApiDeps, caller: ProjectMember, req: { op: "done"; report: string | null } | { op: "ask"; text: string; recommended: string | null },
+): Promise<Outcome> {
   const { ctx } = d;
-  const m = readHeld(await configGet(ctx, caller.name, MISSION_KEY));
-  if (m === null) throw new ForgeError(`${caller.name} holds no mission: there is nothing to report done`);
+  const again = req.op === "done" ? "report done again" : "ask again";
+  const m = readHeld(await configGet(ctx, caller.name, MISSION_KEY, { timeoutMs: INCUS_MS }));
+  if (m === null) {
+    throw new ForgeError(`${caller.name} holds no mission: there is nothing to ${req.op === "done" ? "report done" : "ask about"}`);
+  }
   if (m === "unreadable") throw new ForgeError(`${caller.name}'s mission key is unreadable: ask for it to be released`);
   for (const c of await cloneStates(ctx, caller.name, requireProject(d))) {
     if (c.state === "dirty") {
-      throw new ForgeError(`${caller.name}: ${cloneDir(c.repository)} has uncommitted changes: commit or discard them, then report done again`);
+      throw new ForgeError(`${caller.name}: ${cloneDir(c.repository)} has uncommitted changes: commit or discard them, then ${again}`);
     }
-    if (c.state === "unreadable") throw new ForgeError(`${caller.name}: git status in ${cloneDir(c.repository)} did not answer: try done again`);
+    if (c.state === "unreadable") throw new ForgeError(`${caller.name}: git status in ${cloneDir(c.repository)} did not answer: try ${req.op} again`);
   }
   const git = gitIn(ctx, caller.name, m.repository);
   // La base, à jour dans le clone : `origin/<b>` après `git fetch origin`,
@@ -572,11 +672,10 @@ async function done(d: ApiDeps, caller: ProjectMember): Promise<Outcome> {
   await mustSucceed(stacked ? "git fetch team" : "git fetch origin", git(FETCH_MS, "fetch", stacked ? "team" : "origin"));
   const from = stacked ? `team/${m.base}` : m.base;
   const count = await mustSucceed("git rev-list", git(GIT_MS, "rev-list", "--count", `${from}..${m.branch}`));
-  if (!(Number.parseInt(count.stdout.trim(), 10) > 0)) {
-    throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
-  }
-  await copyToTeamMirror(ctx, caller.name, m.repository, m.branch);
-  const entry = d.journal.append(entryFields(caller, { op: "done" }, "ok", null, m), d.now());
+  const ahead = Number.parseInt(count.stdout.trim(), 10) > 0;
+  if (!ahead && req.op === "done") throw new ForgeError(`nothing committed on ${m.branch} beyond ${m.base}`);
+  if (ahead) await copyToTeamMirror(ctx, caller.name, m.repository, m.branch);
+  const entry = d.journal.append(entryFields(caller, req, "ok", null, m), d.now());
   return { entry, reply: (id) => ({ ok: true, id }) };
 }
 

@@ -94,13 +94,32 @@ test("status --json of a project prints its members: kind, presence, the mission
     { name: "agent-control", kind: "control", present: true, mission: null, session: "idle", orchestrator: "failed" },
     { name: "agent-executor-1", kind: "executor", present: true, mission: HELD, session: "idle" },
     { name: "agent-executor-2", kind: "executor", present: false, mission: null, session: "none" },
-  ] });
+  ], problems: null });
   const text = project(fake, [LIVE_IDLE, ORCH_FAILED]).ctx;
   assert.equal(await cmdTeam(text, ["status"]), 0);
   assert.deepEqual(text.out_lines.map((l) => l.split(/\s+/).join(" ").trim()), [
     "NAME KIND STATUS SESSION MISSION", "agent-control control Running idle orchestrator failed",
     "agent-executor-1 executor Running idle T-1.2 (web)", "agent-executor-2 executor Missing none free",
+    "orchestrator's problems: unavailable",
   ]);
+});
+
+test("status prints the orchestrator's problems under the table; unreachable, it says unavailable and exits 0", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  const line = "T-2: assign T-2.1 to agent-executor-1: refused";
+  const problems: ExecRule = { match: "forge-team problems --json", stdout: JSON.stringify([line]) };
+  const { ctx } = project(fake, [LIVE_IDLE, problems]);
+  assert.equal(await cmdTeam(ctx, ["status"]), 0);
+  assert.deepEqual(ctx.out_lines.slice(-2), ["PROBLEMS", line]);
+  const call = ctx.calls.map((c) => c.join(" ")).find((c) => c.includes("forge-team problems"))!;
+  assert.ok(call.includes("exec agent-control --user 1001"), call);
+  const json = project(fake, [LIVE_IDLE, problems]).ctx;
+  await cmdTeam(json, ["status"], { json: true });
+  assert.deepEqual(JSON.parse(json.out_lines[0]).problems, [line]);
+  const down = project(fake, [LIVE_IDLE, { match: "forge-team problems --json", code: 2 }]).ctx;
+  assert.equal(await cmdTeam(down, ["status"]), 0);
+  assert.equal(down.out_lines.at(-1), "orchestrator's problems: unavailable");
 });
 
 test("status shows a blocked session, and warns of a mission whose agent waits on its screen", async () => {
@@ -281,4 +300,19 @@ test("assign to a busy executor is refused by the host and journaled refused; re
   assert.equal(await cmdTeam(ctx, ["release", "agent-executor-1"]), 0);
   assert.equal(fake.instances.get("agent-forge")!.get("agent-executor-1")!.config["user.forge.mission"], undefined);
   assert.deepEqual(journalLines().map((l) => [l.id, l.caller, l.op, l.outcome]), [[0, "human", "assign", "refused"], [0, "human", "release", "ok"]]);
+});
+
+test("converge: a running Pilot is left alone, and a change of its instructions is said; with none, it is started", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  for (const n of [1, 2]) fake.addInstance("agent-forge", `agent-executor-${n}`, { status: "Running", config: { "user.forge.role": "executor" } });
+  const { ctx } = project(fake, [LIVE_IDLE]);
+  assert.equal(await cmdTeam(ctx, ["converge"]), 0);
+  assert.ok(ctx.out_lines.includes("NOTE: the Pilot's instructions changed; its session keeps the old ones until you run forge pilot <ticket> --fresh."),
+    ctx.out_lines.join("\n"));
+  assert.ok(!ctx.calls.some((c) => c.includes("agent-control") && c.join(" ").includes("-- hc run ")));
+
+  const none = project(fake, [{ match: "agent-control --user 1001 --group 1001 --cwd /workspace --env HOME=/home/aiuser --env XDG_RUNTIME_DIR=/run/user/1001 --env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus -- hc get agent", code: 1 }, LIVE_IDLE]).ctx;
+  assert.equal(await cmdTeam(none, ["converge"]), 0);
+  assert.ok(none.calls.some((c) => c.join(" ").includes("exec agent-control") && c.join(" ").includes("-- hc run ")), none.calls.map((c) => c.join(" ")).join("\n"));
 });

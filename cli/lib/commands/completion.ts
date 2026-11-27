@@ -26,7 +26,7 @@ export function completionScript(forgeBin: string): string {
   cmd="\${COMP_WORDS[1]}"
 
   if [ "$COMP_CWORD" -eq 1 ]; then
-    COMPREPLY=($(compgen -W "setup stop delete list egress image team api completion" -- "$cur"))
+    COMPREPLY=($(compgen -W "setup stop delete list egress image team pilot api completion" -- "$cur"))
     return
   fi
 

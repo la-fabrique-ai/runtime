@@ -3,7 +3,7 @@
 // shell. Le texte d'une consigne arrive comme fichier, jamais dans un argv.
 import type { Context, ExecResult } from "./context.ts";
 import { ForgeError, inTime, mustSucceed } from "./context.ts";
-import { execAsAgentArgv, incus, pushText } from "./incus.ts";
+import { execAsAgentArgv, incus, writeAsAgent } from "./incus.ts";
 import { egressAfterStart, egressBeforeStart } from "./strict.ts";
 
 // Le nom du terminal hc de l'agent, le même dans chaque container.
@@ -123,8 +123,9 @@ export async function startSession(
   await hc("hc kill", ["kill", SESSION]);
   await hc("hc rm", ["rm", SESSION]);
   await clearMessages(ctx, m.name, { timeoutMs: t });
-  await mustSucceed("push the instruction", inTime(`push the instruction to ${m.name}`, t,
-    pushText(ctx, m.name, INSTRUCTION_PATH, instruction, { uid: 1001, gid: 1001, mode: "600" }, { timeoutMs: t })));
+  // En aiuser, le texte sur stdin : root n'écrit pas dans le home de l'agent.
+  await mustSucceed("write the instruction", inTime(`write the instruction in ${m.name}`, t,
+    writeAsAgent(ctx, m.name, INSTRUCTION_PATH, instruction, { timeoutMs: t })));
   const marker = `${m.name}-${task ?? "session"}`;
   await mustSucceed("hc run", hc("hc run", [
     "run", "--bg", "--name", SESSION, "--cwd", opts.cwd ?? "/workspace",
