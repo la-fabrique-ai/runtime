@@ -708,7 +708,7 @@ test("a qa assign on a clone with tracked changes, or on a branch the team mirro
   const qa = spec({ kind: "qa", subtask: "T-1.2", branch: "agent/T-1.2", base: "agent/T-1.1" });
   setup([{ match: "status --porcelain", stdout: " M a.ts\n" }]);
   assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: qa }), { ok: false, error:
-    `${E1}: /workspace/web has 1 uncommitted change and is not on agent/T-1.2: commit or discard them before assigning a mission` });
+    `${E1}: /workspace/web has 1 uncommitted change: commit or discard them before assigning a QA mission` });
   setup([absent("refs/remotes/team/agent/T-1.2")]);
   assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: qa }), { ok: false, error: "agent/T-1.2 is not in the team mirror of web" });
   assert.ok(!joined().some((c) => c.includes(" switch")));
@@ -904,7 +904,7 @@ test("a QA may ask: nothing copied, its event says it is a QA's; on a dirty clon
   setup([{ match: "status --porcelain", stdout: " M greet.sh\n" }]);
   const dirty = await call(E1, { op: "ask", text: "Does an empty name greet the world?" }) as { ok: boolean; error?: string };
   assert.equal(dirty.ok, false);
-  assert.match(dirty.error!, /has uncommitted changes/);
+  assert.match(dirty.error!, /has uncommitted changes: discard them, then ask again$/);
   setup([]);
   const r = await call(E1, { op: "ask", text: "Does an empty name greet the world?" }) as unknown as { ok: boolean; id: number };
   assert.equal(r.ok, true, JSON.stringify(r));

@@ -675,8 +675,9 @@ async function prepareQa(ctx: Context, to: string, m: MissionSpec): Promise<void
   await mustSucceed("git fetch team", git(FETCH_MS, "fetch", "team"));
   const dirty = changeCount((await mustSucceed("git status", git(GIT_MS, ...TRACKED_STATUS))).stdout);
   if (dirty > 0) {
-    throw new ForgeError(`${to}: ${dir} has ${dirty} uncommitted change${dirty === 1 ? "" : "s"} and is not on ${m.branch}: ` +
-      "commit or discard them before assigning a mission");
+    // Une QA tourne détachée : le clone n'est jamais « sur » sa branche.
+    throw new ForgeError(`${to}: ${dir} has ${dirty} uncommitted change${dirty === 1 ? "" : "s"}: ` +
+      "commit or discard them before assigning a QA mission");
   }
   const team = `team/${m.branch}`;
   if ((await git(GIT_MS, "rev-parse", "--verify", "--quiet", `refs/remotes/${team}`)).code !== 0) {
