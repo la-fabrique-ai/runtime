@@ -502,7 +502,10 @@ sub-task was handed out before; else the repository is the project's only one
 (with several, `--repository` is required) and the base is `origin/main`.
 Both commands are journaled under the caller `human`, refusals included. A
 release stops the session; the branch and the clone stay, and a later mission
-of the same sub-task resumes them.
+of the same sub-task resumes them. Your hand gives only a development mission
+of a sub-task, on its own branch `agent/<sub-task>`: not a fix (which works on
+the branch of the sub-task it fixes), a rebase or a QA, which the orchestrator
+hands out.
 
 `forge install` also copies a **forge mod** into Herdr App's mods directory
 (`~/.config/herdr-app/mods/forge/`, replaced at each run). It is a one-line bar
@@ -795,6 +798,10 @@ For a remote host, `forge install --host forge-acme`. On a finished host,
 `forge install` updates it: the playbook (which deploys the checkout's
 `forge` and upgrades Incus within its channel), `forge setup`, and the image
 build when the image's inputs changed (it asks when it cannot tell).
+
+From a project of the ticket-driven forge's part 2: its branches do not record
+what they stand on yet, so a stack under way is rebased once, from the bottom,
+before its QA. A ticket left in `qa` gets these rebases, then its QA.
 
 ## Configuration
 
