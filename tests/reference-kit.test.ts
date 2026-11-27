@@ -101,7 +101,8 @@ test("a kit file missing from the repository stops before any push", async () =>
 test("the repository's kits: the control and the executor, every skill and sub-agent they name exists", () => {
   const roles = JSON.parse(readFileSync(join(referenceDir(), "roles.json"), "utf8")) as Record<string, { skills: string[]; agents: string[] }>;
   assert.deepEqual(Object.keys(roles).sort(), ["control", "executor"]);
-  assert.deepEqual(referenceKit("control").skills, ["design", "split", "checkpoint"]);
+  assert.deepEqual(referenceKit("control").skills, ["design", "split", "checkpoint", "review"]);
+  assert.ok(readFileSync(join(referenceDir(), "skills", "review", "SKILL.md"), "utf8").startsWith("---\nname: review\n"));
   // Décision 35 : le doute d'un développeur va d'abord à ce sous-agent.
   assert.ok(referenceKit("executor").agents.includes("spec-reader"));
   // Partie 3 : l'exécuteur mène aussi la QA d'un ticket.
