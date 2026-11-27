@@ -13,13 +13,15 @@
 import { dirname } from "node:path";
 import type { Context, ExecResult } from "../context.ts";
 import { ForgeError, inTime, mustSucceed } from "../context.ts";
-import { recordBranch, setBuiltOn } from "../branch-records.ts";
+import { branchRecord, recordBranch, setBuiltOn } from "../branch-records.ts";
 import { clearMessages, hcArgv, sessionState, startSession, stopSession } from "../hc-session.ts";
 import { configGet, configSet, configUnset, execAsAgentArgv, incus, listInstances, pushText } from "../incus.ts";
 import { ensureBareTeamMirror, HOST_GIT_CWD } from "../mirror.ts";
-import type { ExecutorStatus, HeldMission, HostEvent, MissionFiles, MissionKind, MissionSpec, QaReport, SessionState } from "../orchestrator/host.ts";
+import type {
+  ExecutorStatus, HeldMission, HostEvent, MissionFiles, MissionKind, MissionSpec, QaReport, SessionState, StackBranch, StackState,
+} from "../orchestrator/host.ts";
 import { forgeCommand } from "../paths.ts";
-import { CONTROL, projectMembers, repoTeamMirror, type ProjectMember } from "../project.ts";
+import { CONTROL, projectMembers, repoOriginMirror, repoTeamMirror, type ProjectMember } from "../project.ts";
 import { cloneDir } from "../project-provision.ts";
 import { REPO_NAME, type ProjectConfig } from "../project-config.ts";
 import { ensureRunning } from "../session.ts";
@@ -58,19 +60,21 @@ export type MissionRequest =
   // `qa` : le compte rendu structuré d'une QA, lu ici tel quel ; il se valide
   // contre la mission tenue (parseQaReport), que la requête ne connaît pas.
   | { op: "done"; report: string | null; qa: unknown }
-  | { op: "ask"; text: string; recommended: string | null };
+  | { op: "ask"; text: string; recommended: string | null }
+  | { op: "stack"; branches: StackBranch[] };
 
 type Kind = ProjectMember["kind"];
 export type MissionVerb = MissionRequest["op"];
 
 // Les verbes de chaque socket : un exécuteur ne confie rien, le contrôle ne finit rien.
 const VERBS: Record<Kind, readonly MissionVerb[]> = {
-  control: ["status", "assign", "release", "events"],
+  control: ["status", "assign", "release", "events", "stack"],
   executor: ["done", "status", "ask"],
 };
 // Les champs exacts de chaque verbe ; `op` est lu à part.
 const FIELDS: Record<MissionVerb, readonly string[]> = {
   status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: ["report", "qa"], ask: ["text", "recommended"],
+  stack: ["branches"],
 };
 const MISSION_FIELDS = ["kind", "ticket", "subtask", "repository", "branch", "base", "instruction"] as const;
 const KINDS = ["dev", "rebase", "qa"] as const;
@@ -90,16 +94,36 @@ function unknownFields(where: string, o: Record<string, unknown>, allowed: reado
 
 // La base d'une mission : `origin/<branche>` (une branche de l'origine) ou
 // `agent/<sous-tâche>` (la branche d'une autre sous-tâche, dans le miroir d'équipe).
-function checkBase(base: string, subtask: string): void {
+function checkBase(base: string, subtask: string, verb = "assign"): void {
   if (base.startsWith("origin/") && isGitRef(base.slice("origin/".length))) {
     validateGitRef(base);
     return;
   }
   if (base.startsWith("agent/") && isSubtaskId(base.slice("agent/".length))) {
-    if (base.slice("agent/".length) === subtask) throw new ForgeError(`assign: sub-task ${subtask} cannot start from itself`);
+    if (base.slice("agent/".length) === subtask) throw new ForgeError(`${verb}: sub-task ${subtask} cannot start from itself`);
     return;
   }
-  throw new ForgeError("assign: base must be origin/<branch> or agent/<sub-task>");
+  throw new ForgeError(`${verb}: base must be origin/<branch> or agent/<sub-task>`);
+}
+
+// Les branches d'une pile : au plus STACK_MAX, chacune exactement
+// `repository`, `branch` (agent/<sous-tâche>) et `base`.
+const STACK_MAX = 50;
+function parseStack(v: unknown): StackBranch[] {
+  if (!Array.isArray(v) || v.length > STACK_MAX) throw new ForgeError(`stack: branches must be a list of at most ${STACK_MAX}`);
+  return v.map((b, i) => {
+    const where = `stack: branches[${i}]`;
+    if (!isObj(b)) throw new ForgeError(`${where} must be an object`);
+    unknownFields(where, b, ["repository", "branch", "base"]);
+    const { repository, branch, base } = b;
+    if (typeof repository !== "string" || !REPO_NAME.test(repository)) throw new ForgeError(`${where}.repository is not a repository name`);
+    if (typeof branch !== "string" || !branch.startsWith("agent/") || !isSubtaskId(branch.slice("agent/".length))) {
+      throw new ForgeError(`${where}.branch must be agent/<sub-task>`);
+    }
+    if (typeof base !== "string") throw new ForgeError(`${where}.base must be a string`);
+    checkBase(base, branch.slice("agent/".length), "stack");
+    return { repository, branch, base };
+  });
 }
 
 function parseMission(v: unknown, secrets: readonly string[]): MissionSpec {
@@ -216,6 +240,8 @@ export function parseMissionRequest(line: string, from: Kind, secrets: readonly 
       return { op: "assign", to: to(), mission: parseMission(json.mission, secrets) };
     case "release":
       return { op: "release", to: to() };
+    case "stack":
+      return { op: "stack", branches: parseStack(json.branches) };
     case "events": {
       const after = json.after;
       if (typeof after !== "number" || !Number.isSafeInteger(after) || after < 0) {
@@ -387,6 +413,13 @@ async function run(d: ApiDeps, caller: ProjectMember, req: MissionRequest): Prom
       }
     case "events":
       return events(d, req.after);
+    case "stack": {
+      for (const b of req.branches) {
+        if (!Object.hasOwn(p.repositories, b.repository)) throw new ForgeError(`repository ${b.repository} is not declared in the project`);
+      }
+      const states = await stack(d.ctx, req.branches);
+      return { reply: () => ({ ok: true, branches: states }), quiet: true };
+    }
     case "done":
     case "ask": {
       const r = req;
@@ -712,6 +745,33 @@ async function status(ctx: Context, p: ProjectConfig): Promise<ExecutorStatus[]>
     }
     return { name: m.name, mission, session: await executorSession(ctx, p, m.name, inst?.status === "Running", mission !== null) };
   }));
+}
+
+// Pour chaque branche, sur l'hôte et sans toucher un container : elle doit être
+// dans le miroir d'équipe ; la pointe de sa base se lit dans le miroir
+// d'origine (`origin/<b>`) ou d'équipe (`agent/<x>`) ; elle est à jour quand sa
+// fiche dit qu'elle était posée sur cette pointe. Lu à chaque tour, comme
+// `events` : aucune ligne au journal.
+async function stack(ctx: Context, branches: StackBranch[]): Promise<StackState[]> {
+  const tip = async (mirror: string, ref: string): Promise<string | null> => {
+    const r = await ctx.exec(["git", `--git-dir=${mirror}`, "rev-parse", "--verify", "--quiet", ref],
+      { cwd: HOST_GIT_CWD, env: { GIT_TERMINAL_PROMPT: "0" }, timeoutMs: GIT_MS });
+    if (r.timedOut) throw new ForgeError(`git rev-parse in ${mirror} timed out after ${GIT_MS / 1000} s`);
+    return r.code === 0 ? r.stdout.trim() : null;
+  };
+  const out: StackState[] = [];
+  for (const b of branches) {
+    const team = repoTeamMirror(b.repository);
+    if ((await tip(team, `refs/heads/${b.branch}`)) === null) {
+      throw new ForgeError(`${b.branch} is not in the team mirror of ${b.repository}`);
+    }
+    const baseTip = b.base.startsWith("origin/")
+      ? await tip(repoOriginMirror(b.repository), `refs/heads/${b.base.slice("origin/".length)}`)
+      : await tip(team, `refs/heads/${b.base}`);
+    const builtOn = branchRecord(b.repository, b.branch)?.builtOn ?? null;
+    out.push({ branch: b.branch, current: builtOn !== null && baseTip !== null && baseTip === builtOn, builtOn });
+  }
+  return out;
 }
 
 // Les `done` et les `ask` acceptés d'id > after, par id croissant ; `last` est

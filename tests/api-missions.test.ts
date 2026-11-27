@@ -15,7 +15,7 @@ import { handleMission, MISSION_FILES_DIR, MISSION_KEY, parseMissionRequest, par
 import { MISSION_DIR } from "../cli/lib/orchestrator/instruction.ts";
 import { branchRecord, readBranchRecords, recordBranch, setBuiltOn } from "../cli/lib/branch-records.ts";
 import { socketHost, type HeldMission, type MissionSpec } from "../cli/lib/orchestrator/host.ts";
-import { CONTROL, executorName, projectMembers, repoTeamMirror } from "../cli/lib/project.ts";
+import { CONTROL, executorName, projectMembers, repoOriginMirror, repoTeamMirror } from "../cli/lib/project.ts";
 import { TRUST_SCRIPT, trustedDirs } from "../cli/lib/project-provision.ts";
 
 const cfg = parseConfig("/c.json", {
@@ -833,4 +833,44 @@ test("a rebase done must stand on its base's tip: refused and nothing copied oth
   assert.ok(ctx.calls.some((c) => c[0] === "git" && c.at(-1) === "+refs/heads/agent/T-1.2:refs/heads/agent/T-1.2"));
   const ev = await call(CONTROL, { op: "events", after: 0 }) as unknown as { events: { mission: string }[] };
   assert.equal(ev.events[0].mission, "rebase");
+});
+
+// ------------------------------------------------------------- le verbe stack
+
+const tipRule = (mirror: string, ref: string, sha: string | null): ExecRule => ({
+  match: `--git-dir=${mirror} rev-parse --verify --quiet ${ref}`, ...(sha === null ? { code: 1 } : { stdout: `${sha}\n` }),
+});
+const STACK = [
+  { repository: "web", branch: "agent/T-1.1", base: "origin/main" },
+  { repository: "web", branch: "agent/T-1.2", base: "agent/T-1.1" },
+];
+
+test("stack: each branch against the tip of its base today, from the host's mirrors, without a journal line", async () => {
+  const TEAM_TIP = "3".repeat(40);
+  recordBranch({ branch: "agent/T-1.1", repository: "web", ticket: "T-1", subtask: "T-1.1", base: "origin/main", executor: E1 });
+  setBuiltOn("web", "agent/T-1.1", SHA);
+  recordBranch({ branch: "agent/T-1.2", repository: "web", ticket: "T-1", subtask: "T-1.2", base: "agent/T-1.1", executor: E2 });
+  setBuiltOn("web", "agent/T-1.2", OLD);
+  setup([tipRule(repoOriginMirror("web"), "refs/heads/main", SHA), tipRule(repoTeamMirror("web"), "refs/heads/agent/T-1.1", TEAM_TIP)]);
+  assert.deepEqual(await call(CONTROL, { op: "stack", branches: STACK }), { ok: true, branches: [
+    { branch: "agent/T-1.1", current: true, builtOn: SHA },
+    { branch: "agent/T-1.2", current: false, builtOn: OLD },
+  ] });
+  assert.ok(ctx.calls.every((c) => c[0] !== "incus"), joined().join("\n"));
+  assert.deepEqual(d.journal.entries(), []);
+  await withHost(async (host) => assert.deepEqual((await host.stack(STACK)).map((x) => x.current), [true, false]));
+});
+
+test("stack: a branch without a record is not current; one the team mirror lacks is refused; an executor may not ask", async () => {
+  setup([tipRule(repoOriginMirror("web"), "refs/heads/main", SHA)]);
+  assert.deepEqual(await call(CONTROL, { op: "stack", branches: [STACK[0]] }), { ok: true, branches: [
+    { branch: "agent/T-1.1", current: false, builtOn: null },
+  ] });
+  setup([tipRule(repoTeamMirror("web"), "refs/heads/agent/T-1.2", null)]);
+  assert.deepEqual(await call(CONTROL, { op: "stack", branches: STACK }), { ok: false, error: "agent/T-1.2 is not in the team mirror of web" });
+  assert.deepEqual(await call(E1, { op: "stack", branches: STACK }), { ok: false, error: "stack is not a verb of the executor container" });
+  const many = Array.from({ length: 51 }, () => STACK[0]);
+  assert.deepEqual(await call(CONTROL, { op: "stack", branches: many }), { ok: false, error: "stack: branches must be a list of at most 50" });
+  assert.deepEqual(await call(CONTROL, { op: "stack", branches: [{ ...STACK[0], repository: "nope" }] }),
+    { ok: false, error: "repository nope is not declared in the project" });
 });
