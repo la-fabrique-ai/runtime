@@ -8,6 +8,8 @@ import { connect } from "node:net";
 //   {"op":"assign","to":…,"mission":{MissionSpec}}   -> {"ok":true}
 //   {"op":"release","to":…}                          -> {"ok":true}
 //   {"op":"events","after":<n>}                      -> {"ok":true,"events":[HostEvent…],"last":<n>}
+//   {"op":"stack","branches":[{"repository":…,"branch":…,"base":…}…]}
+//                                                    -> {"ok":true,"branches":[{"branch":…,"current":<bool>,"builtOn":<sha or null>}…]}
 //   tout refus                                       -> {"ok":false,"error":"…"}
 //
 // `events` : les évènements d'id > `after`, par id croissant ; `last` est le
@@ -33,7 +35,12 @@ import { connect } from "node:net";
 // `exited` déclenchent une reprise ; un exécuteur `unknown` n'est pas libre
 // (aucune mission ne lui est donnée) et la reprise ne le libère jamais.
 
-export type MissionKind = "dev";
+// `dev` : développer une sous-tâche (pour un correctif, `subtask` est l'id du
+// correctif et `branch` la branche de la sous-tâche qu'il corrige) ;
+// `rebase` : rejouer la sous-tâche `subtask` sur `base` ; `qa` : tester le haut
+// de la pile (`subtask` en est la sous-tâche du haut), sans rien commiter.
+export type MissionKind = "dev" | "rebase" | "qa";
+const KINDS: readonly string[] = ["dev", "rebase", "qa"];
 
 export type MissionSpec = {
   kind: MissionKind;
@@ -56,9 +63,15 @@ export type SessionState = "none" | "idle" | "working" | "done" | "blocked" | "e
 
 export type ExecutorStatus = { name: string; mission: HeldMission | null; session: SessionState };
 
-// `report` : le compte rendu final de l'agent, tel quel.
+// Le compte rendu structuré d'une QA ; `subtask` null : un défaut transverse.
+export type QaDefect = { subtask: string | null; text: string };
+export type QaReport = { verdict: "ok" | "ko"; defects: QaDefect[] };
+
+// `report` : le compte rendu final de l'agent, tel quel ; `mission` : le genre
+// de la mission rendue ; `qa` : null sauf pour une mission `qa`.
 export type DoneEvent = {
   id: number; kind: "done"; executor: string; ticket: string; subtask: string; branch: string; report: string | null;
+  mission: MissionKind; qa: QaReport | null;
 };
 // Une question pour l'humain (décision 35) : le développeur a rendu son travail
 // en cours ; `recommended` est la réponse qu'il recommanderait, ou null.
@@ -67,11 +80,19 @@ export type AskEvent = {
 };
 export type HostEvent = DoneEvent | AskEvent;
 
+// Une branche d'une pile, et ce que l'hôte sait d'elle : `builtOn` est le
+// commit de `base` sur lequel elle était posée à son dernier rendu (null :
+// jamais enregistré) ; `current` dit si ce commit est encore la pointe de `base`.
+export type StackBranch = { repository: string; branch: string; base: string };
+export type StackState = { branch: string; current: boolean; builtOn: string | null };
+
 export interface HostApi {
   status(): Promise<ExecutorStatus[]>;
   assign(to: string, mission: MissionSpec): Promise<void>;
   release(to: string): Promise<void>;
   events(after: number): Promise<{ events: HostEvent[]; last: number }>;
+  // Un état par branche, dans l'ordre demandé.
+  stack(branches: StackBranch[]): Promise<StackState[]>;
 }
 
 export class HostError extends Error {}
@@ -96,8 +117,8 @@ const isId = (v: unknown): v is number => Number.isSafeInteger(v) && (v as numbe
 function parseHeld(v: unknown): HeldMission | null {
   if (v === null) return null;
   const keys = ["kind", "ticket", "subtask", "repository", "branch", "base"];
-  if (!exact(v, keys) || !keys.every((k) => isStr(v[k])) || v.kind !== "dev") throw new Error("mission invalide");
-  return { kind: "dev", ticket: v.ticket as string, subtask: v.subtask as string, repository: v.repository as string, branch: v.branch as string, base: v.base as string };
+  if (!exact(v, keys) || !keys.every((k) => isStr(v[k])) || !KINDS.includes(v.kind as string)) throw new Error("mission invalide");
+  return { kind: v.kind as MissionKind, ticket: v.ticket as string, subtask: v.subtask as string, repository: v.repository as string, branch: v.branch as string, base: v.base as string };
 }
 
 function parseExecutors(v: unknown): ExecutorStatus[] {
@@ -124,12 +145,43 @@ function parseEvent(e: unknown): HostEvent {
     return { ...base, kind: "ask", text: e.text, recommended: e.recommended as string | null };
   }
   if (
-    e.kind === "done" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch", "report"]) &&
-    isStr(e.branch) && (e.report === null || isStr(e.report))
+    e.kind === "done" && exact(e, ["id", "kind", "executor", "ticket", "subtask", "branch", "report", "mission", "qa"]) &&
+    isStr(e.branch) && (e.report === null || isStr(e.report)) && KINDS.includes(e.mission as string)
   ) {
-    return { ...base, kind: "done", branch: e.branch, report: e.report as string | null };
+    const mission = e.mission as MissionKind;
+    // Le compte rendu structuré n'existe que pour une QA, et la QA l'a toujours.
+    const qa = mission === "qa" ? parseQa(e.qa) : e.qa === null ? null : bad();
+    return { ...base, kind: "done", branch: e.branch, report: e.report as string | null, mission, qa };
   }
   throw new Error("évènement invalide");
+}
+
+const bad = (): never => {
+  throw new Error("évènement invalide");
+};
+
+function parseQa(v: unknown): QaReport {
+  if (!exact(v, ["verdict", "defects"]) || (v.verdict !== "ok" && v.verdict !== "ko") || !Array.isArray(v.defects)) bad();
+  const r = v as Obj;
+  const defects = (r.defects as unknown[]).map((d) => {
+    if (!exact(d, ["subtask", "text"]) || !(d.subtask === null || isStr(d.subtask)) || !isStr(d.text)) bad();
+    const o = d as Obj;
+    return { subtask: o.subtask as string | null, text: o.text as string };
+  });
+  return { verdict: r.verdict as "ok" | "ko", defects };
+}
+
+function parseStack(r: Obj, asked: number): StackState[] {
+  if (!exact(r, ["ok", "branches"]) || !Array.isArray(r.branches) || r.branches.length !== asked) {
+    throw new Error("réponse stack invalide");
+  }
+  return (r.branches as unknown[]).map((b) => {
+    if (!exact(b, ["branch", "current", "builtOn"]) || !isStr(b.branch) || typeof b.current !== "boolean" ||
+      !(b.builtOn === null || isStr(b.builtOn))) {
+      throw new Error("état de branche invalide");
+    }
+    return { branch: b.branch, current: b.current, builtOn: b.builtOn as string | null };
+  });
 }
 
 // La réponse entière : ses clés sont exactement `ok`, `events` et `last`.
@@ -204,5 +256,6 @@ export function socketHost(path: string, opts: { timeoutMs?: number; assignTimeo
     assign: (to, mission) => run({ op: "assign", to, mission }, () => undefined),
     release: (to) => run({ op: "release", to }, () => undefined),
     events: (after) => run({ op: "events", after }, parseEvents),
+    stack: (branches) => run({ op: "stack", branches }, (r) => parseStack(r, branches.length)),
   };
 }

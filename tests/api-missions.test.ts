@@ -492,7 +492,7 @@ test("done fetches the branch into repo-web.agents.git, and events(0) returns it
   assert.ok(fetch.some((a) => a.startsWith("remote.src.uploadpack=FORGE_SIDE=host ") && a.endsWith(` upload-pack ${E1}`)));
   assert.equal(fetch.at(-1), "+refs/heads/agent/T-1.1:refs/heads/agent/T-1.1");
   const ev = await call(CONTROL, { op: "events", after: 0 });
-  assert.deepEqual(ev, { ok: true, events: [{ id: 1, kind: "done", executor: E1, ticket: "T-1", subtask: "T-1.1", branch: "agent/T-1.1", report: null }], last: 1 });
+  assert.deepEqual(ev, { ok: true, events: [{ id: 1, kind: "done", executor: E1, ticket: "T-1", subtask: "T-1.1", branch: "agent/T-1.1", report: null, mission: "dev", qa: null }], last: 1 });
   // Les lectures acceptées du contrôle ne vont pas au journal : `last` ne bouge pas.
   assert.deepEqual(await call(CONTROL, { op: "events", after: 1 }), { ok: true, events: [], last: 1 });
   await call(CONTROL, { op: "status" });

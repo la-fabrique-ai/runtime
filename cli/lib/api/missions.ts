@@ -635,7 +635,7 @@ function events(d: ApiDeps, after: number): Outcome {
     .map((e): HostEvent => {
       const base = { id: e.id, executor: e.caller, ticket: e.mission!.ticket, subtask: e.mission!.subtask };
       if (e.op === "ask") return { ...base, kind: "ask", text: e.text ?? "", recommended: e.recommended ?? null };
-      return { ...base, kind: "done", branch: e.mission!.branch, report: e.text ?? null };
+      return { ...base, kind: "done", branch: e.mission!.branch, report: e.text ?? null, mission: "dev", qa: null };
     });
   return { reply: () => ({ ok: true, events: list, last }), quiet: true };
 }

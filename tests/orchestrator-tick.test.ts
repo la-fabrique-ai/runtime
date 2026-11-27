@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
 import type { Connector } from "../cli/lib/tickets/connector.ts";
 import { HostError } from "../cli/lib/orchestrator/host.ts";
-import type { ExecutorStatus, HostApi, HostEvent, MissionSpec, SessionState } from "../cli/lib/orchestrator/host.ts";
+import type { ExecutorStatus, HostApi, HostEvent, MissionSpec, SessionState, StackBranch, StackState } from "../cli/lib/orchestrator/host.ts";
 import { fileCursor, SILENT_SESSION_MS, tick } from "../cli/lib/orchestrator/tick.ts";
 import type { Cursor } from "../cli/lib/orchestrator/tick.ts";
 // Un tour : les tests passent leurs dépendances telles quelles.
@@ -69,8 +69,12 @@ class FakeHost implements HostApi {
     e.session = "done";
     this.events_.push({
       id: this.events_.length + 1, kind: "done", executor: name, ticket: m.ticket, subtask: m.subtask, branch: m.branch,
-      report: o.report ?? null,
+      report: o.report ?? null, mission: m.kind, qa: null,
     });
+  }
+  async stack(branches: StackBranch[]): Promise<StackState[]> {
+    this.calls.push(`stack ${branches.map((b) => b.branch).join(" ")}`);
+    return branches.map((b) => ({ branch: b.branch, current: true, builtOn: null }));
   }
 }
 
