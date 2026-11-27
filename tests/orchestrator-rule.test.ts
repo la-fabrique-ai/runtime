@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Subtask, Ticket } from "../cli/lib/tickets/model.ts";
-import { activeSubtask, candidates, missionBase, RuleError } from "../cli/lib/orchestrator/rule.ts";
+import { activeSubtask, branchOf, candidates, missionBase, qaCandidates, RuleError, stackOf } from "../cli/lib/orchestrator/rule.ts";
 import { devInstruction, missionFiles, MISSION_FILE_MAX } from "../cli/lib/orchestrator/instruction.ts";
 import type { Request } from "../cli/lib/tickets/model.ts";
 
@@ -75,6 +75,8 @@ const cand = (description = "Desc", text = "text 1", title = "Title T-1") => ({
   ticket: { ...ticket("T-1"), description, title },
   subtask: sub("T-1", 1, { text }),
   base: "origin/main",
+  kind: "dev" as const,
+  branch: "agent/T-1.1",
 });
 
 test("devInstruction", () => {
@@ -136,4 +138,52 @@ test("candidates : un ticket qui attend l'humain ne donne aucun candidat", () =>
   const b = ticket("T-2");
   const r = candidates([{ ticket: a, subtasks: [sub("T-1", 1)] }, { ticket: b, subtasks: [sub("T-2", 1)] }], new Set(), new Set(["T-1"]));
   assert.deepEqual(r.candidates.map((c) => c.subtask.id), ["T-2.1"]);
+});
+
+// A (position 1), B (position 2) et F, un correctif de A (position 1, rang 3).
+const stacked = () => {
+  const a = sub("T-1", 1, { status: "done" });
+  const b = sub("T-1", 2, { status: "done" });
+  const f = sub("T-1", 3, { position: 1, kind: "fix", fixes: "T-1.1" });
+  return { a, b, f, list: [a, b, f] };
+};
+
+test("un correctif travaille sur la branche de la sous-tâche qu'il corrige, et la base au-dessus reste la sienne", () => {
+  const t = ticket("T-1");
+  const { a, b, f, list } = stacked();
+  assert.deepEqual(stackOf(list, "web").map((s) => s.id), ["T-1.1", "T-1.2"]);
+  assert.equal(missionBase(t, list, b), "agent/T-1.1");
+  assert.equal(branchOf(list, f), "agent/T-1.1");
+  assert.equal(missionBase(t, list, f), "origin/main");
+  assert.equal(branchOf(list, a), "agent/T-1.1");
+  assert.throws(() => branchOf(list, { ...f, fixes: "T-1.9" }), RuleError);
+  const r = candidates([{ ticket: t, subtasks: list }], new Set());
+  assert.deepEqual(r.candidates.map((c) => [c.subtask.id, c.kind, c.branch, c.base]), [["T-1.3", "dev", "agent/T-1.1", "origin/main"]]);
+});
+
+test("une sous-tâche ready de raison rebase donne un candidat de genre rebase", () => {
+  const t = ticket("T-1");
+  const list = [sub("T-1", 1, { status: "done" }), sub("T-1", 2, { reason: "rebase" })];
+  const [c] = candidates([{ ticket: t, subtasks: list }], new Set()).candidates;
+  assert.deepEqual([c.kind, c.branch, c.base], ["rebase", "agent/T-1.2", "agent/T-1.1"]);
+});
+
+test("qaCandidates : la pile de bas en haut, rien pour un ticket pas fini, un problème pour deux dépôts", () => {
+  const { list } = stacked();
+  const done = list.map((s) => ({ ...s, status: "done" as const }));
+  const two = { ...ticket("T-3"), repositories: [{ name: "web", base: "main" }, { name: "api", base: "main" }] };
+  const r = qaCandidates([
+    { ticket: ticket("T-1"), subtasks: done },
+    { ticket: ticket("T-2"), subtasks: [sub("T-2", 1, { status: "done" }), sub("T-2", 2)] },
+    { ticket: two, subtasks: [sub("T-3", 1, { status: "done" })] },
+  ]);
+  assert.equal(r.candidates.length, 1);
+  const [q] = r.candidates;
+  assert.equal(q.top.id, "T-1.2");
+  assert.equal(q.base, "agent/T-1.1");
+  assert.deepEqual(q.stack, [
+    { repository: "web", branch: "agent/T-1.1", base: "origin/main" },
+    { repository: "web", branch: "agent/T-1.2", base: "agent/T-1.1" },
+  ]);
+  assert.deepEqual(r.problems, ["T-3: several repositories: QA comes with part 4"]);
 });

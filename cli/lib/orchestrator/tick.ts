@@ -9,7 +9,7 @@ import { ConnectorError } from "../tickets/model.ts";
 import type { Request, Subtask, Ticket } from "../tickets/model.ts";
 import { HostError } from "./host.ts";
 import type { AskEvent, DoneEvent, ExecutorStatus, HeldMission, HostApi, MissionSpec } from "./host.ts";
-import { candidates, missionBase, RuleError } from "./rule.ts";
+import { branchOf, candidates, missionBase, RuleError } from "./rule.ts";
 import type { Candidate } from "./rule.ts";
 import { devInstruction, missionFiles } from "./instruction.ts";
 
@@ -356,8 +356,10 @@ async function recover(
     return;
   }
   let base: string;
+  let branch: string;
   try {
     base = missionBase(entry.ticket, entry.subtasks, s);
+    branch = branchOf(entry.subtasks, s);
   } catch (e) {
     if (!(e instanceof RuleError)) throw e;
     report.problems.push(`${held.ticket}: ${e.message}`);
@@ -365,7 +367,7 @@ async function recover(
   }
   await host.release(ex.name);
   ex.mission = null;
-  if (await launch(tickets, host, ex.name, { ticket: entry.ticket, subtask: s, base }, true, failed, report)) {
+  if (await launch(tickets, host, ex.name, { ticket: entry.ticket, subtask: s, base, kind: s.reason === "rebase" ? "rebase" : "dev", branch }, true, failed, report)) {
     ex.mission = held;
     report.recovered.push(s.id);
   }
