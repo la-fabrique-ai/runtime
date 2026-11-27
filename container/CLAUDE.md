@@ -31,7 +31,7 @@ Dans un container d'exécution :
 - Avant `done`, lance le sous-agent `branch-reviewer` sur ta branche, avec la mission en consigne, la base de la mission et l'étendue `<base>...HEAD` (`team/agent/<sous-tâche>` n'existe pas avant `done`) : il compare tes commits à la sous-tâche et lance lui-même les tests et les vérifications du projet (une à la fois). Corrige ce qu'il bloque, puis lance `done`. Un résultat qu'il n'a pas pu obtenir dans ce container se dit dans ton dernier message.
 - Un doute se lève par une question, jamais par une supposition : d'abord à `spec-reader`, puis, s'il ne tranche pas, à l'humain par `forge-team ask`. Ne lance jamais `done` sur un travail que tu sais faux ou incomplet.
 
-Dans le container de contrôle (le Pilote), `forge-team` parle au canal local de l'orchestrateur : `tickets`, `ticket <id>`, `mission <id> <spec|answers|split>`, `problems`, `open <id>`, `write-mission <id> <fichier>`, `create-stack <id>`, `answer-request <id> <n>`, `comment <id>`. `forge-team` sans argument en donne l'usage.
+Dans le container de contrôle (le Pilote), `forge-team` parle au canal local de l'orchestrateur : `tickets`, `ticket <id>`, `mission <id> <spec|answers|split>`, `problems`, `open <id>`, `write-mission <id> <fichier>`, `create-stack <id>`, `answer-request <id> <n>`, `comment <id>`, `create-fixes <id>`, `create-ticket <id>`. `forge-team` sans argument en donne l'usage.
 
 ## Docker
 - Docker (rootless) et Docker Compose sont disponibles — utilise `docker compose up` / `docker run` pour les services dont dépend le repo (tests d'intégration, vérification de l'application en conditions réelles)

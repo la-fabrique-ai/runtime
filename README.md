@@ -364,8 +364,10 @@ commits, has its branch reviewed by a sub-agent, then runs `forge-team done`:
 the host checks that the branch has commits beyond its base, copies it to the
 agents' mirror and records it; the orchestrator sets the sub-task `done`,
 frees the executor, and moves on. When every sub-task of the ticket is `done`,
-the ticket goes to `qa`. Several tickets advance in parallel, one executor
-each. QA and the pull requests come in a later part.
+the ticket goes to `qa` (see QA below). Several tickets advance in parallel,
+one executor each. A ticket lists one repository for now: one with several
+gets no QA. The pull requests of a ticket come in a later part: `forge ship`
+still ships one sub-task's branch.
 
 #### Open a ticket with the Pilot
 
@@ -418,6 +420,31 @@ A developer ends its mission with a report (what it did, what it checked, what
 stays doubtful, the questions settled without you), which the ticket keeps as
 a comment: its terminal does not.
 
+#### QA
+
+When every sub-task of a ticket is `done`, a free executor tests the top of its
+stack, which holds the whole ticket: a **QA** mission, on a detached commit,
+that runs the project's checks and exercises what the ticket changes, as a user
+would, then reports a verdict and a list of defects. QA takes free executors
+before development does: finishing a ticket comes before starting one. Each
+defect becomes a **fix**, a sub-task on the branch of the sub-task it belongs to
+(or, when it belongs to none, a new sub-task on top of the stack); the ticket
+goes back to `dev`. Once a fix is done, the sub-tasks above it are **rebased**
+one by one, each by a mission that replays its own commits onto the branch
+below, then the QA runs again. Before any QA, a stack whose base moved (a
+commit on `main`) is rebased first. A clean QA sends the ticket to
+`human-review`. The QA's report is kept in the ticket.
+
+#### Your review
+
+`forge team status` lists the tickets under way and says which wait for an
+answer; a ticket in `human-review` waits for you. `forge fetch` brings its
+branches to your clone. Tell the Pilot your review (`forge pilot <ticket>`):
+it sorts each point with you (a fix of a sub-task, a new sub-task, or a new
+ticket for what does not hold this one), and creates them only once you
+agree. Any fix sends the ticket through development, the rebases and the QA
+again before it comes back to you.
+
 #### Executors have a `.env`
 
 `"env": "<path on the host>"` on `project.executors` names a dotenv file;
@@ -442,10 +469,13 @@ reach the agent and every command it runs, in clear.**
 #### See the project, take a hand
 
 ```bash
-forge team status          # each container: its mission, its session; the orchestrator's state (--json for a program)
+forge team status          # each container: its mission (dev, rebase or qa), its session; the orchestrator's state; the tickets (--json for a program)
 ```
 
-Under the table, `PROBLEMS` lists what the orchestrator could not do at its
+Under the table, `TICKETS` lists the tickets under way (from `spec` to
+`pr-review`), most urgent first, with how many answers each waits for
+(`tickets: unavailable` when the orchestrator does not answer). Then
+`PROBLEMS` lists what the orchestrator could not do at its
 last turn (an assign the host refused, an unreadable ticket, a free executor
 whose state is unknown), read from the orchestrator itself;
 `orchestrator's problems: unavailable` when it does not answer.

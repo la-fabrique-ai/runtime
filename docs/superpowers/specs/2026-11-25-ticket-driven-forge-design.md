@@ -904,7 +904,10 @@ the old system kept on a LAN host.
    Waiting for human, the answer back to Ready. *End state: the human
    specifies a ticket with the Pilot and answers questions.* It ships without
    the screens' small slice (decision 34).
-3. **QA, fixes, cascade, ship.** QA missions and their report, fix sub-tasks,
+3. **QA, fixes, cascade, ship.** *Its first half, QA missions and their report,
+   fix sub-tasks, rebase missions, the base check before QA and the review
+   with the Pilot, is delivered by part 3's first pull request.* QA missions
+   and their report, fix sub-tasks,
    rebase missions and the base check before QA, `forge fetch <ticket>`,
    `forge ship <ticket>` with the lease and the GitHub stack, the import of
    peer comments, Done on merge. *End state: the supervised flow of §2 runs
@@ -1047,6 +1050,18 @@ And calls made only in this document:
 - The open-source console is named (`la-fabrique-ai/console`): its ticket
   management becomes part of this repository. The cloud manager, the
   client, the projects the console ran on and the people are not named.
+- Part 3, pull request 1: the cascade and the base check are one computation
+  from facts, not a list the orchestrator keeps: the host records what each
+  branch stands on (`builtOn`), and the verb `stack` says which no longer does.
+- Part 3, pull request 1: a fix sub-task has the position of the sub-task it
+  fixes and works on its branch; it never fixes a fix.
+- Part 3, pull request 1: a QA mission holds the top sub-task of the stack.
+- Part 3, pull request 1: the QA report is a verdict and a list of defects,
+  validated by the host field by field.
+- Part 3, pull request 1: the review's verbs are `create-fixes` and
+  `create-ticket`, on the local channel.
+- Part 3 is delivered in two pull requests: QA, fixes, cascade and review
+  first; `forge fetch` and `forge ship` by ticket, peer comments and Done next.
 
 ## 15. Next
 
