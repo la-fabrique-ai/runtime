@@ -17,7 +17,7 @@ import { recordBranch } from "../branch-records.ts";
 import { clearMessages, hcArgv, sessionState, startSession, stopSession } from "../hc-session.ts";
 import { configGet, configSet, configUnset, execAsAgentArgv, incus, listInstances, pushText } from "../incus.ts";
 import { ensureBareTeamMirror, HOST_GIT_CWD } from "../mirror.ts";
-import type { ExecutorStatus, HeldMission, HostEvent, MissionFiles, MissionSpec, SessionState } from "../orchestrator/host.ts";
+import type { ExecutorStatus, HeldMission, HostEvent, MissionFiles, MissionKind, MissionSpec, SessionState } from "../orchestrator/host.ts";
 import { forgeCommand } from "../paths.ts";
 import { CONTROL, projectMembers, repoTeamMirror, type ProjectMember } from "../project.ts";
 import { cloneDir } from "../project-provision.ts";
@@ -71,6 +71,7 @@ const FIELDS: Record<MissionVerb, readonly string[]> = {
   status: [], assign: ["to", "mission"], release: ["to"], events: ["after"], done: ["report"], ask: ["text", "recommended"],
 };
 const MISSION_FIELDS = ["kind", "ticket", "subtask", "repository", "branch", "base", "instruction"] as const;
+const KINDS = ["dev", "rebase", "qa"] as const;
 const HELD_FIELDS = MISSION_FIELDS.filter((k) => k !== "instruction");
 
 const EXECUTOR = /^agent-executor-[1-9][0-9]*$/;
@@ -109,18 +110,25 @@ function parseMission(v: unknown, secrets: readonly string[]): MissionSpec {
   const m = v as Record<(typeof MISSION_FIELDS)[number], string>;
   // Un secret n'a rien à faire dans un nom de branche ni dans une consigne.
   if (HELD_FIELDS.some((k) => hasSecret(m[k], secrets))) throw new ForgeError("assign: the mission holds a secret forge handed out: remove it");
-  if (m.kind !== "dev") throw new ForgeError('assign: mission.kind must be "dev"');
+  if (!(KINDS as readonly string[]).includes(m.kind)) throw new ForgeError('assign: mission.kind must be "dev", "rebase" or "qa"');
   if (!isTicketId(m.ticket)) throw new ForgeError("assign: mission.ticket is not a ticket id");
   if (!isSubtaskId(m.subtask)) throw new ForgeError("assign: mission.subtask is not a sub-task id");
   if (m.subtask.slice(0, m.subtask.indexOf(".")) !== m.ticket) {
     throw new ForgeError(`assign: subtask ${m.subtask} is not a sub-task of ${m.ticket}`);
   }
   if (!REPO_NAME.test(m.repository)) throw new ForgeError("assign: mission.repository is not a repository name");
-  if (m.branch !== `agent/${m.subtask}`) throw new ForgeError(`assign: branch must be agent/${m.subtask}`);
-  checkBase(m.base, m.subtask);
+  // Un correctif (dev) travaille sur la branche de la sous-tâche qu'il corrige :
+  // une branche d'une sous-tâche du même ticket. Un rebase ou une QA, sur celle
+  // de leur sous-tâche.
+  const named = m.branch.startsWith("agent/") ? m.branch.slice("agent/".length) : "";
+  if (!isSubtaskId(named) || named.slice(0, named.indexOf(".")) !== m.ticket) {
+    throw new ForgeError(`assign: mission.branch must be agent/<a sub-task of ${m.ticket}>`);
+  }
+  if (m.kind !== "dev" && m.branch !== `agent/${m.subtask}`) throw new ForgeError(`assign: branch must be agent/${m.subtask}`);
+  checkBase(m.base, named);
   checkText(m.instruction, INSTRUCTION_MAX, "instruction", secrets);
   return {
-    kind: "dev", ticket: m.ticket, subtask: m.subtask, repository: m.repository, branch: m.branch, base: m.base, instruction: m.instruction,
+    kind: m.kind as MissionKind, ticket: m.ticket, subtask: m.subtask, repository: m.repository, branch: m.branch, base: m.base, instruction: m.instruction,
     files: parseFiles(v.files, secrets),
   };
 }
@@ -248,10 +256,11 @@ export function readHeld(value: string | undefined): HeldMission | null | "unrea
   if (value === undefined || value.trim() === "") return null;
   try {
     const v: unknown = JSON.parse(value);
-    if (!isObj(v) || Object.keys(v).length !== HELD_FIELDS.length || !HELD_FIELDS.every((k) => typeof v[k] === "string") || v.kind !== "dev") {
+    if (!isObj(v) || Object.keys(v).length !== HELD_FIELDS.length || !HELD_FIELDS.every((k) => typeof v[k] === "string") ||
+      !(KINDS as readonly unknown[]).includes(v.kind)) {
       return "unreadable";
     }
-    return { kind: "dev", ticket: v.ticket as string, subtask: v.subtask as string, repository: v.repository as string, branch: v.branch as string, base: v.base as string };
+    return { kind: v.kind as MissionKind, ticket: v.ticket as string, subtask: v.subtask as string, repository: v.repository as string, branch: v.branch as string, base: v.base as string };
   } catch {
     return "unreadable";
   }
@@ -410,8 +419,9 @@ async function assign(ctx: Context, p: ProjectConfig, to: string, m: MissionSpec
   const mine = readHeld(target.config[MISSION_KEY]);
   if (mine === "unreadable") throw new ForgeError(`${to} has an unreadable mission key: release it first`);
   if (mine !== null && mine.subtask !== m.subtask) throw new ForgeError(`${to} holds ${mine.subtask}: release it first`);
-  // Une reprise reprend la même mission : un autre dépôt ou une autre base
-  // demande de libérer d'abord.
+  // Une reprise reprend la même mission : un autre genre, un autre dépôt ou
+  // une autre base demande de libérer d'abord.
+  if (mine !== null && mine.kind !== m.kind) throw new ForgeError(`${to} holds a ${mine.kind} mission on ${mine.subtask}: release it first`);
   if (mine !== null && (mine.repository !== m.repository || mine.base !== m.base)) {
     throw new ForgeError(`${m.subtask} is held with another repository or base`);
   }
@@ -424,8 +434,16 @@ async function assign(ctx: Context, p: ProjectConfig, to: string, m: MissionSpec
   }
 
   await ensureRunning(ctx, to, { timeoutMs: INCUS_MS });
-  await prepareBranch(ctx, to, m);
-  recordBranch({ branch: m.branch, repository: m.repository, ticket: m.ticket, subtask: m.subtask, base: m.base, executor: to });
+  if (m.kind === "qa") {
+    // Une QA ne commite rien : aucune fiche de branche.
+    await prepareQa(ctx, to, m);
+  } else {
+    await prepareBranch(ctx, to, m);
+    // La fiche porte la sous-tâche dont la branche a le nom (pas l'id d'un correctif).
+    recordBranch({
+      branch: m.branch, repository: m.repository, ticket: m.ticket, subtask: m.branch.slice("agent/".length), base: m.base, executor: to,
+    });
+  }
   await mustSucceed("record the mission",
     inTime(`recording the mission of ${to}`, INCUS_MS, configSet(ctx, to, MISSION_KEY, JSON.stringify(heldOf(m)), { timeoutMs: INCUS_MS })));
   try {
@@ -559,6 +577,25 @@ async function prepareBranch(ctx: Context, to: string, m: MissionSpec): Promise<
   // `agent/<sous-tâche>` : la branche d'une sous-tâche rendue, dans le miroir d'équipe.
   if (!(await has(`refs/remotes/team/${m.base}`))) throw new ForgeError(`base ${m.base} is not in the team mirror`);
   await mustSucceed(`create ${m.branch}`, git(SWITCH_MS, "switch", "-c", m.branch, `team/${m.base}`));
+}
+
+// Une QA : le clone, propre, détaché sur la branche du haut de la pile telle
+// que le miroir d'équipe la porte. Une QA suivante, ou une mission dev, repart
+// de là comme d'un clone hors de sa branche.
+async function prepareQa(ctx: Context, to: string, m: MissionSpec): Promise<void> {
+  const dir = cloneDir(m.repository);
+  const git = gitIn(ctx, to, m.repository);
+  await mustSucceed("git fetch team", git(FETCH_MS, "fetch", "team"));
+  const dirty = changeCount((await mustSucceed("git status", git(GIT_MS, ...TRACKED_STATUS))).stdout);
+  if (dirty > 0) {
+    throw new ForgeError(`${to}: ${dir} has ${dirty} uncommitted change${dirty === 1 ? "" : "s"} and is not on ${m.branch}: ` +
+      "commit or discard them before assigning a mission");
+  }
+  const team = `team/${m.branch}`;
+  if ((await git(GIT_MS, "rev-parse", "--verify", "--quiet", `refs/remotes/${team}`)).code !== 0) {
+    throw new ForgeError(`${m.branch} is not in the team mirror of ${m.repository}`);
+  }
+  await mustSucceed(`detach on ${team}`, git(SWITCH_MS, "switch", "--detach", team));
 }
 
 // Libérer un exécuteur libre ne change rien et n'est pas un refus. Un échec de

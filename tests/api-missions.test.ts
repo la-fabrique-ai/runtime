@@ -131,7 +131,7 @@ test("an executor asking for a control verb, or the control calling done: refuse
 test("the request is checked field by field: exact mission keys, branch, base, instruction size", () => {
   const assign = (m: unknown) => () => parseMissionRequest(JSON.stringify({ op: "assign", to: E1, mission: m }), "control", ["tok-123"]);
   assert.throws(assign({ ...spec(), extra: 1 }), /mission: unknown field: "extra"/);
-  assert.throws(assign({ ...spec(), branch: "agent/T-1.2" }), /branch must be agent\/T-1\.1/);
+  assert.throws(assign({ ...spec(), kind: "rebase", branch: "agent/T-1.2" }), /branch must be agent\/T-1\.1/);
   assert.throws(assign({ ...spec(), subtask: "T-2.1", branch: "agent/T-2.1" }), /subtask T-2\.1 is not a sub-task of T-1/);
   assert.throws(assign({ ...spec(), base: "main" }), /base must be origin\/<branch> or agent\/<sub-task>/);
   assert.throws(assign({ ...spec(), base: "agent/T-1.1" }), /cannot start from itself/);
@@ -687,4 +687,40 @@ test("ask on a dirty clone, without a mission, from the control, or holding a se
   assert.equal(secret.ok, false);
   assert.ok(!readFileSync(join(home, "api", "journal.jsonl"), "utf8").includes("tok-123"));
   assert.ok(d.journal.entries().every((e) => e.outcome === "refused"));
+});
+
+// ------------------------------------------------------- les trois genres
+
+test("a qa assign detaches the clone on team/<branch> as aiuser, records no branch, starts the session", async () => {
+  const r = await call(CONTROL, { op: "assign", to: E1, mission: spec({ kind: "qa", subtask: "T-1.2", branch: "agent/T-1.2", base: "agent/T-1.1" }) });
+  assert.deepEqual(r, { ok: true });
+  const calls = joined();
+  const sw = calls.find((c) => c.includes(`${GIT} switch`));
+  assert.ok(sw?.endsWith("switch --detach team/agent/T-1.2"), calls.join("\n"));
+  assert.ok(sw!.includes(`exec ${E1} --user 1001 --group 1001`), sw);
+  assert.ok(calls.some((c) => c.endsWith(`${GIT} fetch team`)));
+  assert.deepEqual(readBranchRecords(), []);
+  assert.ok(calls.some((c) => c.includes("hc run") && c.includes("--cwd /workspace/web")));
+  assert.equal(JSON.parse(keys(E1)[MISSION_KEY]).kind, "qa");
+});
+
+test("a qa assign on a clone with tracked changes, or on a branch the team mirror lacks, is refused", async () => {
+  const qa = spec({ kind: "qa", subtask: "T-1.2", branch: "agent/T-1.2", base: "agent/T-1.1" });
+  setup([{ match: "status --porcelain", stdout: " M a.ts\n" }]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: qa }), { ok: false, error:
+    `${E1}: /workspace/web has 1 uncommitted change and is not on agent/T-1.2: commit or discard them before assigning a mission` });
+  setup([absent("refs/remotes/team/agent/T-1.2")]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: qa }), { ok: false, error: "agent/T-1.2 is not in the team mirror of web" });
+  assert.ok(!joined().some((c) => c.includes(" switch")));
+  assert.equal(keys(E1)[MISSION_KEY], undefined);
+});
+
+test("a fix's dev mission works on the branch it fixes: its record keeps that sub-task; other branches and kinds are refused", async () => {
+  setup([absent("refs/heads/agent/T-1.1")]);
+  assert.deepEqual(await call(CONTROL, { op: "assign", to: E1, mission: spec({ subtask: "T-1.3", branch: "agent/T-1.1" }) }), { ok: true });
+  assert.deepEqual(readBranchRecords(), [{ branch: "agent/T-1.1", repository: "web", ticket: "T-1", subtask: "T-1.1", base: "origin/main", executor: E1 }]);
+  const assign = (m: unknown) => () => parseMissionRequest(JSON.stringify({ op: "assign", to: E1, mission: m }), "control", []);
+  assert.throws(assign(spec({ subtask: "T-1.3", branch: "agent/T-2.1" })), /assign: mission\.branch must be agent\/<a sub-task of T-1>/);
+  assert.throws(assign(spec({ kind: "rebase", subtask: "T-1.2", branch: "agent/T-1.1", base: "origin/main" })), /assign: branch must be agent\/T-1\.2/);
+  assert.throws(assign({ ...spec(), kind: "review" }), /assign: mission\.kind must be "dev", "rebase" or "qa"/);
 });
