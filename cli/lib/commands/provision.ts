@@ -110,42 +110,6 @@ export async function requireHostLfs(ctx: Context): Promise<void> {
   }
 }
 
-// Preuve que le hook garde vraiment CE container, dans les deux sens. Un hook
-// qui ne peut pas lire sa commande (image sans jq, constaté le 2026-10-17)
-// laissait tout passer ; devenu fail-closed, il refuse tout — sûr, mais
-// l'agent ne peut plus rien lancer. On lui soumet donc, en tant qu'aiuser, une
-// commande qu'il doit refuser (exit 2) et une qu'il doit laisser passer
-// (exit 0). Les marqueurs forge-hook-probe-* rendent les lignes du journal
-// d'audit (/workspace/.claude/bash-audit.log) explicites.
-const hookProbe = (command: string) =>
-  `printf '%s' '{"tool_name":"Bash","tool_input":{"command":"${command}"}}' | /home/aiuser/.claude/hooks/pre-bash.sh`;
-
-export async function requireHookBlocks(ctx: Context, container: string): Promise<void> {
-  ctx.out("Checking that the security hook guards the agent...");
-  // Le container porte encore ses marqueurs de provisioning : `forge team
-  // converge` le signale à demi provisionné et n'y touche pas.
-  const rebuild = "Rebuild the image ('forge image build'), delete this container " +
-    `(incus --project ${forgeProject()} delete ${container} --force; its workspace survives), then run forge team converge again.`;
-  // Le hook termine ses phrases par un point : on le retire avant d'enchaîner.
-  const detail = (r: ExecResult) => {
-    const stderr = r.stderr.trim().replace(/\.+$/, "");
-    return stderr ? `: ${stderr}` : "";
-  };
-
-  const deny = await execAsAgentArgv(ctx, container, ["bash", "-c", hookProbe("sudo true # forge-hook-probe-deny")]);
-  if (deny.code !== 2) {
-    throw new ForgeError(
-      `the container's security hook let a forbidden command through (exit code ${deny.code}, expected 2)${detail(deny)}. ` +
-      `The agent would run unguarded, so provisioning stops. ${rebuild}`);
-  }
-  const allow = await execAsAgentArgv(ctx, container, ["bash", "-c", hookProbe("true # forge-hook-probe-allow")]);
-  if (allow.code !== 0) {
-    throw new ForgeError(
-      `the container's security hook refuses a harmless command (exit code ${allow.code}, expected 0)${detail(allow)}. ` +
-      `The agent could not run anything, so provisioning stops. ${rebuild}`);
-  }
-}
-
 // `incus file push` avec propriétaire et mode. uid 0 : fichier que l'agent ne
 // peut pas modifier.
 export function pushFile(ctx: Context, step: string, source: string, container: string, dest: string, uid: 0 | 1001, mode: string) {

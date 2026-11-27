@@ -163,7 +163,10 @@ test("assign of a first sub-task: git switch -c from origin/main in /workspace/w
   const fetchTeam = calls.findIndex((c) => c.endsWith(`${GIT} fetch team`));
   const fetchOrigin = calls.findIndex((c) => c.endsWith(`${GIT} fetch origin`));
   assert.ok(fetchTeam >= 0 && fetchOrigin > fetchTeam);
-  assert.ok(calls.some((c) => c.includes("hc run") && c.includes("--cwd /workspace/web")));
+  const run = calls.find((c) => c.includes("hc run") && c.includes("--cwd /workspace/web"));
+  assert.ok(run, calls.join("\n"));
+  // Un exécuteur travaille sans boîte de permission : le container est son bac à sable.
+  assert.ok(run.endsWith("--permission-mode bypassPermissions"), run);
   assert.deepEqual(JSON.parse(keys(E1)[MISSION_KEY]), held());
   assert.deepEqual(readBranchRecords(), [{ branch: "agent/T-1.1", repository: "web", ticket: "T-1", subtask: "T-1.1", base: "origin/main", executor: E1, builtOn: null }]);
   const e = d.journal.entries()[0];

@@ -32,7 +32,6 @@ afterEach(() => {
 const RULES: ExecRule[] = [
   { match: "git config --global --includes user.name", stdout: "Host User\n" },
   { match: "git config --global --includes user.email", stdout: "host@example.com\n" },
-  { match: "forge-hook-probe-deny", code: 2, stderr: "BLOCKED.\n" },
 ];
 
 // ---------------------------------------------------------------- un projet (forge à tickets)

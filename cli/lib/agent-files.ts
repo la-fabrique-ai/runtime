@@ -1,19 +1,21 @@
 // Ce que forge pose dans un container de projet (le contrôle ou un exécuteur)
 // et qu'une mise à jour de forge ou du kit change : les instructions
 // (container/CLAUDE.md, plus le prompt du rôle), le .env, le lanceur, le canal
-// d'API et forge-team, le hook, les réglages, le kit et les plugins.
+// d'API et forge-team, les réglages, le kit et les plugins.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Context } from "./context.ts";
 import { ForgeError, mustSucceed } from "./context.ts";
 import { execAsAgentArgv, incus, pullText, pushText } from "./incus.ts";
-import { pushFile, requireHookBlocks } from "./commands/provision.ts";
+import { pushFile } from "./commands/provision.ts";
 import { repoRoot } from "./paths.ts";
 import { CONTAINER_ENV_PATH, readEnvFile } from "./dotenv.ts";
 import { ensureApiAccess, type SocketOwner } from "./api/access.ts";
 import { installReferenceKit, type ReferenceKit } from "./reference-kit.ts";
 
 const CLAUDE_MD = "/home/aiuser/.claude/CLAUDE.md";
+const OLD_HOOKS_DIR = "/home/aiuser/.claude/hooks";
+const OLD_HOOK = `${OLD_HOOKS_DIR}/pre-bash.sh`;
 // Le seul marché de plugins que forge sait ajouter ; un plugin `nom@autre` est
 // refusé avant toute création.
 const MARKETPLACES: Record<string, string> = {
@@ -45,16 +47,16 @@ export async function installAgentFiles(ctx: Context, m: AgentFiles, owner: Sock
     m.name, "/usr/local/bin/forge-agent", 0, "755");
   await ensureApiAccess(ctx, m.name, owner);
 
-  // Le hook et les réglages appartiennent à root : l'agent ne peut pas les
-  // réécrire en place.
-  ctx.out("Installing Claude security hooks...");
-  await mustSucceed("create hooks directory",
-    ctx.exec(incus("exec", m.name, "--", "mkdir", "-p", "/home/aiuser/.claude/hooks")));
-  await pushFile(ctx, "push pre-bash.sh", join(repoRoot(), "container", "pre-bash.sh"),
-    m.name, "/home/aiuser/.claude/hooks/pre-bash.sh", 0, "755");
+  // Les réglages appartiennent à root : l'agent ne peut pas les réécrire en place.
+  ctx.out("Installing Claude settings...");
   await mustSucceed("push Claude settings",
     pushText(ctx, m.name, "/home/aiuser/.claude/settings.json", settingsFor(m), { uid: 0, gid: 0, mode: "644" }));
-  await requireHookBlocks(ctx, m.name);
+  // Plus de hook dans un container (une session en bypassPermissions pourrait
+  // le retirer) : celui qu'un converge d'avant y a posé part, avec son dossier
+  // s'il est vide. En root, comme le reste de ces fichiers (#196).
+  await mustSucceed("remove the old security hook",
+    ctx.exec(incus("exec", m.name, "--", "rm", "-f", OLD_HOOK)));
+  await ctx.exec(incus("exec", m.name, "--", "rmdir", "--ignore-fail-on-non-empty", OLD_HOOKS_DIR));
   const kitChanged = await installReferenceKit(ctx, m);
   return { instructionsChanged: before !== text || envChanged || kitChanged };
 }

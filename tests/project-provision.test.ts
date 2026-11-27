@@ -35,8 +35,6 @@ const IDENTITY: ExecRule[] = [
   { match: "git config --global --includes user.name", stdout: "Host User\n" },
   { match: "git config --global --includes user.email", stdout: "host@example.com\n" },
 ];
-// Un hook qui marche refuse la commande interdite de la sonde avec le code 2.
-const HOOK_BLOCKS: ExecRule[] = [{ match: "forge-hook-probe-deny", code: 2, stderr: "BLOCKED.\n" }];
 // Aucun clone (ni donc de remote team) n'existe encore dans le /workspace d'un exécuteur neuf.
 const NO_CLONE: ExecRule[] = [{ match: "-- test -d /workspace/", code: 1 }, { match: "remote get-url team", code: 2 }];
 
@@ -54,7 +52,7 @@ const flat = (ctx: ReturnType<typeof fakeContext>) => ctx.calls.map((c) => c.joi
 
 function setup(rules: ExecRule[] = []) {
   const fake = FakeIncus.withRuntime({ commit: "IMGSHA" });
-  const ctx = fakeContext({ incus: fake, rules: [...rules, ...IDENTITY, ...HOOK_BLOCKS] });
+  const ctx = fakeContext({ incus: fake, rules: [...rules, ...IDENTITY] });
   return { fake, ctx };
 }
 
@@ -349,14 +347,14 @@ test("converging an unchanged control restarts nothing; a stopped service is onl
   const { fake, ctx } = setup();
   await provisionControl(ctx, cfg, member(cfg, CONTROL));
 
-  const again = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY, ...HOOK_BLOCKS] });
+  const again = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY] });
   await convergeControl(again, cfg, member(cfg, CONTROL));
   assert.deepEqual(restarts(again), []);
   assert.ok(!flat(again).some((c) => c.includes("forge-orchestrator.service") || c.endsWith("systemctl start forge-orchestrator")),
     flat(again).join("\n"));
 
   const stopped = fakeContext({ incus: fake, rules: [{ match: "systemctl is-active forge-orchestrator", code: 3, stdout: "inactive\n" },
-    ...IDENTITY, ...HOOK_BLOCKS] });
+    ...IDENTITY] });
   await convergeControl(stopped, cfg, member(cfg, CONTROL));
   assert.deepEqual(restarts(stopped), []);
   assert.ok(flat(stopped).some((c) => c.endsWith("-- systemctl start forge-orchestrator")), flat(stopped).join("\n"));
@@ -373,13 +371,13 @@ test("a changed orchestrator source, or a changed prefix, restarts the service a
     assert.equal(restarts(ctx).length, 1);
 
     appendFileSync(join(repo, "cli", "lib", "orchestrator", "tick.ts"), "\n// changé\n");
-    const changed = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY, ...HOOK_BLOCKS] });
+    const changed = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY] });
     await convergeControl(changed, cfg, member(cfg, CONTROL));
     assert.equal(restarts(changed).length, 1);
     assert.ok(fake.files.get(`agent-forge/${CONTROL}/opt/forge/lib/orchestrator/tick.ts`)!.content.endsWith("// changé\n"));
 
     const renamed = controlConfig("R");
-    const prefixed = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY, ...HOOK_BLOCKS] });
+    const prefixed = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY] });
     await convergeControl(prefixed, renamed, member(renamed, CONTROL));
     assert.equal(restarts(prefixed).length, 1);
     assert.ok(fake.files.get(`agent-forge/${CONTROL}${UNIT}`)!.content.includes("--prefix R "));
@@ -419,7 +417,7 @@ test("Review Focus 3: converging a control of part 1 adds its workspace, its clo
   assert.ok(fake.files.get(`agent-forge/${CONTROL}/home/aiuser/.claude/skills/design/SKILL.md`));
   assert.ok(!calls.some((c) => c.includes(" delete ") || c.includes(" launch ")));
 
-  const again = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY, ...HOOK_BLOCKS] });
+  const again = fakeContext({ incus: fake, rules: [...ACTIVE, ...IDENTITY] });
   await convergeControl(again, cfg, member(cfg, CONTROL));
   const second = flat(again);
   assert.ok(!second.some((c) => c.includes("config device add")), second.join("\n"));

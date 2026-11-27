@@ -18,6 +18,6 @@ const DEAD: readonly string[] = ["none", "exited", "lost"];
 // vidé entre deux tickets, décision 9).
 export async function ensurePilot(ctx: Context, opts: { fresh?: boolean } = {}): Promise<"started" | "running"> {
   if (!opts.fresh && !DEAD.includes(await sessionState(ctx, CONTROL))) return "running";
-  await startSession(ctx, { name: CONTROL }, null, PILOT_INSTRUCTION, { cwd: "/workspace" });
+  await startSession(ctx, { name: CONTROL }, null, PILOT_INSTRUCTION, { cwd: "/workspace", permissionMode: "auto" });
   return "started";
 }
