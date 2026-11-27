@@ -18,9 +18,15 @@ fi
 
 cd "$clone"
 
+# The VM is the agent's sandbox: no permission prompts. container/pre-bash.sh
+# (the project's hook) and the deny rules of managed-settings.json still apply,
+# and GitHub is reached only through the relay. Claude Code asks once, at the
+# first launch, to accept the mode.
+mode=(--permission-mode bypassPermissions)
+
 # Claude Code keeps a directory's conversations in ~/.claude/projects/<cwd, / as ->/.
 project_dir="$HOME/.claude/projects/$(pwd | tr '/' '-')"
 if compgen -G "$project_dir/*.jsonl" > /dev/null; then
-  exec claude --continue "$@"
+  exec claude "${mode[@]}" --continue "$@"
 fi
-exec claude "$@"
+exec claude "${mode[@]}" "$@"
