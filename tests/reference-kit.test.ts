@@ -104,6 +104,9 @@ test("the repository's kits: the control and the executor, every skill and sub-a
   assert.deepEqual(referenceKit("control").skills, ["design", "split", "checkpoint"]);
   // Décision 35 : le doute d'un développeur va d'abord à ce sous-agent.
   assert.ok(referenceKit("executor").agents.includes("spec-reader"));
+  // Partie 3 : l'exécuteur mène aussi la QA d'un ticket.
+  assert.ok(referenceKit("executor").skills.includes("qa"));
+  assert.ok(readFileSync(join(referenceDir(), "skills", "qa", "SKILL.md"), "utf8").startsWith("---\nname: qa\n"));
   assert.throws(() => referenceKit("pilot"), /no reference kit for role pilot/);
   for (const kit of Object.values(roles)) {
     for (const s of kit.skills) assert.ok(existsSync(join(referenceDir(), "skills", s, "SKILL.md")), s);
