@@ -7,7 +7,8 @@
 //
 // Dans le container de contrôle (la socket du canal local de l'orchestrateur
 // existe), seulement les commandes du canal : lire les tickets, écrire leurs
-// fichiers de mission et leur pile, répondre (voir CONTROL_USAGE). Ailleurs,
+// fichiers de mission et leur pile, répondre, créer les correctifs d'une revue
+// et ses tickets non bloquants (voir CONTROL_USAGE). Ailleurs,
 // celles d'un exécuteur, vers l'API de l'hôte :
 //
 //   forge-team done [--report-file <fichier>] [--qa-report-file <fichier>]
@@ -39,7 +40,9 @@ const CONTROL_USAGE = `usage: forge-team tickets [<status>…]
        forge-team write-mission <id> <spec|answers|split>   (the text on stdin)
        forge-team create-stack <id>                         (a JSON array of {repository, text} on stdin)
        forge-team answer-request <id> <n>                   (the answer on stdin)
-       forge-team comment <id>                              (the text on stdin)`;
+       forge-team comment <id>                              (the text on stdin)
+       forge-team create-fixes <id>                         (a JSON array of {fixes, text} on stdin)
+       forge-team create-ticket <from>                      (a JSON object {title, text} on stdin)`;
 const USAGE = CONTROL ? CONTROL_USAGE : EXECUTOR_USAGE;
 
 function usage(message) {
@@ -99,6 +102,30 @@ function controlRequest(command, args) {
     case "comment":
       exactly(1, "a ticket id");
       return { op: "comment", id: args[0], text: readStdin("text") };
+    case "create-fixes": {
+      exactly(1, "a ticket id");
+      const shape = "create-fixes reads a JSON array of {fixes, text} on stdin";
+      let fixes;
+      try {
+        fixes = JSON.parse(readStdin("list of fixes"));
+      } catch {
+        usage(shape);
+      }
+      if (!Array.isArray(fixes)) usage(shape);
+      return { op: "create-fixes", id: args[0], fixes };
+    }
+    case "create-ticket": {
+      exactly(1, "the id of the ticket it comes from");
+      const shape = "create-ticket reads a JSON object {title, text} on stdin";
+      let t;
+      try {
+        t = JSON.parse(readStdin("new ticket"));
+      } catch {
+        usage(shape);
+      }
+      if (typeof t !== "object" || t === null || Array.isArray(t)) usage(shape);
+      return { op: "create-ticket", from: args[0], title: t.title, text: t.text };
+    }
     default:
       usage(command === undefined ? "a command is required" : `unknown command ${command}`);
   }
@@ -233,7 +260,11 @@ function printControl(req, reply) {
       else for (const p of reply.problems) w(p);
       return;
     case "create-stack":
+    case "create-fixes":
       w(`ok ${reply.subtasks.join(" ")}`);
+      return;
+    case "create-ticket":
+      w(`ok ${reply.id}`);
       return;
     default:
       w("ok");

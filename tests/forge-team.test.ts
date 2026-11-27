@@ -178,3 +178,18 @@ test("done --qa-report-file sends the parsed report as qa; a file that is not JS
   answer = '{"ok":true,"mission":{"kind":"qa","ticket":"T-1","subtask":"T-1.2","repository":"web","branch":"agent/T-1.2","base":"agent/T-1.1"}}';
   assert.equal((await run(["status"], "")).stdout, "ok\nmission: qa T-1 (web) branch=agent/T-1.2 base=agent/T-1.1\n");
 });
+
+test("control: create-fixes sends the stdin array, create-ticket the stdin object; anything else on stdin exits 64", async () => {
+  answer = '{"ok":true,"subtasks":["T-1.3"]}';
+  const fixes = [{ fixes: "T-1.1", text: "empty" }];
+  const r = await control(["create-fixes", "T-1"], JSON.stringify(fixes));
+  assert.deepEqual([r.code, r.stdout], [0, "ok T-1.3\n"]);
+  assert.equal(received[0], JSON.stringify({ op: "create-fixes", id: "T-1", fixes }));
+  assert.equal((await control(["create-fixes", "T-1"], '{"fixes":null}')).code, 64);
+  answer = '{"ok":true,"id":"T-2"}';
+  const t = await control(["create-ticket", "T-1"], JSON.stringify({ title: "Spinner", text: "Show it." }));
+  assert.deepEqual([t.code, t.stdout], [0, "ok T-2\n"]);
+  assert.equal(received[1], JSON.stringify({ op: "create-ticket", from: "T-1", title: "Spinner", text: "Show it." }));
+  assert.equal((await control(["create-ticket", "T-1"], "[]")).code, 64);
+  assert.equal(received.length, 2);
+});
