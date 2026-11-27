@@ -10,8 +10,9 @@ export class RuleError extends Error {}
 export type Candidate = { ticket: Ticket; subtask: Subtask; base: string; kind: "dev" | "rebase"; branch: string };
 
 // Une QA à faire : `top` est la sous-tâche du haut de la pile, `base` sa base,
-// `stack` les branches de la pile de bas en haut.
-export type QaCandidate = { ticket: Ticket; top: Subtask; base: string; stack: StackBranch[] };
+// `stack` les branches de la pile de bas en haut, `subtasks` ses sous-tâches
+// dans le même ordre.
+export type QaCandidate = { ticket: Ticket; top: Subtask; base: string; stack: StackBranch[]; subtasks: Subtask[] };
 
 // La pile d'un dépôt : ses sous-tâches d'implémentation, par position. Un
 // correctif partage la position de celle qu'il corrige : il n'y est pas.
@@ -106,7 +107,7 @@ export function qaCandidates(
     try {
       const branches = stack.map((s) => ({ repository: s.repository, branch: `agent/${s.id}`, base: missionBase(ticket, subtasks, s) }));
       const top = stack[stack.length - 1]!;
-      out.push({ ticket, top, base: branches[branches.length - 1]!.base, stack: branches });
+      out.push({ ticket, top, base: branches[branches.length - 1]!.base, stack: branches, subtasks: stack });
     } catch (e) {
       if (!(e instanceof RuleError)) throw e;
       problems.push(`${ticket.id}: ${e.message}`);
