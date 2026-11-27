@@ -120,6 +120,9 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
   // sera relu au tour suivant. Les suivants sont traités quand même (un
   // ticket illisible ne bloque pas les autres) et relus sans effet.
   let advance = true;
+  // Les tickets dont un évènement a échoué ce tour : leur statut ne bouge pas
+  // avant qu'il soit relu (une QA `ko` à moitié traitée garde le ticket en `qa`).
+  const pending = new Set<string>();
   for (const ev of events) {
     try {
       if (ev.kind === "ask") await onAsk(tickets, host, ev, report);
@@ -128,6 +131,7 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
     } catch (e) {
       if (!local(e)) throw e;
       report.problems.push(`${ev.ticket}: event ${ev.id} (${ev.subtask}): ${message(e)}`);
+      pending.add(ev.ticket);
       advance = false;
     }
     if (advance) cursor.write(ev.id);
@@ -154,7 +158,7 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
   // Un ticket en `qa` dont une sous-tâche n'est pas finie revient en `dev` (un
   // crash entre les deux écritures du marquage d'un rebase, plus bas).
   for (const { ticket, subtasks } of picture) {
-    if (ticket.status !== "qa" || subtasks.every((x) => x.status === "done")) continue;
+    if (ticket.status !== "qa" || subtasks.every((x) => x.status === "done") || pending.has(ticket.id)) continue;
     try {
       await tickets.setTicketStatus({ id: ticket.id, status: "dev" });
       ticket.status = "dev";
@@ -455,15 +459,12 @@ async function recover(
   if (unreadable.has(held.ticket)) return;
   const entry = picture.find((p) => p.ticket.id === held.ticket);
   if (held.kind === "qa") {
-    // Une QA repart en QA tant que son ticket est en `qa` ; sinon, libérée.
+    // Une QA perdue est libérée ; tant que son ticket est en `qa`, l'étape de
+    // la QA, plus bas dans le tour, la relance en QA, après le contrôle de la
+    // pile (jamais une QA sur une pile périmée).
     await host.release(ex.name);
     ex.mission = null;
-    const q = entry?.ticket.status === "qa" ? qaCandidates([entry]).candidates[0] : undefined;
-    if (!q) return void report.problems.push(`${held.ticket}: its QA is no longer to do, ${ex.name} released`);
-    if (await launchQa(tickets, host, ex.name, q, report)) {
-      ex.mission = held;
-      report.recovered.push(`${held.ticket} qa`);
-    }
+    if (entry?.ticket.status !== "qa") report.problems.push(`${held.ticket}: its QA is no longer to do, ${ex.name} released`);
     return;
   }
   const s = entry?.subtasks.find((x) => x.id === held.subtask);

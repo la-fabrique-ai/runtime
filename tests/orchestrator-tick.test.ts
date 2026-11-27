@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
+import { ConnectorError } from "../cli/lib/tickets/model.ts";
 import type { Connector } from "../cli/lib/tickets/connector.ts";
 import { HostError } from "../cli/lib/orchestrator/host.ts";
 import type { ExecutorStatus, HostApi, HostEvent, MissionSpec, QaReport, SessionState, StackBranch, StackState } from "../cli/lib/orchestrator/host.ts";
@@ -722,4 +723,32 @@ test("tour : un ticket en qa dont une demande attend ne reçoit pas de QA", asyn
   const r = await turn({ tickets, host, cursor });
   assert.deepEqual(host.assigned.map((x) => x.mission.subtask), ["T-1.1"]);
   assert.deepEqual(r.qa, []);
+});
+
+test("QA ko : une base qui échoue au deuxième défaut ne perd pas les suivants ; le tour d'après les crée", async () => {
+  const { tickets, host, cursor } = await inQa();
+  let fail = 1;
+  const flaky: Connector = {
+    ...tickets,
+    createSubtask: async (a) => {
+      if ((await tickets.listSubtasks({ ticket: a.ticket })).length === 3 && fail-- > 0) throw new ConnectorError("disk full");
+      return tickets.createSubtask(a);
+    },
+  };
+  host.qaDone("a", { verdict: "ko", defects: [{ subtask: "T-2.1", text: "d1" }, { subtask: "T-2.1", text: "d2" }, { subtask: null, text: "d3" }] });
+  await turn({ tickets: flaky, host, cursor });
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "qa");
+  await turn({ tickets: flaky, host, cursor });
+  assert.deepEqual((await tickets.listSubtasks({ ticket: "T-2" })).slice(2).map((s) => s.text), ["d1", "d2", "d3"]);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "dev");
+});
+
+test("une QA dont la session est perdue repasse par la pile : sur une pile périmée, le rebase d'abord", async () => {
+  const lost = await inQa();
+  lost.host.executors[0].session = "exited";
+  lost.host.stackStates.set("agent/T-2.2", { current: false, builtOn: null });
+  await lost.tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  await turn(lost);
+  assert.ok(!lost.host.assigned.some((x) => x.mission.kind === "qa"));
+  assert.equal((await sub2(lost.tickets, "T-2.2")).reason, "rebase");
 });

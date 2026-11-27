@@ -116,12 +116,21 @@ async function run(d: ChannelDeps, op: string, req: Obj): Promise<ChannelReply> 
         status = req.status as TicketStatus[];
       }
       const r = await tickets.listTickets(status ? { status } : {});
-      // `waiting` : les demandes du ticket sans réponse.
-      const waiting = await Promise.all(r.tickets.map(async (t) => (await tickets.listRequests({ ticket: t.id, open: true })).length));
+      // `waiting` : les demandes du ticket sans réponse ; illisibles, un problème.
+      const problems = r.problems.map((p) => `${p.id}: ${p.message}`);
+      const waiting = await Promise.all(r.tickets.map(async (t) => {
+        try {
+          return (await tickets.listRequests({ ticket: t.id, open: true })).length;
+        } catch (e) {
+          if (!(e instanceof ConnectorError)) throw e;
+          problems.push(e.message.startsWith(`${t.id}:`) ? e.message : `${t.id}: ${e.message}`);
+          return 0;
+        }
+      }));
       return {
         ok: true,
         tickets: r.tickets.map((t, i) => ({ id: t.id, title: t.title, status: t.status, priority: t.priority, waiting: waiting[i] })),
-        problems: r.problems.map((p) => `${p.id}: ${p.message}`),
+        problems,
       };
     }
     case "ticket": {

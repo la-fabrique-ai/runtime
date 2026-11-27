@@ -874,3 +874,9 @@ test("stack: a branch without a record is not current; one the team mirror lacks
   assert.deepEqual(await call(CONTROL, { op: "stack", branches: [{ ...STACK[0], repository: "nope" }] }),
     { ok: false, error: "repository nope is not declared in the project" });
 });
+
+test("a rebase mission stopped by a question (rebase aborted, so not on its base) may still ask", async () => {
+  hold(E1, rebaseHeld());
+  setup([notAncestor("team/agent/T-1.1", "agent/T-1.2"), { match: "rev-list --count", stdout: "1\n" }]);
+  assert.deepEqual(await call(E1, { op: "ask", text: "Which side of the conflict?" }), { ok: true, id: 1 });
+});

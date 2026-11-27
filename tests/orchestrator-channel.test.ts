@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
 import type { Connector } from "../cli/lib/tickets/connector.ts";
+import { ConnectorError } from "../cli/lib/tickets/model.ts";
 import { handleChannel, serveChannel, type ChannelDeps } from "../cli/lib/orchestrator/channel.ts";
 
 async function setup(): Promise<{ d: ChannelDeps; tickets: Connector; logs: string[]; dir: string }> {
@@ -201,4 +202,13 @@ test("tickets gives each ticket the number of its requests without an answer", a
   const { d } = await setup();
   const r = await ask(d, { op: "tickets" }) as unknown as { tickets: { id: string; waiting: number }[] };
   assert.deepEqual(r.tickets.map((t) => [t.id, t.waiting]), [["T-1", 1]]);
+});
+
+test("tickets: a ticket whose requests cannot be read is a problem line, the others are listed", async () => {
+  const { d } = await setup();
+  const broken = { ...d, tickets: { ...d.tickets, listRequests: async () => { throw new ConnectorError("T-1: request 1 is unreadable"); } } as Connector };
+  const r = await ask(broken, { op: "tickets" }) as unknown as { ok: boolean; tickets: { id: string; waiting: number }[]; problems: string[] };
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.tickets.map((t) => [t.id, t.waiting]), [["T-1", 0]]);
+  assert.ok(r.problems.includes("T-1: request 1 is unreadable"), JSON.stringify(r.problems));
 });

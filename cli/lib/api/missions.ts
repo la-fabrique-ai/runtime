@@ -843,9 +843,11 @@ async function handBack(
   const from = stacked ? `team/${m.base}` : m.base;
   const count = await mustSucceed("git rev-list", git(GIT_MS, "rev-list", "--count", `${from}..${m.branch}`));
   let ahead = Number.parseInt(count.stdout.trim(), 10) > 0;
-  if (m.kind === "rebase") {
+  if (m.kind === "rebase" && req.op === "done") {
     // Un rebase n'ajoute pas de commit : il doit seulement être posé sur la
-    // pointe de sa base, et la branche réécrite est toujours copiée.
+    // pointe de sa base, et la branche réécrite est toujours copiée. Un rebase
+    // arrêté par une question (abandonné, donc pas encore posé) rend sa branche
+    // comme tout `ask`.
     if ((await git(GIT_MS, "merge-base", "--is-ancestor", from, m.branch)).code !== 0) {
       throw new ForgeError(`${m.branch} does not stand on ${m.base}: rebase it, then ${again}`);
     }
