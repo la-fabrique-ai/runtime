@@ -31,6 +31,8 @@ design is meant to guarantee.
 
 - Vulnerabilities in Incus, Claude Code, herdr, Docker or Ubuntu themselves:
   report them upstream.
-- `container/pre-bash.sh` is a guardrail against an agent's mistakes. It is
-  not a security boundary, so getting past it alone is not a vulnerability.
+- `container/pre-bash.sh` is a guardrail against an agent's mistakes, for the
+  sessions of the development machine only (this repository's
+  `.claude/settings.json`); containers do not run it. It is not a security
+  boundary, so getting past it alone is not a vulnerability.
 - What an agent can do inside its own container by design.

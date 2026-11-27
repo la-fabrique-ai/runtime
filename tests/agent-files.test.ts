@@ -1,12 +1,10 @@
-// The guards of what forge puts in a project container: the security hook is
-// probed in both directions, a plugin from an unknown marketplace is refused,
-// and the settings say only what the container's kit asks for.
+// The guards of what forge puts in a project container: a plugin from an
+// unknown marketplace is refused, and the settings say only what the
+// container's kit asks for.
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { fakeContext, type ExecRule } from "./lib/fake-context.ts";
 import { FakeIncus } from "./lib/fake-incus.ts";
-import { ForgeError } from "../cli/lib/context.ts";
-import { requireHookBlocks } from "../cli/lib/commands/provision.ts";
 import { installAgentFiles, requirePlugins, type AgentFiles } from "../cli/lib/agent-files.ts";
 import { AIUSER_SOCKET } from "../cli/lib/api/access.ts";
 import { referenceKit } from "../cli/lib/reference-kit.ts";
@@ -22,9 +20,6 @@ afterEach(() => {
 });
 
 const NAME = "agent-executor-1";
-const DENY = "forge-hook-probe-deny";
-const ALLOW = "forge-hook-probe-allow";
-const BLOCKS: ExecRule = { match: DENY, code: 2, stderr: "BLOCKED.\n" };
 
 function setup(rules: ExecRule[]) {
   const fake = FakeIncus.withRuntime();
@@ -34,25 +29,6 @@ function setup(rules: ExecRule[]) {
 
 const files = (over: Partial<AgentFiles> = {}): AgentFiles =>
   ({ name: NAME, strict: false, plugins: [], prompt: null, env: null, reference: null, ...over });
-
-test("a hook that lets the forbidden probe through stops provisioning, naming it", async () => {
-  const { ctx } = setup([{ match: DENY, code: 0 }]);
-  await assert.rejects(requireHookBlocks(ctx, NAME),
-    (e: unknown) => e instanceof ForgeError && /let a forbidden command through \(exit code 0, expected 2\)/.test(e.message));
-  assert.ok(!ctx.calls.some((c) => c.join(" ").includes(ALLOW)), "the allow probe is not even tried");
-});
-
-test("a hook that refuses the harmless probe stops provisioning too", async () => {
-  const { ctx } = setup([BLOCKS, { match: ALLOW, code: 2, stderr: "BLOCKED.\n" }]);
-  await assert.rejects(requireHookBlocks(ctx, NAME), /refuses a harmless command \(exit code 2, expected 0\): BLOCKED/);
-});
-
-test("a hook that blocks the one and lets the other through passes, and installAgentFiles runs the probe", async () => {
-  const { ctx } = setup([BLOCKS]);
-  await requireHookBlocks(ctx, NAME);
-  const bad = setup([{ match: DENY, code: 0 }]);
-  await assert.rejects(installAgentFiles(bad.ctx, files(), AIUSER_SOCKET), /let a forbidden command through/);
-});
 
 test("a plugin from a marketplace forge does not know is refused; one from the official marketplace passes", () => {
   assert.throws(() => requirePlugins(files({ plugins: ["tool@elsewhere"] })),
@@ -65,7 +41,7 @@ const settingsOf = (fake: FakeIncus) =>
   JSON.parse(fake.files.get(`agent-forge/${NAME}/home/aiuser/.claude/settings.json`)!.content) as Record<string, unknown>;
 
 test("settings: no plugins, no enabledPlugins; a kit without memory turns the auto memory off; root owns them", async () => {
-  const bare = setup([BLOCKS]);
+  const bare = setup([]);
   await installAgentFiles(bare.ctx, files(), AIUSER_SOCKET);
   const plain = settingsOf(bare.fake);
   assert.equal("enabledPlugins" in plain, false);
@@ -73,7 +49,7 @@ test("settings: no plugins, no enabledPlugins; a kit without memory turns the au
   const pushed = bare.fake.files.get(`agent-forge/${NAME}/home/aiuser/.claude/settings.json`)!;
   assert.deepEqual([pushed.uid, pushed.mode], ["0", "644"]);
 
-  const executor = setup([BLOCKS]);
+  const executor = setup([]);
   assert.equal(referenceKit("executor").memory, false);
   await installAgentFiles(executor.ctx, files({ reference: referenceKit("executor"), plugins: ["tool@claude-plugins-official"] }), AIUSER_SOCKET);
   const kit = settingsOf(executor.fake);
@@ -85,11 +61,28 @@ test("settings: no plugins, no enabledPlugins; a kit without memory turns the au
 // dialogue de permission qui bloque la session (recette de la PR 195) ; elle
 // n'ouvre que ce dossier, en lecture, hors des clones.
 test("settings: reads of the mission files are allowed, and no other read outside the clones", async () => {
-  const { ctx, fake } = setup([BLOCKS]);
+  const { ctx, fake } = setup([]);
   await installAgentFiles(ctx, files(), AIUSER_SOCKET);
   const perms = settingsOf(fake).permissions as Record<string, unknown>;
   assert.ok((perms.allow as string[]).includes(`Read(/${MISSION_DIR}/**)`));
   assert.ok((perms.allow as string[]).every((r) => r !== "Read" && !r.startsWith("Read(//") || r === `Read(/${MISSION_DIR}/**)`));
   assert.equal("additionalDirectories" in perms, false);
   assert.equal("blockReadsOutsideWorkingDirectories" in perms, false);
+});
+
+// Sans ce réglage, une session en bypassPermissions s'arrête au démarrage sur
+// l'avertissement « Bypass Permissions mode » (No, exit par défaut) : un
+// exécuteur lancé par assign y resterait bloqué.
+test("settings: the bypass permissions warning is skipped", async () => {
+  const { ctx, fake } = setup([]);
+  await installAgentFiles(ctx, files(), AIUSER_SOCKET);
+  assert.equal(settingsOf(fake).skipDangerousModePermissionPrompt, true);
+});
+
+// Plus de hook dans un container : une session en bypassPermissions pourrait le
+// retirer, et la frontière est le container lui-même.
+test("settings: the settings.json pushed into a container wires no hook", async () => {
+  const { ctx, fake } = setup([]);
+  await installAgentFiles(ctx, files(), AIUSER_SOCKET);
+  assert.equal("hooks" in settingsOf(fake), false);
 });

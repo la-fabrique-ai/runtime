@@ -735,8 +735,9 @@ reaches nothing.
 
 - **Docker and Compose** run rootless inside every container, as the agent's
   own unprivileged user, for repositories that need a database or other
-  services. `pre-bash.sh` blocks `--privileged`, host namespaces and bind
-  mounts outside `/workspace`.
+  services. The agent's instructions rule out `--privileged`, host namespaces
+  and bind mounts outside `/workspace`; nothing blocks them, and rootless
+  Docker stays inside the container either way.
 - **Chrome DevTools MCP** is configured in every container. The agent drives
   headless Chrome to check a running app: navigation, screenshots, console
   and network.
@@ -882,9 +883,6 @@ Known limits:
   `forge team converge` reports it and leaves it alone. Delete it
   (`incus --project agent-forge delete <container> --force`; the mirror and any
   workspace stay) and run `forge team converge` again.
-- **Provisioning says the security hook refuses a harmless command:** the
-  image predates a change to it. Run `forge image build`, then recreate the
-  container.
 - **`REMOTE HOST IDENTIFICATION HAS CHANGED`** after recreating a remote VM
   at the same address: a host forge installed keeps its key in forge's own
   file. Remove the old key, then record the new one yourself:

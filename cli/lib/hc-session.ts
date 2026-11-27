@@ -103,6 +103,10 @@ async function requireStarted(ctx: Context, container: string, timeoutMs?: numbe
   }
 }
 
+// Le mode de permission d'une session : `auto` pour le Pilote, qui parle à
+// l'humain ; `bypassPermissions` pour un exécuteur, que son container isole.
+export type PermissionMode = "auto" | "bypassPermissions";
+
 // Une session neuve : l'ancienne (s'il y en a une) est tuée et retirée, la
 // consigne est poussée comme fichier, puis `hc run` lance forge-agent, qui la
 // lit et la donne à claude comme premier message. `task` est le nom de la
@@ -112,8 +116,10 @@ async function requireStarted(ctx: Context, container: string, timeoutMs?: numbe
 // (/workspace/<nom>) pour un exécuteur, /workspace par défaut.
 // `timeoutMs` : chaque appel hc ou incus qui suit l'egress a ce délai (l'API,
 // dans sa file) ; dépassé, c'est un refus qui nomme l'étape.
+// `permissionMode` : le mode de la session, `auto` par défaut.
 export async function startSession(
-  ctx: Context, m: { name: string }, task: string | null, instruction: string, opts: { cwd?: string; timeoutMs?: number } = {},
+  ctx: Context, m: { name: string }, task: string | null, instruction: string,
+  opts: { cwd?: string; timeoutMs?: number; permissionMode?: PermissionMode } = {},
 ): Promise<void> {
   const t = opts.timeoutMs;
   const hc = (step: string, args: string[]) => inTime(`${step} in ${m.name}`, t, execMaybeTimed(ctx, hcArgv(m.name, args), t));
@@ -136,7 +142,7 @@ export async function startSession(
     "--label", `${HERDR_SPACE_LABEL}=forge`, "--label", `${HERDR_TAB_LABEL}=agent`,
     // L'ordre que forge-agent lit : --forge-task, puis --instruction-file, puis
     // les arguments de claude.
-    "forge-agent", "--forge-task", marker, "--instruction-file", INSTRUCTION_PATH, "--permission-mode", "auto",
+    "forge-agent", "--forge-task", marker, "--instruction-file", INSTRUCTION_PATH, "--permission-mode", opts.permissionMode ?? "auto",
   ]));
   await requireStarted(ctx, m.name, t);
 }
