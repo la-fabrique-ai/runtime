@@ -431,7 +431,7 @@ async function assign(ctx: Context, p: ProjectConfig, to: string, m: MissionSpec
   try {
     // Les fichiers de la mission précédente partent, ceux de celle-ci arrivent.
     await pushMissionFiles(ctx, to, m.files);
-    await startSession(ctx, { name: to }, m.subtask, m.instruction, { cwd: cloneDir(m.repository), timeoutMs: INCUS_MS });
+    await startSession(ctx, { name: to }, m.subtask, m.instruction, { cwd: cloneDir(m.repository), timeoutMs: INCUS_MS, permissionMode: "bypassPermissions" });
   } catch (e) {
     // Une session qui ne démarre pas ne laisse pas l'exécuteur marqué occupé.
     await configUnset(ctx, to, MISSION_KEY, { timeoutMs: INCUS_MS });

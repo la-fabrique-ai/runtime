@@ -15,5 +15,6 @@
   "permissions": {
     "allow": ["Read(~/.forge/messages/**)", "Read(//etc/forge/mission/**)", "Bash(forge-team:*)"]
   },
-  "autoUpdatesChannel": "stable"
+  "autoUpdatesChannel": "stable",
+  "skipDangerousModePermissionPrompt": true
 }

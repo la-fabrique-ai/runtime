@@ -93,3 +93,12 @@ test("settings: reads of the mission files are allowed, and no other read outsid
   assert.equal("additionalDirectories" in perms, false);
   assert.equal("blockReadsOutsideWorkingDirectories" in perms, false);
 });
+
+// Sans ce réglage, une session en bypassPermissions s'arrête au démarrage sur
+// l'avertissement « Bypass Permissions mode » (No, exit par défaut) : un
+// exécuteur lancé par assign y resterait bloqué.
+test("settings: the bypass permissions warning is skipped", async () => {
+  const { ctx, fake } = setup([BLOCKS]);
+  await installAgentFiles(ctx, files(), AIUSER_SOCKET);
+  assert.equal(settingsOf(fake).skipDangerousModePermissionPrompt, true);
+});
