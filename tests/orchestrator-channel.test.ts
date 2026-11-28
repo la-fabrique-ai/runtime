@@ -99,7 +99,10 @@ test("Review Focus 3: write-mission on a spec ticket is read back by mission; on
   assert.deepEqual(await ask(d, { op: "mission", id }), { ok: true, mission: { spec: "# Spec\n", answers: null, split: null } });
   const r = await ask(d, { op: "write-mission", id: "T-1", file: "spec", text: "x" });
   assert.equal(r.ok, false);
-  assert.match((r as { error: string }).error, /^T-1 is dev: /);
+  assert.match((r as { error: string }).error, /^T-1 is dev: the mission files are written only while the ticket is in spec, human-review or pr-review$/);
+  // En revue : le Pilote met la spec à jour avant les correctifs qui la changent.
+  await tickets.setTicketStatus({ id, status: "human-review" });
+  assert.deepEqual(await ask(d, { op: "write-mission", id, file: "spec", text: "# Spec, exit code 3\n" }), { ok: true });
 });
 
 const STACK = [{ repository: "web", text: "one" }, { repository: "api", text: "two" }, { repository: "web", text: "three" }];

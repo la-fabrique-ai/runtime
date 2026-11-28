@@ -12,7 +12,11 @@ export type Candidate = { ticket: Ticket; subtask: Subtask; base: string; kind: 
 // Une QA à faire : `top` est la sous-tâche du haut de la pile, `base` sa base,
 // `stack` les branches de la pile de bas en haut, `subtasks` ses sous-tâches
 // dans le même ordre.
-export type QaCandidate = { ticket: Ticket; top: Subtask; base: string; stack: StackBranch[]; subtasks: Subtask[] };
+// `subtasks` : la pile, par position ; `fixes` : les correctifs du ticket, par
+// ordre de création (ce qu'ils demandent n'est jamais un défaut).
+export type QaCandidate = {
+  ticket: Ticket; top: Subtask; base: string; stack: StackBranch[]; subtasks: Subtask[]; fixes: Subtask[];
+};
 
 // La pile d'un dépôt : ses sous-tâches d'implémentation, par position. Un
 // correctif partage la position de celle qu'il corrige : il n'y est pas.
@@ -107,7 +111,8 @@ export function qaCandidates(
     try {
       const branches = stack.map((s) => ({ repository: s.repository, branch: `agent/${s.id}`, base: missionBase(ticket, subtasks, s) }));
       const top = stack[stack.length - 1]!;
-      out.push({ ticket, top, base: branches[branches.length - 1]!.base, stack: branches, subtasks: stack });
+      const fixes = subtasks.filter((s) => s.kind === "fix" && s.repository === repository).sort((a, b) => a.rank - b.rank);
+      out.push({ ticket, top, base: branches[branches.length - 1]!.base, stack: branches, subtasks: stack, fixes });
     } catch (e) {
       if (!(e instanceof RuleError)) throw e;
       problems.push(`${ticket.id}: ${e.message}`);

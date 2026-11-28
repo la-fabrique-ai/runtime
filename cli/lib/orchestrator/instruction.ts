@@ -173,8 +173,8 @@ export function qaInstruction(q: QaCandidate, extra: { answered: Request[]; file
   const blocks = answerBlocks(extra.answered);
   let dropped = 0;
   const firstLine = (t: string): string => t.split("\n", 1)[0] ?? "";
-  type Parts = { title: string; description: string; stack: string };
-  const render = ({ title, description, stack }: Parts): string =>
+  type Parts = { title: string; description: string; stack: string; fixes: string };
+  const render = ({ title, description, stack, fixes }: Parts): string =>
     [
       `[forge] mission qa ${ticket.id}`,
       "",
@@ -187,6 +187,14 @@ export function qaInstruction(q: QaCandidate, extra: { answered: Request[]; file
       `In /workspace/${q.top.repository}, from the bottom up:`,
       stack,
       "",
+      ...(q.fixes.length === 0 ? [] : [
+        "## Fixes",
+        "Made after an earlier QA or the human's review, each on the branch of the sub-task it fixes. " +
+          "What a fix asks for is never a defect, even where the spec says otherwise: when a fix and the spec disagree, " +
+          "ask, as the qa skill says.",
+        fixes,
+        "",
+      ]),
       ...filesSection(extra.files),
       ...answersSection(blocks, dropped, marker),
       "## What to do",
@@ -196,9 +204,10 @@ export function qaInstruction(q: QaCandidate, extra: { answered: Request[]; file
       "",
     ].join("\n");
   const stack = q.subtasks.map((s) => `${s.id}: ${firstLine(s.text)}`).join("\n");
-  const parts: Parts = { title: ticket.title, description: ticket.description, stack };
+  const fixes = q.fixes.map((s) => `${s.id}, a fix of ${s.fixes}:\n${s.text.replace(/\n+$/, "")}`).join("\n\n");
+  const parts: Parts = { title: ticket.title, description: ticket.description, stack, fixes };
   fit(parts, ["description"], render, marker);
   while (bytes(render(parts)) > MAX_BYTES && dropped < blocks.length) dropped++;
-  fit(parts, ["stack", "title"], render, marker);
+  fit(parts, ["stack", "fixes", "title"], render, marker);
   return render(parts);
 }

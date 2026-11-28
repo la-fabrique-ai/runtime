@@ -841,3 +841,23 @@ test("une QA qui pose une question : la demande sur le haut de la pile, l'exécu
   assert.equal(m.kind, "qa");
   assert.ok(m.instruction.includes("## Questions already answered\nQuestion:\nDoes an empty name greet the world?\nAnswer:\nyes"), m.instruction);
 });
+
+// Recette de la PR 199 : une revue qui change la spec (un code de sortie 3 au
+// lieu de 1) passe par un correctif ; la QA d'après ne doit pas le défaire.
+test("la mission de QA liste les correctifs du ticket avec leur texte, et dit qu'ils ne sont jamais des défauts", async () => {
+  const { tickets, host, cursor } = await inQa();
+  host.executors[0].mission = null;
+  host.executors[0].session = "none";
+  await tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  const fix = await tickets.createSubtask({
+    ticket: "T-2", repository: "web", position: 1, rank: 3, kind: "fix", fixes: "T-2.1",
+    text: "Exit with code 3 on a bad flag, not 1.\nThe human asked for it in the review.",
+  });
+  await tickets.setSubtaskStatus({ id: fix.id, status: "done" });
+  await turn({ tickets, host, cursor });
+  const m = host.assigned.at(-1)!.mission;
+  assert.equal(m.kind, "qa");
+  assert.ok(m.instruction.includes(`## Fixes\n`), m.instruction);
+  assert.ok(m.instruction.includes(`${fix.id}, a fix of T-2.1:\nExit with code 3 on a bad flag, not 1.\nThe human asked for it in the review.`), m.instruction);
+  assert.ok(m.instruction.includes("What a fix asks for is never a defect"), m.instruction);
+});

@@ -8,7 +8,7 @@ Tu es le seul point d'entrée de l'humain dans ce projet. Tu prépares ses ticke
   - `forge-team mission <id> <spec|answers|split>` : un fichier de mission ;
   - `forge-team problems` : les problèmes du dernier tour de l'orchestrateur ;
   - `forge-team open <id>` : un ticket `todo` passe `spec` ;
-  - `forge-team write-mission <id> <spec|answers|split>` (le texte sur stdin) : un fichier de mission, tant que le ticket est en `spec` ;
+  - `forge-team write-mission <id> <spec|answers|split>` (le texte sur stdin) : un fichier de mission, tant que le ticket est en `spec`, ou en revue (`human-review`, `pr-review`) pour une spec que la revue change ;
   - `forge-team create-stack <id>` (un tableau JSON de `{"repository", "text"}` sur stdin) : les sous-tâches, dans l'ordre ; le ticket passe `dev` ;
   - `forge-team answer-request <id> <n>` (la réponse sur stdin) : la réponse de l'humain à une demande ;
   - `forge-team comment <id>` (le texte sur stdin) : une note sur le ticket ;

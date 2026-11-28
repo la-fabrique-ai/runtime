@@ -57,9 +57,13 @@ function text(v: unknown, what: string, max = CHANNEL_TEXT_MAX): string {
   return v;
 }
 
-async function inSpec(tickets: Connector, id: string, what: string): Promise<Ticket> {
+async function inSpec(tickets: Connector, id: string, what: string, also: TicketStatus[] = []): Promise<Ticket> {
   const t = await tickets.getTicket({ id });
-  if (t.status !== "spec") throw new ChannelError(`${id} is ${t.status}: ${what} only while the ticket is in spec`);
+  const allowed: TicketStatus[] = ["spec", ...also];
+  if (!allowed.includes(t.status)) {
+    const list = allowed.length === 1 ? allowed[0] : `${allowed.slice(0, -1).join(", ")} or ${allowed.at(-1)}`;
+    throw new ChannelError(`${id} is ${t.status}: ${what} only while the ticket is in ${list}`);
+  }
   return t;
 }
 
@@ -159,7 +163,9 @@ async function run(d: ChannelDeps, op: string, req: Obj): Promise<ChannelReply> 
       const file = req.file;
       if (file !== "spec" && file !== "answers" && file !== "split") throw new ChannelError("write-mission: file must be spec, answers or split");
       const body = text(req.text, "write-mission: text", CHANNEL_FILE_MAX);
-      await inSpec(tickets, id, "the mission files are written");
+      // En revue aussi : un correctif qui change la spec la met d'abord à jour
+      // (skill review), pour que la QA d'après teste contre la bonne.
+      await inSpec(tickets, id, "the mission files are written", ["human-review", "pr-review"]);
       await tickets.writeMission({ ticket: id, file: file as MissionFile, text: body });
       d.log(`write-mission ${id}: ${file}, ${Buffer.byteLength(body, "utf8")} bytes`);
       return { ok: true };
