@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { DEFAULT_CONFIG, type ForgeConfig, type Limits } from "../cli/lib/config.ts";
 import {
   ACL, BRIDGE, PROFILE, RAW_LXC, desiredAcl, desiredBridge, desiredProfile, desiredProject, desiredProxyAcl,
-  desiredProxyProfile, desiredStrictAcl, effectiveEgress, egressNames, proxyInstance, rawLxcAllowed,
+  desiredProxyProfile, desiredStrictAcl, effectiveEgress, egressNames, proxyInstance, lowLevelAllowed,
 } from "../cli/lib/objects.ts";
 import { parseAddress, parseCidr, proxyPlan } from "../cli/lib/ipv4.ts";
 
@@ -20,7 +20,7 @@ test("the names shared with the host and the other sub-projects", () => {
 });
 
 test("the default profile, key by key", () => {
-  assert.deepEqual(desiredProfile(cfg(), IDS, { rawLxc: true }).config, {
+  assert.deepEqual(desiredProfile(cfg(), IDS, { lowLevel: true }).config, {
     "environment.HOME": "/home/aiuser",
     "security.privileged": "false",
     "security.nesting": "true",
@@ -34,19 +34,19 @@ test("the default profile, key by key", () => {
 });
 
 test("limits.cpu appears only when set, always as a string", () => {
-  assert.equal(desiredProfile(cfg({ cpu: 4 }), IDS, { rawLxc: true }).config["limits.cpu"], "4");
-  assert.equal(desiredProfile(cfg({ cpu: "0-3" }), IDS, { rawLxc: true }).config["limits.cpu"], "0-3");
+  assert.equal(desiredProfile(cfg({ cpu: 4 }), IDS, { lowLevel: true }).config["limits.cpu"], "4");
+  assert.equal(desiredProfile(cfg({ cpu: "0-3" }), IDS, { lowLevel: true }).config["limits.cpu"], "0-3");
 });
 
 test("every value is a string, as Incus stores them", () => {
-  for (const value of Object.values(desiredProfile(cfg({ cpu: 4 }), IDS, { rawLxc: true }).config)) {
+  for (const value of Object.values(desiredProfile(cfg({ cpu: 4 }), IDS, { lowLevel: true }).config)) {
     assert.equal(typeof value, "string");
   }
 });
 
 test("the devices: a NIC on the bridge behind the ACL, a root disk from the config", () => {
   const c = { ...cfg({ rootDisk: "80GiB" }), storagePool: "fast" };
-  assert.deepEqual(desiredProfile(c, IDS, { rawLxc: true }).devices, {
+  assert.deepEqual(desiredProfile(c, IDS, { lowLevel: true }).devices, {
     eth0: {
       type: "nic", name: "eth0", network: "forgebr0",
       "security.acls": "forge-egress",
@@ -57,11 +57,14 @@ test("the devices: a NIC on the bridge behind the ACL, a root disk from the conf
   });
 });
 
-test("without raw.lxc, nothing else changes", () => {
-  const withIt = desiredProfile(cfg(), IDS, { rawLxc: true }).config;
-  const without = desiredProfile(cfg(), IDS, { rawLxc: false }).config;
+// Un projet restreint sans restricted.containers.lowlevel=allow refuse les
+// deux clés de bas niveau du profil : raw.lxc et limits.memory.swap.
+test("without the low-level keys, raw.lxc and limits.memory.swap go, nothing else changes", () => {
+  const withIt = desiredProfile(cfg(), IDS, { lowLevel: true }).config;
+  const without = desiredProfile(cfg(), IDS, { lowLevel: false }).config;
   assert.equal("raw.lxc" in without, false);
-  assert.deepEqual({ ...without, "raw.lxc": RAW_LXC }, withIt);
+  assert.equal("limits.memory.swap" in without, false);
+  assert.deepEqual({ ...without, "raw.lxc": RAW_LXC, "limits.memory.swap": "false" }, withIt);
 });
 
 test("raw.lxc keeps v1's capability drops", () => {
@@ -99,11 +102,11 @@ test("the project's features", () => {
 });
 
 test("raw.lxc is allowed unless the project is restricted without lowlevel", () => {
-  assert.equal(rawLxcAllowed({}), true);
-  assert.equal(rawLxcAllowed({ restricted: "false" }), true);
-  assert.equal(rawLxcAllowed({ restricted: "true" }), false);
-  assert.equal(rawLxcAllowed({ restricted: "true", "restricted.containers.lowlevel": "block" }), false);
-  assert.equal(rawLxcAllowed({ restricted: "true", "restricted.containers.lowlevel": "allow" }), true);
+  assert.equal(lowLevelAllowed({}), true);
+  assert.equal(lowLevelAllowed({ restricted: "false" }), true);
+  assert.equal(lowLevelAllowed({ restricted: "true" }), false);
+  assert.equal(lowLevelAllowed({ restricted: "true", "restricted.containers.lowlevel": "block" }), false);
+  assert.equal(lowLevelAllowed({ restricted: "true", "restricted.containers.lowlevel": "allow" }), true);
 });
 
 test("agent-forge uses slot 0 and the spec's ACL names", () =>
@@ -150,7 +153,7 @@ test("no ACL rule names another ACL", () => {
           assert.ok(parseAddress(rule[k]) !== null || parseCidr(rule[k]) !== null, `${k}: ${rule[k]}`);
 });
 test("the proxy profile: small, unnested, both ACLs on eth0, no idmap, no address", () => {
-  const p = desiredProxyProfile(DEFAULT_CONFIG, egressNames("agent-forge"), { rawLxc: true });
+  const p = desiredProxyProfile(DEFAULT_CONFIG, egressNames("agent-forge"), { lowLevel: true });
   assert.equal(p.config["security.nesting"], "false");
   assert.equal(p.config["limits.memory"], "512MiB");
   assert.equal(p.config["limits.processes"], "1000");
@@ -162,7 +165,7 @@ test("the proxy profile: small, unnested, both ACLs on eth0, no idmap, no addres
   assert.deepEqual(p.devices.root, { type: "disk", path: "/", pool: "default", size: "4GiB" });
 });
 test("in a restricted project the proxy profile goes without raw.lxc", () => {
-  const p = desiredProxyProfile(DEFAULT_CONFIG, egressNames("agent-forge"), { rawLxc: false });
+  const p = desiredProxyProfile(DEFAULT_CONFIG, egressNames("agent-forge"), { lowLevel: false });
   assert.equal("raw.lxc" in p.config, false);
 });
 test("effectiveEgress reads the expanded NIC, not a label", () => {

@@ -17,7 +17,7 @@ import { forgeProject, listInstances, serverInfo } from "../incus.ts";
 import { proxyPlan } from "../ipv4.ts";
 import {
   ACL, BRIDGE, PROFILE, PROXY_PROFILE, desiredAcl, desiredBridge, desiredProfile, desiredProject,
-  desiredProxyAcl, desiredProxyProfile, desiredStrictAcl, effectiveEgress, egressNames, proxyInstance, rawLxcAllowed,
+  desiredProxyAcl, desiredProxyProfile, desiredStrictAcl, effectiveEgress, egressNames, proxyInstance, lowLevelAllowed,
 } from "../objects.ts";
 import { allowlistPath, configPath, herdrConfigPath, repoRoot } from "../paths.ts";
 import { convergeProxy } from "../proxy.ts";
@@ -71,13 +71,14 @@ export async function cmdSetup(ctx: Context, opts: SetupOptions = {}): Promise<n
 
   report("network acl", ACL, (await converge(ctx, "network acl", ACL, desiredAcl())).outcome);
 
-  const rawLxc = rawLxcAllowed(projectState.config);
-  if (!rawLxc) {
+  const lowLevel = lowLevelAllowed(projectState.config);
+  if (!lowLevel) {
     ctx.err(`NOTICE: project ${project} is restricted without restricted.containers.lowlevel=allow, so the ` +
       "profile goes without raw.lxc and v1's capability drops are lost there (defense in depth only: the " +
-      "agent's user holds no capabilities).");
+      "agent's user holds no capabilities), and without limits.memory.swap=false: a container may swap at its " +
+      "memory limit, which prolongs the slowdown before the memory watchdog acts.");
   }
-  report("profile", PROFILE, (await converge(ctx, "profile", PROFILE, desiredProfile(config, ids, { rawLxc }))).outcome);
+  report("profile", PROFILE, (await converge(ctx, "profile", PROFILE, desiredProfile(config, ids, { lowLevel }))).outcome);
 
   // 4. IPv4 forwarding, now that the bridge exists.
   checkIpForward(opts.proc);
@@ -101,7 +102,7 @@ export async function cmdSetup(ctx: Context, opts: SetupOptions = {}): Promise<n
     const plan = proxyPlan(config.network.ipv4Address, names.slot);
     report("network acl", names.proxyAcl, (await converge(ctx, "network acl", names.proxyAcl, desiredProxyAcl(plan))).outcome);
     report("network acl", names.strictAcl, (await converge(ctx, "network acl", names.strictAcl, desiredStrictAcl(plan))).outcome);
-    const proxyProfile = desiredProxyProfile(config, names, { rawLxc });
+    const proxyProfile = desiredProxyProfile(config, names, { lowLevel });
     report("profile", PROXY_PROFILE, (await converge(ctx, "profile", PROXY_PROFILE, proxyProfile)).outcome);
 
     // The allowlist is validated before anything touches the proxy.
