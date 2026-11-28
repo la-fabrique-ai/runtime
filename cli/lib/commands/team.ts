@@ -155,8 +155,12 @@ function missionLabel(m: ProjectMember, held: HeldMission | null | "unreadable")
   if (m.kind === "control") return "-";
   if (held === "unreadable") return "unreadable";
   if (held === null) return "free";
-  // Une mission dev se lit comme avant ; une autre dit son genre (une QA, son ticket).
+  // Une mission dev se lit comme avant ; une autre dit son genre (une QA, son
+  // ticket ; un correctif, la sous-tâche dont il prend la branche).
   if (held.kind === "qa") return `qa ${held.ticket} (${held.repository})`;
+  if (held.kind === "dev" && held.branch !== `agent/${held.subtask}`) {
+    return `fix ${held.subtask} of ${held.branch.replace(/^agent\//, "")} (${held.repository})`;
+  }
   return `${held.kind === "rebase" ? "rebase " : ""}${held.subtask} (${held.repository})`;
 }
 
@@ -300,7 +304,11 @@ async function status(ctx: Context, p: ProjectConfig, json: boolean, quick: bool
   if (quick) return 0;
   if (tickets === null) {
     ctx.out("tickets: unavailable");
-  } else if (tickets.length > 0) {
+  } else if (tickets.length === 0) {
+    ctx.out("");
+    ctx.out("TICKETS");
+    ctx.out("no ticket under way");
+  } else {
     ctx.out("");
     ctx.out("TICKETS");
     const idWidth = Math.max(...tickets.map((t) => t.id.length));

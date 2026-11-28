@@ -326,6 +326,25 @@ test("status shows the kind of a mission that is not dev", async () => {
   const rows = ctx.out_lines.map((l) => l.split(/\s+/).join(" ").trim());
   assert.ok(rows.includes("agent-executor-1 executor Running idle qa T-1 (web)"), rows.join("\n"));
   assert.ok(rows.includes("agent-executor-2 executor Running idle rebase T-1.2 (web)"), rows.join("\n"));
+  // Un correctif travaille sur la branche de la sous-tâche qu'il corrige.
+  fake.instances.get("agent-forge")!.get("agent-executor-2")!.config["user.forge.mission"] =
+    JSON.stringify({ ...HELD, subtask: "T-1.3", branch: "agent/T-1.1" });
+  const fix = project(fake, [LIVE_IDLE, ORCH_FAILED]).ctx;
+  assert.equal(await cmdTeam(fix, ["status"]), 0);
+  const fixRows = fix.out_lines.map((l) => l.split(/\s+/).join(" ").trim());
+  assert.ok(fixRows.includes("agent-executor-2 executor Running idle fix T-1.3 of T-1.1 (web)"), fixRows.join("\n"));
+});
+
+test("status keeps the TICKETS section when no ticket is under way, with a line that says so", async () => {
+  const fake = FakeIncus.withRuntime();
+  fake.addInstance("agent-forge", "agent-control", { status: "Running", config: { "user.forge.role": "control" } });
+  const tickets: ExecRule = { match: "forge-team tickets --json", stdout: "[]" };
+  const problems: ExecRule = { match: "forge-team problems --json", stdout: "[]" };
+  const { ctx } = project(fake, [LIVE_IDLE, tickets, problems]);
+  assert.equal(await cmdTeam(ctx, ["status"]), 0);
+  const at = ctx.out_lines.indexOf("TICKETS");
+  assert.ok(at > 0, ctx.out_lines.join("\n"));
+  assert.equal(ctx.out_lines[at + 1], "no ticket under way");
 });
 
 test("status prints the tickets under way, by priority, and says when one waits for an answer; unreachable, unavailable", async () => {
