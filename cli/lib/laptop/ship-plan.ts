@@ -64,13 +64,29 @@ export type TaskPlan = {
   onto: string;           // a full ref name; the merge-base SHA on the first ship of a branch-based task
   prBase: string;
   shipped: boolean;       // refs/remotes/origin/agent/<task> exists
+  // A rewrite replaces GitHub's branch (a cascade rebased it): every own
+  // commit of the task, onto the branch below, pushed under a lease.
+  rewrite: boolean;
+  // The commit GitHub's branch must still be at: the last ship's, recorded in
+  // the clone, when it is what GitHub has. null: not a rewrite, or no lease.
+  lease: string | null;
+  // A rewrite without a lease: the commits of GitHub's branch it would replace.
+  foreign: string[];
 };
 
-// `below`: the task this one is stacked on, once the caller knows its PR is
-// merged; the task then goes onto that PR's base instead.
+// What this clone pushed last for each branch (replayAndPush records it): the
+// lease of the next rewrite.
+export const shippedRef = (task: string): string => `refs/forge/shipped/agent/${task}`;
+
+// `below`: the task this one is stacked on. `merged`: its PR is merged, the
+// task then goes onto that PR's base instead. `changes`: this ship pushes it
+// (it grows or is rewritten), so this task is rewritten onto it.
+// `opts.spec`: the ticket and the file the ship writes its spec to, on the top
+// branch: forge's own commit of that file on GitHub is not a divergence.
 export async function planTask(
   ctx: Context, root: string, remote: string, task: string, base: Base,
-  below?: { prBase: string; merged: boolean },
+  below?: { prBase: string; merged: boolean; changes?: boolean },
+  opts: { spec?: { ticket: string; path: string } } = {},
 ): Promise<TaskPlan> {
   const git = async (...args: string[]) =>
     (await mustSucceed(`git ${args[0]}`, ctx.exec(["git", ...args], { cwd: root }))).stdout.trim();
@@ -91,11 +107,40 @@ export async function planTask(
   const merges = await git("rev-list", "--merges", tip, `^${upstream}`, `^${limit}`);
   if (merges) throw new ForgeError(`agent/${task} has a merge commit (${merges.split("\n")[0].slice(0, 12)}): rebase it, forge ship replays commits one by one`);
 
+  const prBase = prBaseFor(base, below);
+  const last = shipped ? await resolveRef(ctx, root, shippedRef(task)) : null;
+  const isAncestor = async (a: string, b: string) =>
+    (await ctx.exec(["git", "merge-base", "--is-ancestor", a, b], { cwd: root })).code === 0;
+  // A commit of forge's spec (its trailer, that file alone) is forge's own: it
+  // is made again after a rewrite.
+  const spec = opts.spec;
+  const forgeOwn = async (c: string): Promise<boolean> => {
+    if (!spec) return false;
+    const trailer = await git("log", "-1", "--format=%(trailers:key=Forge-Spec,valueonly)", c);
+    if (trailer.trim() !== spec.ticket) return false;
+    return (await git("diff-tree", "--no-commit-id", "--name-only", "-r", c)) === spec.path;
+  };
+  if (shipped && await needsRewrite(git, exists, { tip, own, limit, base, prBase, last, below }, isAncestor, forgeOwn)) {
+    // Every own commit of the task, onto the branch below as this ship leaves
+    // it (the bottom: onto the merge base of its base and its tip).
+    const list = await git("rev-list", "--reverse", tip, `^${limit}`);
+    const commits = list === "" ? [] : list.split("\n");
+    const onto = base.kind === "task" ? githubRef(prBase) : await git("merge-base", limit, tip);
+    const ontoCommit = /^[0-9a-f]{40,64}$/.test(onto) ? onto : await resolveRef(ctx, root, onto);
+    const github = await resolveRef(ctx, root, own);
+    const lease = last !== null && last === github ? last : null;
+    let foreign: string[] = [];
+    if (lease === null) {
+      const replaced = await git("rev-list", "--reverse", own, ...(ontoCommit ? [`^${ontoCommit}`] : []));
+      foreign = replaced === "" ? [] : replaced.split("\n");
+    }
+    return { task, tip, limit, commits, onto, prBase, shipped, rewrite: true, lease, foreign };
+  }
+
   // "+" lines: the commits that have no equivalent patch upstream yet.
   const cherry = await git("cherry", upstream, tip, limit);
   const commits = cherry.split("\n").filter((l) => l.startsWith("+ ")).map((l) => l.slice(2));
 
-  const prBase = prBaseFor(base, below);
   let onto: string;
   if (base.kind === "task") {
     onto = shipped ? own : githubRef(prBase);
@@ -107,7 +152,40 @@ export async function planTask(
     const dropped = cherry.split("\n").some((l) => l.startsWith("- "));
     onto = shipped ? own : dropped ? limit : await git("merge-base", limit, tip);
   }
-  return { task, tip, limit, commits, onto, prBase, shipped };
+  return { task, tip, limit, commits, onto, prBase, shipped, rewrite: false, lease: null, foreign: [] };
+}
+
+// A branch already on GitHub only grew when (a) stacked, the branch below as
+// this ship leaves it is still under it, and (b) every commit GitHub has beyond
+// what the branch stands on, and that an earlier ship of this clone pushed,
+// has a patch-equivalent among the task's own commits in the team mirror.
+// Otherwise the cascade rewrote it. A commit someone else pushed on GitHub
+// (never pushed by this clone) does not make a rewrite: the replay goes on
+// top of it, as before. Without a record of the last ship (another clone),
+// any commit without an equivalent makes a rewrite, whose foreign commits the
+// human sees before anything is replaced.
+async function needsRewrite(
+  git: (...args: string[]) => Promise<string>, exists: (ref: string) => Promise<boolean>,
+  p: { tip: string; own: string; limit: string; base: Base; prBase: string; last: string | null;
+    below?: { merged: boolean; changes?: boolean } },
+  isAncestor: (a: string, b: string) => Promise<boolean>,
+  forgeOwn: (c: string) => Promise<boolean>,
+): Promise<boolean> {
+  if (p.base.kind === "task" && p.below && !p.below.merged) {
+    if (p.below.changes) return true;
+    const under = githubRef(p.prBase);
+    if (await exists(under)) {
+      const r = await git("merge-base", p.own, under);
+      if (r !== (await git("rev-parse", under))) return true;
+    }
+  }
+  const cherry = await git("cherry", p.tip, p.own, p.limit);
+  const missing: string[] = [];
+  for (const l of cherry.split("\n")) if (l.startsWith("+ ") && !(await forgeOwn(l.slice(2)))) missing.push(l.slice(2));
+  if (missing.length === 0) return false;
+  if (p.last === null) return true;
+  for (const c of missing) if (await isAncestor(c, p.last)) return true;
+  return false;
 }
 
 // How many commits of a merged task GitHub has no patch-equivalent of: on its

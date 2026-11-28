@@ -266,3 +266,186 @@ test("sign: true signs the replayed commits with the developer's own key", { ski
   git(layout.clone, "fetch", "-q", "origin");
   assert.deepEqual(git(layout.clone, "log", "--format=%G?", "origin/main..origin/agent/t").split("\n"), ["G", "G"]);
 });
+
+// ------------------------------------------------- partie 3d, tâche 4 : la réécriture sous bail
+
+// Une pile A (sur main) puis B (sur A) dans le miroir d'équipe.
+const TICKET = { id: "T-1", branches: ["agent/a", "agent/b"] };
+const onA: Base = { kind: "task", task: "a" };
+function stackAB() {
+  layout.commit(layout.container, "agent/a", "a1");
+  git(layout.container, "checkout", "-q", "-b", "agent/b", "agent/a");
+  fs.writeFileSync(path.join(layout.container, "b1"), "b1\n");
+  git(layout.container, "add", "b1");
+  git(layout.container, "commit", "-q", "-m", "add b1");
+  git(layout.container, "checkout", "-q", "main");
+}
+// Ce que fait la cascade dans le miroir : B reposée sur A, ses propres commits
+// rejoués (sans rebase, que le hook de la VM de dev refuse dans une commande).
+function restackB(change?: string) {
+  const own = git(layout.container, "rev-list", "--reverse", "old-a..agent/b").split("\n");
+  git(layout.container, "checkout", "-q", "-B", "agent/b", "agent/a");
+  for (const c of own) git(layout.container, "cherry-pick", c);
+  if (change !== undefined) {
+    fs.writeFileSync(path.join(layout.container, "b1"), change);
+    git(layout.container, "commit", "-q", "-a", "--amend", "--no-edit");
+  }
+  git(layout.container, "checkout", "-q", "main");
+}
+const planOf = async (task: string, base: Base, below?: { prBase: string; merged: boolean; changes?: boolean }) => {
+  sync();
+  return planTask(hybridContext(), layout.clone, C, task, base, below);
+};
+const shipped = (b: string) => git(layout.clone, "rev-parse", `refs/forge/shipped/${b}`);
+const fetchGithub = () => git(layout.clone, "fetch", "-q", "origin");
+async function shipAB() {
+  const a = await planOf("a", main);
+  assert.equal(await replayAndPush(hybridContext(), layout.clone, a, { sign: false, ticket: TICKET }), "pushed");
+  fetchGithub();
+  const b = await planOf("b", onA, { prBase: "agent/a", merged: false, changes: true });
+  assert.equal(await replayAndPush(hybridContext(), layout.clone, b, { sign: false, ticket: TICKET }), "pushed");
+  fetchGithub();
+}
+
+test("a fix on A, B rebased onto it: A grows by one commit, B is rewritten onto the new A, under the lease", async () => {
+  stackAB();
+  await shipAB();
+  assert.equal(shipped("agent/b"), git(layout.github, "rev-parse", "agent/b"));
+  // Le correctif sur A, puis la cascade sur B.
+  git(layout.container, "branch", "-q", "-f", "old-a", "agent/a");
+  layout.commit(layout.container, "agent/a", "fix");
+  restackB();
+  const a = await planOf("a", main);
+  assert.deepEqual([a.rewrite, a.commits.length], [false, 1]);
+  assert.equal(await replayAndPush(hybridContext(), layout.clone, a, { sign: false, ticket: TICKET }), "pushed");
+  fetchGithub();
+  const b = await planOf("b", onA, { prBase: "agent/a", merged: false, changes: true });
+  assert.equal(b.rewrite, true);
+  assert.equal(b.lease, git(layout.github, "rev-parse", "agent/b"));
+  assert.deepEqual(b.foreign, []);
+  assert.equal(b.commits.length, 1);
+  assert.equal(await replayAndPush(hybridContext(), layout.clone, b, { sign: false, ticket: TICKET }), "pushed");
+  assert.equal(git(layout.github, "rev-parse", "agent/b^"), git(layout.github, "rev-parse", "agent/a"));
+});
+
+test("B rebased with a conflict resolved (its patch changed): a rewrite pushed under the lease", async () => {
+  stackAB();
+  await shipAB();
+  git(layout.container, "branch", "-q", "-f", "old-a", "agent/a");
+  restackB("b1, resolved\n");
+  const b = await planOf("b", onA, { prBase: "agent/a", merged: false });
+  assert.deepEqual([b.rewrite, b.lease !== null], [true, true]);
+  assert.equal(await replayAndPush(hybridContext(), layout.clone, b, { sign: false, ticket: TICKET }), "pushed");
+  assert.equal(git(layout.github, "show", "agent/b:b1"), "b1, resolved");
+});
+
+test("a commit pushed on GitHub's B after the last ship: the rewrite is refused, nothing overwritten", async () => {
+  stackAB();
+  await shipAB();
+  git(layout.container, "branch", "-q", "-f", "old-a", "agent/a");
+  restackB("b1, resolved\n");
+  const b = await planOf("b", onA, { prBase: "agent/a", merged: false });
+  // Quelqu'un pousse sur GitHub entre le plan et la poussée.
+  const other = path.join(layout.root, "other-b");
+  execFileSync("git", ["clone", "-q", "-b", "agent/b", layout.github, other], { stdio: "ignore" });
+  git(other, "config", "user.name", "Other");
+  git(other, "config", "user.email", "other@example.com");
+  fs.writeFileSync(path.join(other, "x"), "x\n");
+  git(other, "add", "x");
+  git(other, "commit", "-q", "-m", "other x");
+  git(other, "push", "-q", "origin", "agent/b");
+  const theirs = git(layout.github, "rev-parse", "agent/b");
+  await assert.rejects(replayAndPush(hybridContext(), layout.clone, b, { sign: false, ticket: TICKET }), (e: unknown) =>
+    e instanceof ForgeError &&
+    e.message === "GitHub's agent/b moved since the last ship: nothing was overwritten. Run forge fetch T-1 and look at it.");
+  assert.equal(git(layout.github, "rev-parse", "agent/b"), theirs);
+});
+
+test("a clone that never shipped the branch: the rewrite carries the commits it would replace, and no lease", async () => {
+  stackAB();
+  await shipAB();
+  git(layout.clone, "update-ref", "-d", "refs/forge/shipped/agent/b");
+  git(layout.container, "branch", "-q", "-f", "old-a", "agent/a");
+  restackB("b1, resolved\n");
+  const b = await planOf("b", onA, { prBase: "agent/a", merged: false });
+  assert.deepEqual([b.rewrite, b.lease], [true, null]);
+  assert.deepEqual(b.foreign, [git(layout.github, "rev-parse", "agent/b")]);
+  // Sans bail, rien n'est forcé.
+  await assert.rejects(replayAndPush(hybridContext(), layout.clone, b, { sign: false, ticket: TICKET }),
+    /agent\/b: no lease on GitHub's branch: not forced/);
+});
+
+test("a rewrite of a branch outside the ticket's list is refused", async () => {
+  stackAB();
+  await shipAB();
+  git(layout.container, "branch", "-q", "-f", "old-a", "agent/a");
+  restackB("b1, resolved\n");
+  const b = await planOf("b", onA, { prBase: "agent/a", merged: false });
+  const before = git(layout.github, "rev-parse", "agent/b");
+  await assert.rejects(replayAndPush(hybridContext(), layout.clone, b, { sign: false, ticket: { id: "T-1", branches: ["agent/a"] } }),
+    (e: unknown) => e instanceof ForgeError && e.message === "agent/b is not a branch of T-1: not forced");
+  assert.equal(git(layout.github, "rev-parse", "agent/b"), before);
+});
+
+// ------------------------------------------------- partie 3d, tâche 6 : la spec, commitée avec le ship
+
+const SPEC = { ticket: "T-1", path: "docs/specs/T-1.md", text: "# Spec T-1\n\nExit with 1.\n" };
+const specPlan = async (task: string, base: Base, spec = SPEC, below?: { prBase: string; merged: boolean; changes?: boolean }) => {
+  sync();
+  return planTask(hybridContext(), layout.clone, C, task, base, below, { spec: { ticket: spec.ticket, path: spec.path } });
+};
+const shipSpec = async (p: TaskPlan, spec = SPEC) =>
+  replayAndPush(hybridContext(), layout.clone, p, { sign: false, ticket: TICKET, spec });
+const onGithubT = (ref = "agent/t") => git(layout.github, "rev-parse", ref);
+
+test("a first ship with a spec adds one commit on top that writes the file, with its trailer", async () => {
+  layout.commit(layout.container, "agent/t", "a");
+  assert.equal(await shipSpec(await specPlan("t", main)), "pushed");
+  assert.equal(git(layout.github, "show", "agent/t:docs/specs/T-1.md"), SPEC.text.trimEnd());
+  assert.equal(git(layout.github, "log", "-1", "--format=%s%n%(trailers:key=Forge-Spec,valueonly)", "agent/t"), "docs: spec of T-1\nT-1");
+  assert.equal(git(layout.github, "rev-list", "--count", "main..agent/t"), "2");
+});
+
+test("a second ship with the same spec adds nothing and plans no rewrite; a changed spec adds one commit", async () => {
+  layout.commit(layout.container, "agent/t", "a");
+  await shipSpec(await specPlan("t", main));
+  fetchGithub();
+  const first = onGithubT();
+  const again = await specPlan("t", main);
+  assert.deepEqual([again.rewrite, again.commits.length], [false, 0]);
+  assert.equal(await shipSpec(again), "nothing");
+  assert.equal(onGithubT(), first);
+  const changed = { ...SPEC, text: "# Spec T-1\n\nExit with 3.\n" };
+  const third = await specPlan("t", main, changed);
+  assert.equal(third.rewrite, false);
+  assert.equal(await shipSpec(third, changed), "pushed");
+  assert.equal(git(layout.github, "rev-parse", "agent/t^"), first);
+  assert.equal(git(layout.github, "show", "agent/t:docs/specs/T-1.md"), "# Spec T-1\n\nExit with 3.");
+});
+
+test("after a rewrite of the top branch, the spec file is there once", async () => {
+  stackAB();
+  const a = await planOf("a", main);
+  await replayAndPush(hybridContext(), layout.clone, a, { sign: false, ticket: TICKET });
+  fetchGithub();
+  await shipSpec(await specPlan("b", onA, SPEC, { prBase: "agent/a", merged: false, changes: true }));
+  fetchGithub();
+  git(layout.container, "branch", "-q", "-f", "old-a", "agent/a");
+  layout.commit(layout.container, "agent/a", "fix");
+  restackB();
+  await replayAndPush(hybridContext(), layout.clone, await planOf("a", main), { sign: false, ticket: TICKET });
+  fetchGithub();
+  const b = await specPlan("b", onA, SPEC, { prBase: "agent/a", merged: false, changes: true });
+  assert.equal(b.rewrite, true);
+  assert.equal(await shipSpec(b), "pushed");
+  const specCommits = git(layout.github, "log", "--format=%s", "agent/a..agent/b").split("\n").filter((s) => s === "docs: spec of T-1");
+  assert.equal(specCommits.length, 1);
+  assert.equal(git(layout.github, "show", "agent/b:docs/specs/T-1.md"), SPEC.text.trimEnd());
+});
+
+test("a spec path whose folder is a file in the tree is refused before anything is pushed", async () => {
+  layout.commit(layout.container, "agent/t", "docs");
+  const before = git(layout.github, "for-each-ref", "refs/heads/agent");
+  await assert.rejects(shipSpec(await specPlan("t", main)), /agent\/t: docs is a file in the tree: the spec cannot go to docs\/specs\/T-1\.md/);
+  assert.equal(git(layout.github, "for-each-ref", "refs/heads/agent"), before);
+});

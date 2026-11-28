@@ -24,7 +24,7 @@ test("no project by default", () => {
 
 test("a minimal project gets its defaults", () => {
   assert.deepEqual(parse(proj()).project, {
-    repositories: { web: { repo: "o/web", lfs: false } },
+    repositories: { web: { repo: "o/web", lfs: false, specDir: null } },
     executors: { count: 2, memory: null, cpu: null, strict: false, plugins: [], env: null },
     tickets: { base: "~/.local/share/agent-forge/tickets", prefix: "T" },
     gitIdentity: null,
@@ -33,7 +33,7 @@ test("a minimal project gets its defaults", () => {
 
 test("a full project round-trips", () => {
   const project = {
-    repositories: { web: { repo: "o/web", lfs: true }, "api-2": { repo: "o/api", lfs: false } },
+    repositories: { web: { repo: "o/web", lfs: true, specDir: "docs/specs" }, "api-2": { repo: "o/api", lfs: false, specDir: null } },
     executors: { count: 16, memory: "8GiB", cpu: 4, strict: true, plugins: ["p@m"], env: "~/x.env" },
     tickets: { base: "/srv/tickets", prefix: "FG" },
     gitIdentity: { name: "N", email: "n@example.com" },
@@ -50,6 +50,10 @@ test("each rule is refused naming its key", () => {
   rejects(proj({ repositories: { "a--b": { repo: "o/web" } } }), /project\.repositories\.a--b/);
   rejects(proj({ repositories: { web: { repo: "nope" } } }), /project\.repositories\.web\.repo/);
   rejects(proj({ repositories: { web: { repo: "o/w", lfs: 1 } } }), /project\.repositories\.web\.lfs/);
+  // Le dossier où le ship copie la spec : relatif, sans « .. » ni segment vide.
+  for (const specDir of ["../x", "/abs", "a//b", "a/../b", "", "a/", "a b", "x".repeat(201)]) {
+    rejects(proj({ repositories: { web: { repo: "o/w", specDir } } }), /project\.repositories\.web\.specDir/);
+  }
   rejects(proj({ executors: {} }), /project\.executors\.count/);
   rejects(proj({ executors: { count: 0 } }), /project\.executors\.count/);
   rejects(proj({ executors: { count: 17 } }), /project\.executors\.count/);

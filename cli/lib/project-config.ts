@@ -6,7 +6,9 @@ import { validateRepo } from "./validate.ts";
 import { isTicketId } from "./tickets/model.ts";
 
 export type ProjectConfig = {
-  repositories: Record<string, { repo: string; lfs: boolean }>;
+  // `specDir` : le dossier du dépôt où `forge ship` copie la spec d'un ticket
+  // (`<specDir>/<ticket>.md`), null : pas de copie.
+  repositories: Record<string, { repo: string; lfs: boolean; specDir: string | null }>;
   executors: { count: number; memory: string | null; cpu: number | null; strict: boolean; plugins: string[]; env: string | null };
   tickets: { base: string; prefix: string };
   gitIdentity: { name: string; email: string } | null;
@@ -18,6 +20,13 @@ export type ProjectConfig = {
 export const REPO_NAME = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 export const DEFAULT_TICKETS_BASE = "~/.local/share/agent-forge/tickets";
 
+// Un dossier relatif d'un dépôt : des segments de [A-Za-z0-9._-], ni « / » en
+// tête, ni « . » ni « .. », ni segment vide ; 200 octets au plus.
+export function isSpecDir(v: unknown): v is string {
+  if (typeof v !== "string" || v === "" || Buffer.byteLength(v, "utf8") > 200) return false;
+  return v.split("/").every((s) => /^[A-Za-z0-9._-]+$/.test(s) && s !== "." && s !== "..");
+}
+
 export function parseProject(path: string, raw: unknown): ProjectConfig | null {
   if (raw === undefined || raw === null) return null;
   const { invalid, fields } = configHelpers(path);
@@ -28,14 +37,18 @@ export function parseProject(path: string, raw: unknown): ProjectConfig | null {
   for (const [name, value] of Object.entries(reposRaw)) {
     const at = `project.repositories.${name}`;
     if (!REPO_NAME.test(name)) throw invalid(at, "a repository name such as web or api-2 ([a-z0-9], dashes)", name);
-    const r = fields(value, at, ["repo", "lfs"]);
+    const r = fields(value, at, ["repo", "lfs", "specDir"]);
     if (typeof r.repo !== "string") throw invalid(`${at}.repo`, "an owner/repo string", r.repo);
     try {
       validateRepo(r.repo);
     } catch {
       throw invalid(`${at}.repo`, "owner/repo", r.repo);
     }
-    repositories[name] = { repo: r.repo, lfs: bool(invalid, `${at}.lfs`, r.lfs) };
+    if (r.specDir !== undefined && r.specDir !== null && !isSpecDir(r.specDir)) {
+      throw invalid(`${at}.specDir`, "a relative folder of the repository, such as docs/specs", r.specDir);
+    }
+    const specDir = r.specDir === undefined || r.specDir === null ? null : r.specDir;
+    repositories[name] = { repo: r.repo, lfs: bool(invalid, `${at}.lfs`, r.lfs), specDir };
   }
   if (Object.keys(repositories).length === 0) {
     throw invalid("project.repositories", "an object with at least one repository", p.repositories);
