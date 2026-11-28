@@ -241,10 +241,10 @@ export class FakeIncus {
   private network(p: string, rest: string[], input?: string): ExecResult {
     const [sub, name] = rest;
     if (sub === "list-leases") {
-      // The leases of the requested project's instances, running or not (a
-      // stopped instance keeps its lease), from their `ipv4`.
+      // The leases of the requested project's running instances, from their
+      // `ipv4`: Incus 7.0.2 drops a stopped instance's dynamic lease.
       if (!this.networks.has(name)) return fail("Network not found");
-      const leases = [...this.instances.get(p)!.values()].filter((i) => i.ipv4).map((i) => ({
+      const leases = [...this.instances.get(p)!.values()].filter((i) => i.ipv4 && i.status === "Running").map((i) => ({
         hostname: i.name, address: i.ipv4, hwaddr: "", type: "dynamic", location: "none", project: p,
       }));
       return ok(JSON.stringify(leases));

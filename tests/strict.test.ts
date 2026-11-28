@@ -273,3 +273,15 @@ test("after start: strict applies the settings, open clears them, unset does not
   await egressAfterStart(ctx, "web", "open");
   assert.ok(cmds({ calls: ctx.calls.slice(mark) }).some((c) => c.includes(" rm -f ")));
 });
+
+// Ce que `forge egress log` lit pour nommer le container une fois arrêté.
+test("after start: the container's address is recorded in user.forge.ipv4, once", async () => {
+  const { fake, ctx } = setup();
+  fake.instances.get(PROJECT)!.get("web")!.status = "Running";
+  fake.instances.get(PROJECT)!.get("web")!.ipv4 = "10.77.0.57";
+  await egressAfterStart(ctx, "web", "strict");
+  assert.equal(fake.instances.get(PROJECT)!.get("web")!.config["user.forge.ipv4"], "10.77.0.57");
+  const before = ctx.calls.length;
+  await egressAfterStart(ctx, "web", "strict");
+  assert.deepEqual(writes({ calls: ctx.calls.slice(before) }), []);
+});
