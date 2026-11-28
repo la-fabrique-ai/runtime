@@ -6,7 +6,7 @@ import { ForgeError, mustSucceed, type Context } from "./context.ts";
 import { loadConfig } from "./config.ts";
 import { requireStrictIncus } from "./host.ts";
 import {
-  configGet, configSetMany, execArgv, execAsAgent, forgeProject, listInstances, listObjects, pullText, pushText,
+  configGet, configSetMany, execArgv, execAsAgent, forgeProject, incus, listInstances, listObjects, pullText, pushText,
   startInstance, type Instance,
 } from "./incus.ts";
 import { proxyPlan, type ProxyPlan } from "./ipv4.ts";
@@ -198,4 +198,18 @@ export async function egressBeforeStart(ctx: Context, container: string): Promis
 export async function egressAfterStart(ctx: Context, container: string, mode: EgressMode | null): Promise<void> {
   if (mode === "strict") await applyStrictSettings(ctx, container, currentPlan());
   else if (mode === "open") await clearStrictSettings(ctx, container);
+  if (mode !== null) await recordAddress(ctx, container);
+}
+
+// L'adresse du container, notée dans sa config (`user.forge.ipv4`) quand elle
+// a changé : `forge egress log` s'en sert pour le nommer une fois arrêté
+// (Incus 7.0.2 retire le bail DHCP d'un container arrêté). Au mieux : sans
+// adresse encore, ou sur un échec, rien n'est noté.
+export const ADDRESS_KEY = "user.forge.ipv4";
+async function recordAddress(ctx: Context, container: string): Promise<void> {
+  const found = (await listInstances(ctx)).find((i) => i.name === container);
+  if (!found || found.ipv4.length === 0) return;
+  const value = found.ipv4.join(",");
+  if (found.config[ADDRESS_KEY] === value) return;
+  await ctx.exec(incus("config", "set", container, `${ADDRESS_KEY}=${value}`));
 }

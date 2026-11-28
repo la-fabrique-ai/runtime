@@ -19,7 +19,7 @@ import { BRIDGE, effectiveEgress, egressNames, proxyInstance, type EgressMode } 
 import { SQUID_ACCESS_LOG } from "../proxy.ts";
 // The log's fields come from the agents' requests.
 import { printable } from "../printable.ts";
-import { ENV_KEYS, currentPlan, egressMismatch, proxyEnv, requireStrictRuntime } from "../strict.ts";
+import { ADDRESS_KEY, ENV_KEYS, currentPlan, egressMismatch, proxyEnv, requireStrictRuntime } from "../strict.ts";
 import { columnWidths, formatRow } from "../table.ts";
 import { resolveRepo } from "./resolve.ts";
 
@@ -76,15 +76,20 @@ async function cmdLog(ctx: Context, repo: string | undefined): Promise<number> {
   if (r.code !== 0) {
     throw new ForgeError(`${proxyInstance()} is not reachable; run 'forge setup' (${r.stderr.trim() || `exit code ${r.code}`})`);
   }
-  // The holder of each address: the DHCP leases first (a stopped instance
-  // keeps its lease but `incus list` shows it no address), then the current
+  // The holder of each address: the DHCP leases first, then the address forge
+  // recorded when each instance last started (Incus 7.0.2 drops a stopped
+  // instance's lease, and `incus list` shows it no address), then the current
   // addresses, which win. An address nobody holds is shown as is, and so is
   // one whose lease names no host ("*" is dnsmasq's placeholder).
   const holders = new Map<string, string>();
   for (const l of await listLeases(ctx, BRIDGE)) {
     if (l.hostname !== "" && l.hostname !== "*") holders.set(l.address, l.hostname);
   }
-  for (const i of await listInstances(ctx)) for (const a of i.ipv4) holders.set(a, i.name);
+  const instances = await listInstances(ctx);
+  for (const i of instances) {
+    for (const a of (i.config[ADDRESS_KEY] ?? "").split(",")) if (a !== "") holders.set(a, i.name);
+  }
+  for (const i of instances) for (const a of i.ipv4) holders.set(a, i.name);
 
   const rows: string[][] = [];
   for (const line of r.stdout.split("\n")) {

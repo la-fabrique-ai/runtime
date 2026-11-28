@@ -388,8 +388,9 @@ test("forge egress open, then strict, on a stopped container round-trips", { ski
 
   assert.match(listRow(), /\bstrict\b/, `forge list: ${listRow()}`);
   must("stop", incus(PROJECT, ["stop", S1]));
-  // Stopped, S1 has no address in `incus list`: its DHCP lease still names it
-  // in the log (the earlier tests left denied lines there).
+  // Stopped, S1 has no address in `incus list` and, with Incus 7.0.2, no lease:
+  // the address forge recorded at its start still names it in the log (the
+  // earlier tests left denied lines there).
   const stoppedLog = must("forge egress log, S1 stopped", forge(["egress", "log", SENTINEL])).stdout;
   assert.match(stoppedLog, new RegExp(`${S1}\\s+denied\\s+CONNECT\\s+example\\.org:443`), stoppedLog);
   assert.match(must("egress", forge(["egress", SENTINEL])).stdout, new RegExp(`^${SENTINEL}: strict$`, "m"));

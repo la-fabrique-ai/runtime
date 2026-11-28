@@ -274,26 +274,31 @@ const LOG = [
 ].join("\n");
 
 test("log maps addresses to container names and filters by repo", async () => {
-  const c = fakeContext({ incus: setup().fake, rules: [{ match: "tail -n 200", stdout: LOG }] });
+  const c = fakeContext({ incus: setup({ status: "Running" }).fake, rules: [{ match: "tail -n 200", stdout: LOG }] });
   assert.equal(await cmdEgress(c, "log"), 0);
   assert.match(c.out_lines[0], /^TIME\s+CONTAINER\s+RESULT\s+METHOD\s+HOST$/);
   assert.match(c.out_lines[1], /^2025-10-18T00:00:00Z\s+agent-o-r\s+allowed\s+CONNECT\s+api\.anthropic\.com:443$/);
   assert.match(c.out_lines[2], /^2025-10-18T00:01:00Z\s+10\.77\.0\.99\s+denied\s+CONNECT\s+example\.org:443$/);
   assert.equal(c.out_lines.length, 3);
 
-  const f = fakeContext({ incus: setup().fake, rules: [{ match: "tail -n 200", stdout: LOG }] });
+  const f = fakeContext({ incus: setup({ status: "Running" }).fake, rules: [{ match: "tail -n 200", stdout: LOG }] });
   await cmdEgress(f, "log", "o/r");
   assert.equal(f.out_lines.length, 2);
   assert.ok(f.out_lines[1].includes("agent-o-r"));
 });
 
-test("log names a stopped container through its DHCP lease", async () => {
+// Incus 7.0.2 ne liste plus le bail d'un container arrêté : forge retient
+// lui-même l'adresse d'un container au démarrage (user.forge.ipv4).
+test("log names a stopped container through the address forge recorded at its start", async () => {
   const { fake } = setup({ status: "Stopped" });
   const c = fakeContext({ incus: fake, rules: [{ match: "tail -n 200", stdout: LOG }] });
   await cmdEgress(c, "log", "o/r");
-  assert.ok(c.calls.some((x) => x.join(" ") === "incus --project agent-forge network list-leases forgebr0 -f json"));
-  assert.equal(c.out_lines.length, 2);
-  assert.match(c.out_lines[1], /^\S+\s+agent-o-r\s+allowed\s+CONNECT\s+api\.anthropic\.com:443$/);
+  assert.equal(c.out_lines.length, 1, "no lease and nothing recorded: the line is not this container's");
+  fake.instances.get(PROJECT)!.get(NAME)!.config["user.forge.ipv4"] = "10.77.0.57";
+  const named = fakeContext({ incus: fake, rules: [{ match: "tail -n 200", stdout: LOG }] });
+  await cmdEgress(named, "log", "o/r");
+  assert.equal(named.out_lines.length, 2);
+  assert.match(named.out_lines[1], /^\S+\s+agent-o-r\s+allowed\s+CONNECT\s+api\.anthropic\.com:443$/);
 });
 
 test("log: an instance's current address wins over a lease naming another host", async () => {
