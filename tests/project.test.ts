@@ -21,7 +21,7 @@ afterEach(() => {
 });
 
 const project = (lfs = false): ProjectConfig => ({
-  repositories: { web: { repo: "o/web", lfs } },
+  repositories: { web: { repo: "o/web", lfs, specDir: null } },
   executors: { count: 2, memory: null, cpu: null, strict: false, plugins: [], env: null },
   tickets: { base: "/t", prefix: "T" },
   gitIdentity: null,

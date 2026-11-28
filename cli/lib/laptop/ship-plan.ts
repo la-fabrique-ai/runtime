@@ -81,9 +81,12 @@ export const shippedRef = (task: string): string => `refs/forge/shipped/agent/${
 // `below`: the task this one is stacked on. `merged`: its PR is merged, the
 // task then goes onto that PR's base instead. `changes`: this ship pushes it
 // (it grows or is rewritten), so this task is rewritten onto it.
+// `opts.spec`: the ticket and the file the ship writes its spec to, on the top
+// branch: forge's own commit of that file on GitHub is not a divergence.
 export async function planTask(
   ctx: Context, root: string, remote: string, task: string, base: Base,
   below?: { prBase: string; merged: boolean; changes?: boolean },
+  opts: { spec?: { ticket: string; path: string } } = {},
 ): Promise<TaskPlan> {
   const git = async (...args: string[]) =>
     (await mustSucceed(`git ${args[0]}`, ctx.exec(["git", ...args], { cwd: root }))).stdout.trim();
@@ -108,7 +111,16 @@ export async function planTask(
   const last = shipped ? await resolveRef(ctx, root, shippedRef(task)) : null;
   const isAncestor = async (a: string, b: string) =>
     (await ctx.exec(["git", "merge-base", "--is-ancestor", a, b], { cwd: root })).code === 0;
-  if (shipped && await needsRewrite(git, exists, { tip, own, limit, base, prBase, last, below }, isAncestor)) {
+  // A commit of forge's spec (its trailer, that file alone) is forge's own: it
+  // is made again after a rewrite.
+  const spec = opts.spec;
+  const forgeOwn = async (c: string): Promise<boolean> => {
+    if (!spec) return false;
+    const trailer = await git("log", "-1", "--format=%(trailers:key=Forge-Spec,valueonly)", c);
+    if (trailer.trim() !== spec.ticket) return false;
+    return (await git("diff-tree", "--no-commit-id", "--name-only", "-r", c)) === spec.path;
+  };
+  if (shipped && await needsRewrite(git, exists, { tip, own, limit, base, prBase, last, below }, isAncestor, forgeOwn)) {
     // Every own commit of the task, onto the branch below as this ship leaves
     // it (the bottom: onto the merge base of its base and its tip).
     const list = await git("rev-list", "--reverse", tip, `^${limit}`);
@@ -157,6 +169,7 @@ async function needsRewrite(
   p: { tip: string; own: string; limit: string; base: Base; prBase: string; last: string | null;
     below?: { merged: boolean; changes?: boolean } },
   isAncestor: (a: string, b: string) => Promise<boolean>,
+  forgeOwn: (c: string) => Promise<boolean>,
 ): Promise<boolean> {
   if (p.base.kind === "task" && p.below && !p.below.merged) {
     if (p.below.changes) return true;
@@ -167,7 +180,8 @@ async function needsRewrite(
     }
   }
   const cherry = await git("cherry", p.tip, p.own, p.limit);
-  const missing = cherry.split("\n").filter((l) => l.startsWith("+ ")).map((l) => l.slice(2));
+  const missing: string[] = [];
+  for (const l of cherry.split("\n")) if (l.startsWith("+ ") && !(await forgeOwn(l.slice(2)))) missing.push(l.slice(2));
   if (missing.length === 0) return false;
   if (p.last === null) return true;
   for (const c of missing) if (await isAncestor(c, p.last)) return true;

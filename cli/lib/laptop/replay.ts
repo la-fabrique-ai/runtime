@@ -19,17 +19,23 @@ import { shippedRef, shortRef, type TaskPlan } from "./ship-plan.ts";
 // the LFS write path is designed separately.
 const gitIn = (dir: string, ...args: string[]): string[] => ["git", "-C", dir, "-c", "core.hooksPath=/dev/null", ...args];
 
+// The spec the ship commits on the top branch: `path` in the repository,
+// `text` the file's whole content (the laptop holds it, from the ticket base).
+export type SpecFile = { ticket: string; path: string; text: string };
+
 // `ticket`: the ticket being shipped and its branches, the only ones a rewrite
-// may replace.
+// may replace. `spec`: for the top branch, the spec to commit on top of it,
+// unless the file already holds that exact text.
 export async function replayAndPush(
-  ctx: Context, root: string, plan: TaskPlan, opts: { sign: boolean; ticket?: { id: string; branches: string[] } },
+  ctx: Context, root: string, plan: TaskPlan,
+  opts: { sign: boolean; ticket?: { id: string; branches: string[] }; spec?: SpecFile },
 ): Promise<"pushed" | "nothing"> {
   const branch = `agent/${plan.task}`;
   if (plan.rewrite) {
     if (!opts.ticket) throw new ForgeError(`${branch} was rewritten by a cascade: forge ship <ticket> replaces it, nothing was pushed`);
     if (!opts.ticket.branches.includes(branch)) throw new ForgeError(`${branch} is not a branch of ${opts.ticket.id}: not forced`);
     if (plan.lease === null) throw new ForgeError(`${branch}: no lease on GitHub's branch: not forced`);
-  } else if (plan.commits.length === 0) {
+  } else if (plan.commits.length === 0 && (!opts.spec || await specUnchanged(ctx, root, plan.onto, opts.spec))) {
     return "nothing";
   }
 
@@ -66,6 +72,7 @@ export async function replayAndPush(
       ));
       if (code !== 0) throw new ForgeError(await stoppedAt(ctx, tmp, plan));
     }
+    if (opts.spec) await commitSpec(ctx, tmp, branch, opts.spec, opts.sign);
 
     // The push's output is captured to read a rejection: an SSH key's touch
     // prompt would go unseen, so this line says what is waiting. A rewrite
@@ -94,6 +101,42 @@ export async function replayAndPush(
     if (removed.code !== 0) await ctx.exec(gitIn(root, "worktree", "remove", "--force", tmp));
     process.off("SIGINT", ignoreSigint);
   }
+}
+
+// The spec file at `at` (a full ref or a commit) already holds `spec.text`.
+async function specUnchanged(ctx: Context, root: string, at: string, spec: SpecFile): Promise<boolean> {
+  const r = await ctx.exec(gitIn(root, "cat-file", "blob", `${at}:${spec.path}`));
+  return r.code === 0 && r.stdout === spec.text;
+}
+
+// Writes the spec in the replay's worktree, by Node, never through a shell,
+// then one commit of that file alone with its trailer, signed like the others.
+// A folder of the path that is a file or a symbolic link in the agent's tree is
+// refused: Node would write through a link, out of the worktree.
+async function commitSpec(ctx: Context, tmp: string, branch: string, spec: SpecFile, sign: boolean): Promise<void> {
+  const parts = spec.path.split("/");
+  for (let i = 1; i <= parts.length; i++) {
+    const rel = parts.slice(0, i).join("/");
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(path.join(tmp, rel));
+    } catch {
+      break;
+    }
+    const last = i === parts.length;
+    if (st.isSymbolicLink() || (!last && !st.isDirectory()) || (last && !st.isFile())) {
+      throw new ForgeError(`${branch}: ${rel} is ${st.isSymbolicLink() ? "a symbolic link" : last ? "not a file" : "a file"} ` +
+        `in the tree: the spec cannot go to ${spec.path}`);
+    }
+  }
+  const file = path.join(tmp, spec.path);
+  if (fs.existsSync(file) && fs.readFileSync(file, "utf8") === spec.text) return;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, spec.text);
+  await mustSucceed("git add", ctx.exec(gitIn(tmp, "add", "--", spec.path)));
+  const code = await ctx.attach(gitIn(tmp, "commit", "--no-verify", ...(sign ? ["-S"] : []),
+    "-m", `docs: spec of ${spec.ticket}`, "-m", `Forge-Spec: ${spec.ticket}`));
+  if (code !== 0) throw new ForgeError(`${branch}: the commit of the spec stopped (the signing failed?): nothing was pushed`);
 }
 
 // Names the commit the cherry-pick stopped on, then abandons the pick. Without
