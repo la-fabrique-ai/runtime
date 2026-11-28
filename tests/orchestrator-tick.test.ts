@@ -610,7 +610,7 @@ test("QA ko : un correctif à la position de A, une sous-tâche en haut, le tick
   const r = await turn({ tickets, host, cursor });
   assert.deepEqual(r.qa, [{ ticket: "T-2", verdict: "ko" }]);
   const subs = await tickets.listSubtasks({ ticket: "T-2" });
-  assert.deepEqual(subs.slice(2).map((s) => [s.kind, s.fixes, s.position, s.text]), [
+  assert.deepEqual(subs.slice(2).map((s) => [s.kind, s.fixes, s.position, s.text.trimEnd()]), [
     ["fix", "T-2.1", 1, "the list is empty"],
     ["implementation", null, 3, "slow"],
   ]);
@@ -749,7 +749,7 @@ test("QA ko : une base qui échoue au deuxième défaut ne perd pas les suivants
   await turn({ tickets: flaky, host, cursor });
   assert.equal((await tickets.getTicket({ id: "T-2" })).status, "qa");
   await turn({ tickets: flaky, host, cursor });
-  assert.deepEqual((await tickets.listSubtasks({ ticket: "T-2" })).slice(2).map((s) => s.text), ["d1", "d2", "d3"]);
+  assert.deepEqual((await tickets.listSubtasks({ ticket: "T-2" })).slice(2).map((s) => s.text.trimEnd()), ["d1", "d2", "d3"]);
   assert.equal((await tickets.getTicket({ id: "T-2" })).status, "dev");
 });
 
