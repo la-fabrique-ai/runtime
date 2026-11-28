@@ -94,16 +94,35 @@ test("shipping twice signs only the new commits", async () => {
   assert.equal(p.onto, "refs/remotes/origin/agent/t");
 });
 
-test("outside commits on GitHub become the parent", async () => {
+// Ce clone n'a jamais livré agent/t : il ne peut pas dire si le commit de
+// GitHub vient d'un autre ship ou de quelqu'un d'autre. Le plan est une
+// réécriture qui le nomme, sans bail ; l'humain voit ce qui serait remplacé.
+test("a clone that never shipped the branch: an outside commit on GitHub makes a rewrite that names it", async () => {
   layout.commit(layout.container, "agent/t", "a.txt");
-  // Someone added a commit to agent/t on GitHub; the agent's own commit is not there yet.
   git(layout.container, "checkout", "-q", "-b", "outside", "main");
   layout.commit(layout.container, "outside", "z.txt");
   git(layout.container, "push", "-q", layout.github, "outside:refs/heads/agent/t");
   const p = await plan("t", main);
-  assert.equal(p.shipped, true);
-  assert.equal(p.onto, "refs/remotes/origin/agent/t");
+  assert.deepEqual([p.shipped, p.rewrite, p.lease], [true, true, null]);
   assert.deepEqual(subjects(p.commits), ["add a.txt"]);
+  assert.deepEqual(subjects(p.foreign), ["add z.txt"]);
+});
+
+// Livré par ce clone, puis un commit de quelqu'un d'autre sur GitHub : il
+// devient le parent, sans réécriture.
+test("outside commits on GitHub after this clone's ship become the parent", async () => {
+  layout.commit(layout.container, "agent/t", "a.txt");
+  pushSignedCopies("agent/t");
+  const signed = git(layout.container, "rev-parse", "signed");
+  layout.commit(layout.container, "signed", "z.txt");
+  publishSigned("t");
+  sync();
+  git(layout.clone, "update-ref", "refs/forge/shipped/agent/t", signed);
+  layout.commit(layout.container, "agent/t", "b.txt");
+  const p = await plan("t", main);
+  assert.deepEqual([p.shipped, p.rewrite], [true, false]);
+  assert.equal(p.onto, "refs/remotes/origin/agent/t");
+  assert.deepEqual(subjects(p.commits), ["add b.txt"]);
 });
 
 test("a stacked task excludes the commits of the task below", async () => {
@@ -152,9 +171,13 @@ const publishSigned = (task: string) => {
 test("signed copies, then an outside commit on GitHub: only the new commit is replayed", async () => {
   layout.commit(layout.container, "agent/t", "a.txt", "b.txt");
   pushSignedCopies("agent/t~1", "agent/t");
+  // Ce que ce clone a livré : les copies signées, avant le commit de dehors.
+  const signed = git(layout.container, "rev-parse", "signed");
   git(layout.container, "checkout", "-q", "signed");
   layout.commit(layout.container, "signed", "z.txt");
   publishSigned("t");
+  sync();
+  git(layout.clone, "update-ref", "refs/forge/shipped/agent/t", signed);
   layout.commit(layout.container, "agent/t", "c.txt");
   const p = await plan("t", main);
   assert.deepEqual(subjects(p.commits), ["add c.txt"]);

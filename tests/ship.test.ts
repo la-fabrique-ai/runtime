@@ -237,6 +237,9 @@ test("re-running right after signs nothing, pushes nothing and finds the PRs", a
 test("a conflict in the second task leaves the first one shipped and cleans up", async () => {
   layout.commit(layout.container, "agent/a", "a1.txt");
   git(layout.container, "push", "-q", "origin", "agent/a");
+  // A shipped by this clone: it records what it pushed (the lease of a rewrite).
+  git(layout.clone, "fetch", "-q", "origin");
+  git(layout.clone, "update-ref", "refs/forge/shipped/agent/a", git(layout.github, "rev-parse", "agent/a"));
   // On GitHub, someone adds the b.txt that the agent's B adds as well.
   pushElsewhere("agent/a", "b.txt", "outside\n");
   layout.commit(layout.container, "agent/a", "a2.txt");
