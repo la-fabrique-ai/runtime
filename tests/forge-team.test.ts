@@ -95,7 +95,7 @@ test("any other verb, or a bad argument, prints the usage and exits 64, without 
   for (const args of [["message", "agent-x", "Salut"], ["assign", "x", "t"], ["release", "x"], ["ask", "Quoi ?"], ["ask", "--recommended-file"], ["bogus"], [], ["done", "extra"], ["status", "x"]]) {
     const r = await run(args, "texte");
     assert.equal(r.code, 64, args.join(" "));
-    assert.match(r.stderr, /usage: forge-team done \[--report-file <file>\]\n\s+forge-team ask \[--recommended-file <file>\].*\n\s+forge-team status/);
+    assert.match(r.stderr, /usage: forge-team done \[--report-file <file>\] \[--qa-report-file <file>\]\n\s+forge-team ask \[--recommended-file <file>\].*\n\s+forge-team status/);
   }
   assert.deepEqual(received, []);
   assert.equal(probes, 0);
@@ -162,4 +162,34 @@ test("ask sends stdin as the question and the file as recommended, trailing newl
   const missing = await run(["ask", "--recommended-file", join(dir, "none.md")], "q");
   assert.equal(missing.code, 64);
   assert.equal(received.length, 3);
+});
+
+test("done --qa-report-file sends the parsed report as qa; a file that is not JSON exits 64 and sends nothing; status says the kind", async () => {
+  const qa = join(dir, "qa.json");
+  writeFileSync(qa, '{"verdict":"ko","defects":[{"subtask":"T-1.1","text":"empty"}]}\n');
+  const r = await run(["done", "--qa-report-file", qa], "");
+  assert.equal(r.code, 0);
+  assert.equal(received[0], JSON.stringify({ op: "done", report: null, qa: { verdict: "ko", defects: [{ subtask: "T-1.1", text: "empty" }] } }));
+  writeFileSync(qa, "not json");
+  const bad = await run(["done", "--qa-report-file", qa], "");
+  assert.equal(bad.code, 64);
+  assert.match(bad.stderr, /--qa-report-file/);
+  assert.equal(received.length, 1);
+  answer = '{"ok":true,"mission":{"kind":"qa","ticket":"T-1","subtask":"T-1.2","repository":"web","branch":"agent/T-1.2","base":"agent/T-1.1"}}';
+  assert.equal((await run(["status"], "")).stdout, "ok\nmission: qa T-1 (web) branch=agent/T-1.2 base=agent/T-1.1\n");
+});
+
+test("control: create-fixes sends the stdin array, create-ticket the stdin object; anything else on stdin exits 64", async () => {
+  answer = '{"ok":true,"subtasks":["T-1.3"]}';
+  const fixes = [{ fixes: "T-1.1", text: "empty" }];
+  const r = await control(["create-fixes", "T-1"], JSON.stringify(fixes));
+  assert.deepEqual([r.code, r.stdout], [0, "ok T-1.3\n"]);
+  assert.equal(received[0], JSON.stringify({ op: "create-fixes", id: "T-1", fixes }));
+  assert.equal((await control(["create-fixes", "T-1"], '{"fixes":null}')).code, 64);
+  answer = '{"ok":true,"id":"T-2"}';
+  const t = await control(["create-ticket", "T-1"], JSON.stringify({ title: "Spinner", text: "Show it." }));
+  assert.deepEqual([t.code, t.stdout], [0, "ok T-2\n"]);
+  assert.equal(received[1], JSON.stringify({ op: "create-ticket", from: "T-1", title: "Spinner", text: "Show it." }));
+  assert.equal((await control(["create-ticket", "T-1"], "[]")).code, 64);
+  assert.equal(received.length, 2);
 });

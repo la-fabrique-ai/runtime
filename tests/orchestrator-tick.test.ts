@@ -4,9 +4,10 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
+import { ConnectorError } from "../cli/lib/tickets/model.ts";
 import type { Connector } from "../cli/lib/tickets/connector.ts";
 import { HostError } from "../cli/lib/orchestrator/host.ts";
-import type { ExecutorStatus, HostApi, HostEvent, MissionSpec, SessionState } from "../cli/lib/orchestrator/host.ts";
+import type { ExecutorStatus, HostApi, HostEvent, MissionSpec, QaReport, SessionState, StackBranch, StackState } from "../cli/lib/orchestrator/host.ts";
 import { fileCursor, SILENT_SESSION_MS, tick } from "../cli/lib/orchestrator/tick.ts";
 import type { Cursor } from "../cli/lib/orchestrator/tick.ts";
 // Un tour : les tests passent leurs dépendances telles quelles.
@@ -22,6 +23,8 @@ class FakeHost implements HostApi {
   loseReply: ((m: MissionSpec) => boolean) | null = null;
   failStatus: Error | null = null;
   failEvents = false;
+  // L'état de chaque branche que rend `stack` (par défaut : à jour, jamais enregistrée).
+  stackStates = new Map<string, { current: boolean; builtOn: string | null }>();
   // Le plus grand id du journal ; `null` : celui du dernier évènement.
   last: number | null = null;
   constructor(names: string[]) {
@@ -61,7 +64,7 @@ class FakeHost implements HostApi {
     const e = this.executors.find((x) => x.name === name)!;
     const m = e.mission!;
     e.session = "done";
-    this.events_.push({ id: this.events_.length + 1, kind: "ask", executor: name, ticket: m.ticket, subtask: m.subtask, text, recommended });
+    this.events_.push({ id: this.events_.length + 1, kind: "ask", executor: name, ticket: m.ticket, subtask: m.subtask, text, recommended, mission: m.kind });
   }
   finish(name: string, o: { report?: string } = {}): void {
     const e = this.executors.find((x) => x.name === name)!;
@@ -69,13 +72,32 @@ class FakeHost implements HostApi {
     e.session = "done";
     this.events_.push({
       id: this.events_.length + 1, kind: "done", executor: name, ticket: m.ticket, subtask: m.subtask, branch: m.branch,
-      report: o.report ?? null,
+      report: o.report ?? null, mission: m.kind, qa: null,
     });
+  }
+  // L'agent de QA rend son compte rendu.
+  qaDone(name: string, qa: QaReport, report: string | null = "ran the checks"): void {
+    const e = this.executors.find((x) => x.name === name)!;
+    const m = e.mission!;
+    e.session = "done";
+    this.events_.push({
+      id: this.events_.length + 1, kind: "done", executor: name, ticket: m.ticket, subtask: m.subtask, branch: m.branch,
+      report, mission: "qa", qa,
+    });
+  }
+  async stack(branches: StackBranch[]): Promise<StackState[]> {
+    this.calls.push(`stack ${branches.map((b) => b.branch).join(" ")}`);
+    return branches.map((b) => ({ branch: b.branch, current: true, builtOn: null, ...this.stackStates.get(b.branch) }));
   }
 }
 
-const memCursor = (): Cursor & { value: number } => {
-  const c = { value: 0, read: () => c.value, write: (id: number) => void (c.value = id) };
+// `value` : le dernier évènement traité sans trou ; `seen` : ceux traités au-delà.
+const memCursor = (): Cursor & { value: number; seen: number[] } => {
+  const c = {
+    value: 0, seen: [] as number[],
+    read: () => ({ after: c.value, seen: c.seen }),
+    write: (s: { after: number; seen: number[] }) => void ((c.value = s.after), (c.seen = s.seen)),
+  };
   return c;
 };
 
@@ -154,7 +176,10 @@ test("rattrapage : un exécuteur qui tient une sous-tâche done est libéré, un
   const r = await turn({ tickets, host, cursor: memCursor() });
   assert.ok(host.calls.includes("release a"));
   assert.equal((await tickets.getTicket({ id: "T-1" })).status, "qa");
-  assert.deepEqual(r.assigned, [{ subtask: "T-2.1", executor: "a" }]);
+  // Le ticket passé en qa reçoit sa QA d'abord (a), puis T-2.1 part sur b.
+  assert.deepEqual(r.qa, [{ ticket: "T-1", verdict: "started" }]);
+  assert.deepEqual(host.assigned.map((x) => [x.to, x.mission.kind]), [["a", "qa"], ["b", "dev"]]);
+  assert.deepEqual(r.assigned, [{ subtask: "T-2.1", executor: "b" }]);
 });
 
 test("assign accepté mais réponse perdue : la sous-tâche repasse in-dev au tour suivant, son done est compté", async () => {
@@ -215,17 +240,19 @@ test("un seul exécuteur, un candidat prioritaire toujours refusé : le suivant 
   assert.deepEqual(r1.assigned, [{ subtask: "T-1.1", executor: "a" }]);
   assert.equal(await status(tickets, "T-2.1"), "ready");
   // a finit T-1.1 ; au tour suivant, T-2.1 est encore dans son délai : rien ne
-  // lui est tenté, elle ne repasse pas in-dev, a reste libre.
+  // lui est tenté, elle ne repasse pas in-dev ; a prend la QA de T-1.
   host.finish("a");
   host.calls = [];
   t = 60_000;
   const r2 = await turn({ tickets, host, cursor, refusals, now });
   assert.deepEqual(r2.completed, ["T-1.1"]);
   assert.deepEqual(r2.assigned, []);
-  assert.ok(!host.calls.some((c) => c.startsWith("assign")), host.calls.join("\n"));
+  assert.deepEqual(r2.qa, [{ ticket: "T-1", verdict: "started" }]);
+  assert.ok(!host.calls.includes("assign a T-2.1"), host.calls.join("\n"));
   assert.equal(await status(tickets, "T-2.1"), "ready");
-  // Le délai passé, elle est retentée.
+  // Le délai passé, et la QA de T-1 rendue à l'humain, elle est retentée.
   host.failAssign = null;
+  await tickets.setTicketStatus({ id: "T-1", status: "human-review" });
   t = 6 * 60_000;
   const r3 = await turn({ tickets, host, cursor, refusals, now });
   assert.deepEqual(r3.assigned, [{ subtask: "T-2.1", executor: "a" }]);
@@ -394,16 +421,18 @@ test("un ticket illisible est signalé, pas ignoré en silence", async () => {
   assert.match(r.problems[0], /^T-9: /);
 });
 
-test("fileCursor : absent ou illisible vaut 0, écrit puis relu", () => {
+test("fileCursor : absent ou illisible vaut 0, écrit puis relu, avec les ids vus au-delà", () => {
   const dir = mkdtempSync(join(tmpdir(), "forge-cursor-"));
   const path = join(dir, "cursor");
   const c = fileCursor(path);
-  assert.equal(c.read(), 0);
-  c.write(42);
-  assert.equal(c.read(), 42);
-  assert.equal(fileCursor(path).read(), 42);
+  assert.deepEqual(c.read(), { after: 0, seen: [] });
+  c.write({ after: 42, seen: [] });
+  assert.deepEqual(fileCursor(path).read(), { after: 42, seen: [] });
+  c.write({ after: 42, seen: [44, 45] });
+  assert.equal(readFileSync(path, "utf8"), "42 44,45\n");
+  assert.deepEqual(fileCursor(path).read(), { after: 42, seen: [44, 45] });
   writeFileSync(path, "abc");
-  assert.equal(c.read(), 0);
+  assert.deepEqual(c.read(), { after: 0, seen: [] });
 });
 
 test("fileCursor : un rename en échec ne laisse pas de temporaire", () => {
@@ -411,7 +440,7 @@ test("fileCursor : un rename en échec ne laisse pas de temporaire", () => {
   const path = join(dir, "cursor");
   mkdirSync(path); // un dossier non vide à la place du fichier : le rename échoue
   writeFileSync(join(path, "x"), "");
-  assert.throws(() => fileCursor(path).write(3));
+  assert.throws(() => fileCursor(path).write({ after: 3, seen: [] }));
   assert.deepEqual(readdirSync(dir), ["cursor"]);
 });
 
@@ -562,4 +591,273 @@ test("a sub-task handed out again after a request is launched as a resumed missi
   const m = host.assigned.at(-1)!.mission;
   assert.equal(m.subtask, "T-2.1");
   assert.ok(m.instruction.includes("This mission resumes: your branch already holds the earlier work."), m.instruction);
+});
+
+// T-2 : ses deux sous-tâches finies, en qa, et `a` qui tient sa QA.
+async function inQa(names = ["a"]): Promise<{ tickets: Connector; host: FakeHost; cursor: Cursor & { value: number; seen: number[] } }> {
+  const { tickets } = await setup();
+  for (const id of ["T-2.1", "T-2.2"]) await tickets.setSubtaskStatus({ id, status: "done" });
+  await tickets.setTicketStatus({ id: "T-2", status: "qa" });
+  const host = new FakeHost(names);
+  host.executors[0].mission = { kind: "qa", ticket: "T-2", subtask: "T-2.2", repository: "web", branch: "agent/T-2.2", base: "agent/T-2.1" };
+  host.executors[0].session = "working";
+  return { tickets, host, cursor: memCursor() };
+}
+
+test("QA ko : un correctif à la position de A, une sous-tâche en haut, le ticket en dev, le compte rendu gardé ; relu, rien de plus", async () => {
+  const { tickets, host, cursor } = await inQa();
+  host.qaDone("a", { verdict: "ko", defects: [{ subtask: "T-2.1", text: "the list is empty" }, { subtask: null, text: "slow" }] });
+  const r = await turn({ tickets, host, cursor });
+  assert.deepEqual(r.qa, [{ ticket: "T-2", verdict: "ko" }]);
+  const subs = await tickets.listSubtasks({ ticket: "T-2" });
+  assert.deepEqual(subs.slice(2).map((s) => [s.kind, s.fixes, s.position, s.text.trimEnd()]), [
+    ["fix", "T-2.1", 1, "the list is empty"],
+    ["implementation", null, 3, "slow"],
+  ]);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "dev");
+  const { comments } = await tickets.listComments({ ticket: "T-2" });
+  assert.deepEqual(comments.map((c) => [c.kind, c.author, c.text]), [["qa-report", "a", "ran the checks"]]);
+  assert.ok(host.calls.includes("release a"));
+  cursor.value = 0;
+  await turn({ tickets, host, cursor });
+  assert.equal((await tickets.listSubtasks({ ticket: "T-2" })).length, 4);
+  assert.equal((await tickets.listComments({ ticket: "T-2" })).comments.length, 1);
+});
+
+test("QA ok : le ticket en human-review ; un done de QA pour un ticket en dev ne change rien", async () => {
+  const { tickets, host, cursor } = await inQa();
+  host.qaDone("a", { verdict: "ok", defects: [] });
+  const r = await turn({ tickets, host, cursor });
+  assert.deepEqual(r.qa, [{ ticket: "T-2", verdict: "ok" }]);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "human-review");
+
+  const other = await inQa();
+  await other.tickets.setSubtaskStatus({ id: "T-2.2", status: "ready" });
+  await other.tickets.setTicketStatus({ id: "T-2", status: "dev" });
+  other.host.qaDone("a", { verdict: "ko", defects: [{ subtask: null, text: "x" }] });
+  const r2 = await turn(other);
+  assert.deepEqual(r2.qa, []);
+  assert.equal((await other.tickets.listSubtasks({ ticket: "T-2" })).length, 2);
+  assert.equal((await other.tickets.listComments({ ticket: "T-2" })).comments.length, 0);
+});
+
+const sub2 = async (c: Connector, id: string) => (await c.listSubtasks({ ticket: id.split(".")[0] })).find((s) => s.id === id)!;
+
+test("tour : une QA prend l'exécuteur libre avant une sous-tâche prête d'un ticket plus prioritaire", async () => {
+  const { tickets } = await setup();
+  await tickets.setSubtaskStatus({ id: "T-1.1", status: "done" });
+  await tickets.setTicketStatus({ id: "T-1", status: "qa" });
+  const host = new FakeHost(["a"]);
+  const r = await turn({ tickets, host, cursor: memCursor() });
+  assert.deepEqual(r.problems, []);
+  assert.deepEqual(r.qa, [{ ticket: "T-1", verdict: "started" }]);
+  const [m] = host.assigned;
+  assert.deepEqual([m.mission.kind, m.mission.subtask, m.mission.branch, m.mission.base], ["qa", "T-1.1", "agent/T-1.1", "origin/main"]);
+  assert.match(m.mission.instruction, /^\[forge\] mission qa T-1\n/);
+  assert.equal(await status(tickets, "T-2.1"), "ready");
+  assert.equal((await tickets.getTicket({ id: "T-1" })).status, "qa");
+});
+
+test("tour : une pile qui n'est plus à jour est rebasée avant la QA, puis la QA repart", async () => {
+  const { tickets, host, cursor } = await inQa();
+  host.executors[0].mission = null;
+  host.executors[0].session = "none";
+  await tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  host.stackStates.set("agent/T-2.2", { current: false, builtOn: "abc123" });
+  const r1 = await turn({ tickets, host, cursor });
+  assert.equal(host.assigned.length, 0);
+  assert.deepEqual(r1.qa, []);
+  const b = await sub2(tickets, "T-2.2");
+  assert.deepEqual([b.status, b.reason], ["ready", "rebase"]);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "dev");
+
+  await turn({ tickets, host, cursor });
+  const [m] = host.assigned;
+  assert.deepEqual([m.mission.kind, m.mission.subtask, m.mission.branch, m.mission.base], ["rebase", "T-2.2", "agent/T-2.2", "agent/T-2.1"]);
+  assert.ok(m.mission.instruction.includes("git rebase --onto team/agent/T-2.1 abc123"), m.mission.instruction);
+  assert.deepEqual([(await sub2(tickets, "T-2.2")).status, (await sub2(tickets, "T-2.2")).reason], ["in-dev", "rebase"]);
+
+  host.stackStates.clear();
+  host.finish("a");
+  const r3 = await turn({ tickets, host, cursor });
+  assert.deepEqual(r3.qa, [{ ticket: "T-2", verdict: "started" }]);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "qa");
+  assert.equal(host.assigned.at(-1)!.mission.kind, "qa");
+  assert.equal((await sub2(tickets, "T-2.2")).reason, null);
+});
+
+test("tour : un rebase arrêté par une question reste un rebase après la réponse", async () => {
+  const { tickets } = await setup();
+  await tickets.setSubtaskStatus({ id: "T-2.1", status: "done" });
+  await tickets.setSubtaskStatus({ id: "T-2.2", status: "ready", reason: "rebase" });
+  await tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  const host = new FakeHost(["a"]);
+  const cursor = memCursor();
+  await turn({ tickets, host, cursor });
+  assert.equal(host.assigned[0].mission.kind, "rebase");
+  host.ask("a", "Which side of the conflict?");
+  await turn({ tickets, host, cursor });
+  const b = await sub2(tickets, "T-2.2");
+  assert.deepEqual([b.status, b.reason], ["ready", "rebase"]);
+  const [req] = await tickets.listRequests({ ticket: "T-2" });
+  await tickets.answerRequest({ ticket: "T-2", id: req.id, text: "keep both" });
+  await turn({ tickets, host, cursor });
+  const last = host.assigned.at(-1)!.mission;
+  assert.deepEqual([last.kind, last.subtask], ["rebase", "T-2.2"]);
+  // Le rebase repart de zéro (il a été abandonné), avec la réponse de l'humain.
+  assert.ok(!last.instruction.includes("This mission resumes"), last.instruction);
+  assert.ok(last.instruction.includes("## Questions already answered\nQuestion:\nWhich side of the conflict?\nAnswer:\nkeep both"), last.instruction);
+});
+
+test("tour : une QA tenue n'est pas libérée tant que le ticket est en qa, puis l'est ; une QA perdue repart en QA", async () => {
+  const { tickets, host, cursor } = await inQa();
+  await turn({ tickets, host, cursor });
+  assert.ok(!host.calls.includes("release a"));
+  await tickets.setTicketStatus({ id: "T-2", status: "human-review" });
+  await turn({ tickets, host, cursor });
+  assert.ok(host.calls.includes("release a"));
+
+  const lost = await inQa();
+  lost.host.executors[0].session = "exited";
+  const r = await turn(lost);
+  assert.deepEqual(r.problems, []);
+  const [m] = lost.host.assigned;
+  assert.deepEqual([m.to, m.mission.kind, m.mission.subtask], ["a", "qa", "T-2.2"]);
+});
+
+test("tour : un ticket en qa dont une demande attend ne reçoit pas de QA", async () => {
+  const { tickets, host, cursor } = await inQa();
+  host.executors[0].mission = null;
+  host.executors[0].session = "none";
+  await tickets.openRequest({ ticket: "T-2", subtask: "T-2.2", text: "Which limit?" });
+  const r = await turn({ tickets, host, cursor });
+  assert.deepEqual(host.assigned.map((x) => x.mission.subtask), ["T-1.1"]);
+  assert.deepEqual(r.qa, []);
+});
+
+test("QA ko : une base qui échoue au deuxième défaut ne perd pas les suivants ; le tour d'après les crée", async () => {
+  const { tickets, host, cursor } = await inQa();
+  let fail = 1;
+  const flaky: Connector = {
+    ...tickets,
+    createSubtask: async (a) => {
+      if ((await tickets.listSubtasks({ ticket: a.ticket })).length === 3 && fail-- > 0) throw new ConnectorError("disk full");
+      return tickets.createSubtask(a);
+    },
+  };
+  host.qaDone("a", { verdict: "ko", defects: [{ subtask: "T-2.1", text: "d1" }, { subtask: "T-2.1", text: "d2" }, { subtask: null, text: "d3" }] });
+  await turn({ tickets: flaky, host, cursor });
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "qa");
+  await turn({ tickets: flaky, host, cursor });
+  assert.deepEqual((await tickets.listSubtasks({ ticket: "T-2" })).slice(2).map((s) => s.text.trimEnd()), ["d1", "d2", "d3"]);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "dev");
+});
+
+test("une QA dont la session est perdue repasse par la pile : sur une pile périmée, le rebase d'abord", async () => {
+  const lost = await inQa();
+  lost.host.executors[0].session = "exited";
+  lost.host.stackStates.set("agent/T-2.2", { current: false, builtOn: null });
+  await lost.tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  await turn(lost);
+  assert.ok(!lost.host.assigned.some((x) => x.mission.kind === "qa"));
+  assert.equal((await sub2(lost.tickets, "T-2.2")).reason, "rebase");
+});
+
+// Un évènement qui échoue à chaque tour (sa sous-tâche illisible) bloque le
+// curseur : les évènements d'après sont relus à chaque tour. Ils restent sans
+// effet, par leur id.
+const stuck = (tickets: Connector, ticket: string): Connector => ({
+  ...tickets,
+  listSubtasks: async (a) => {
+    if (a.ticket === ticket) throw new ConnectorError(`${ticket}: unreadable`);
+    return tickets.listSubtasks(a);
+  },
+});
+const brokenDone = (host: FakeHost, ticket: string): void => {
+  host.events_.push({
+    id: host.events_.length + 1, kind: "done", executor: "z", ticket, subtask: `${ticket}.1`, branch: `agent/${ticket}.1`,
+    report: null, mission: "dev", qa: null,
+  });
+};
+
+test("une QA ko relue derrière un évènement en échec ne recrée pas ses correctifs et ne libère pas la QA suivante", async () => {
+  const { tickets, host, cursor } = await inQa();
+  const base = stuck(tickets, "T-1");
+  brokenDone(host, "T-1");
+  host.qaDone("a", { verdict: "ko", defects: [{ subtask: "T-2.1", text: "the list is empty" }] });
+  await turn({ tickets: base, host, cursor });
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "dev");
+  const fix = (await tickets.listSubtasks({ ticket: "T-2" }))[2];
+  assert.equal(fix.kind, "fix");
+  // Le correctif fait, le ticket revient en qa et `a` tient sa nouvelle QA.
+  await tickets.setSubtaskStatus({ id: fix.id, status: "done" });
+  await tickets.setTicketStatus({ id: "T-2", status: "qa" });
+  host.executors[0].mission = { kind: "qa", ticket: "T-2", subtask: "T-2.2", repository: "web", branch: "agent/T-2.2", base: "agent/T-2.1" };
+  host.executors[0].session = "working";
+  host.calls = [];
+  await turn({ tickets: base, host, cursor });
+  assert.equal((await tickets.listSubtasks({ ticket: "T-2" })).length, 3);
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "qa");
+  assert.ok(!host.calls.includes("release a"), host.calls.join(","));
+});
+
+test("le done d'une sous-tâche relu derrière un évènement en échec ne la passe pas done pendant son rebase", async () => {
+  const { tickets } = await setup();
+  const host = new FakeHost(["a", "b"]);
+  const cursor = memCursor();
+  await tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  await turn({ tickets, host, cursor });
+  assert.equal(host.executors[0].mission?.subtask, "T-2.1");
+  const base = stuck(tickets, "T-1");
+  brokenDone(host, "T-1");
+  host.finish("a");
+  await turn({ tickets: base, host, cursor });
+  assert.equal(await status(tickets, "T-2.1"), "done");
+  // Plus tard, T-2.1 est rebasée par b.
+  await tickets.setSubtaskStatus({ id: "T-2.1", status: "in-dev", reason: "rebase" });
+  host.executors[1].mission = { kind: "rebase", ticket: "T-2", subtask: "T-2.1", repository: "web", branch: "agent/T-2.1", base: "origin/main" };
+  host.executors[1].session = "working";
+  await turn({ tickets: base, host, cursor });
+  assert.equal(await status(tickets, "T-2.1"), "in-dev");
+});
+
+test("une QA qui pose une question : la demande sur le haut de la pile, l'exécuteur libéré, le ticket en qa qui attend ; la QA repart avec la réponse", async () => {
+  const { tickets, host, cursor } = await inQa();
+  await tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  host.ask("a", "Does an empty name greet the world?");
+  const r = await turn({ tickets, host, cursor });
+  assert.deepEqual(r.problems, []);
+  const [req] = await tickets.listRequests({ ticket: "T-2", open: true });
+  assert.deepEqual([req.subtask, req.text], ["T-2.2", "Does an empty name greet the world?"]);
+  assert.ok(host.calls.includes("release a"));
+  assert.equal(await status(tickets, "T-2.2"), "done");
+  assert.equal((await tickets.getTicket({ id: "T-2" })).status, "qa");
+  assert.equal(host.assigned.length, 0);
+
+  await tickets.answerRequest({ ticket: "T-2", id: req.id, text: "yes" });
+  const r2 = await turn({ tickets, host, cursor });
+  assert.deepEqual(r2.qa, [{ ticket: "T-2", verdict: "started" }]);
+  const m = host.assigned.at(-1)!.mission;
+  assert.equal(m.kind, "qa");
+  assert.ok(m.instruction.includes("## Questions already answered\nQuestion:\nDoes an empty name greet the world?\nAnswer:\nyes"), m.instruction);
+});
+
+// Recette de la PR 199 : une revue qui change la spec (un code de sortie 3 au
+// lieu de 1) passe par un correctif ; la QA d'après ne doit pas le défaire.
+test("la mission de QA liste les correctifs du ticket avec leur texte, et dit qu'ils ne sont jamais des défauts", async () => {
+  const { tickets, host, cursor } = await inQa();
+  host.executors[0].mission = null;
+  host.executors[0].session = "none";
+  await tickets.setTicketStatus({ id: "T-1", status: "todo" });
+  const fix = await tickets.createSubtask({
+    ticket: "T-2", repository: "web", position: 1, rank: 3, kind: "fix", fixes: "T-2.1",
+    text: "Exit with code 3 on a bad flag, not 1.\nThe human asked for it in the review.",
+  });
+  await tickets.setSubtaskStatus({ id: fix.id, status: "done" });
+  await turn({ tickets, host, cursor });
+  const m = host.assigned.at(-1)!.mission;
+  assert.equal(m.kind, "qa");
+  assert.ok(m.instruction.includes(`## Fixes\n`), m.instruction);
+  assert.ok(m.instruction.includes(`${fix.id}, a fix of T-2.1:\nExit with code 3 on a bad flag, not 1.\nThe human asked for it in the review.`), m.instruction);
+  assert.ok(m.instruction.includes("What a fix asks for is never a defect"), m.instruction);
 });

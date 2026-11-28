@@ -9,38 +9,49 @@ import { ConnectorError } from "../tickets/model.ts";
 import type { Request, Subtask, Ticket } from "../tickets/model.ts";
 import { HostError } from "./host.ts";
 import type { AskEvent, DoneEvent, ExecutorStatus, HeldMission, HostApi, MissionSpec } from "./host.ts";
-import { candidates, missionBase, RuleError } from "./rule.ts";
-import type { Candidate } from "./rule.ts";
-import { devInstruction, missionFiles } from "./instruction.ts";
+import { branchOf, candidates, missionBase, qaCandidates, RuleError } from "./rule.ts";
+import type { Candidate, QaCandidate } from "./rule.ts";
+import { devInstruction, missionFiles, qaInstruction, rebaseInstruction } from "./instruction.ts";
+import { addFix } from "./fixes.ts";
 
-export type Cursor = { read(): number; write(id: number): void };
+// Le curseur : `after`, le dernier évènement traité sans trou avant lui ; `seen`,
+// les ids traités au-delà d'un évènement en échec. Chaque évènement n'a d'effet
+// qu'une fois, par son id : relu derrière un évènement bloqué, il est sauté.
+export type CursorState = { after: number; seen: number[] };
+export type Cursor = { read(): CursorState; write(s: CursorState): void };
 
 export type TickReport = {
   completed: string[];
   assigned: { subtask: string; executor: string }[];
   recovered: string[];
   problems: string[];
+  // Les QA de ce tour : lancées (`started`) ou rendues (`ok`, `ko`).
+  qa: { ticket: string; verdict: "ok" | "ko" | "started" }[];
 };
 
 type Picture = { ticket: Ticket; subtasks: Subtask[]; requests: Request[] };
 
-// Le curseur dans un fichier. Un fichier absent ou illisible vaut 0 : relire
-// les évènements est sans effet (une sous-tâche déjà `done` est sautée).
+// Le curseur dans un fichier : `<after>`, puis les ids de `seen` séparés par
+// des virgules (`12 14,15`). Un fichier absent ou illisible vaut 0 : tout est
+// relu, et seul l'état des tickets protège alors d'un double effet.
 export function fileCursor(path: string): Cursor {
+  const ZERO: CursorState = { after: 0, seen: [] };
   return {
     read() {
       try {
-        const text = readFileSync(path, "utf8").trim();
-        const n = Number(text);
-        return /^[0-9]+$/.test(text) && Number.isSafeInteger(n) ? n : 0;
+        const m = /^([0-9]+)(?: ([0-9]+(?:,[0-9]+)*))?$/.exec(readFileSync(path, "utf8").trim());
+        if (!m) return ZERO;
+        const nums = [m[1], ...(m[2]?.split(",") ?? [])].map(Number);
+        if (!nums.every(Number.isSafeInteger)) return ZERO;
+        return { after: nums[0], seen: nums.slice(1).filter((n) => n > nums[0]) };
       } catch {
-        return 0;
+        return ZERO;
       }
     },
-    write(id) {
+    write(c) {
       // Temporaire du même dossier puis rename : jamais de curseur à moitié écrit.
       const tmp = join(dirname(path), `.${basename(path)}.tmp-${randomUUID()}`);
-      writeFileSync(tmp, `${id}\n`, { flag: "wx" });
+      writeFileSync(tmp, `${c.after}${c.seen.length > 0 ? ` ${c.seen.join(",")}` : ""}\n`, { flag: "wx" });
       try {
         renameSync(tmp, path);
       } catch (e) {
@@ -86,7 +97,7 @@ type TickDeps = {
 };
 
 export async function tick(d: TickDeps): Promise<TickReport> {
-  const report: TickReport = { completed: [], assigned: [], recovered: [], problems: [] };
+  const report: TickReport = { completed: [], assigned: [], recovered: [], problems: [], qa: [] };
   try {
     await run(d, report);
   } catch (e) {
@@ -104,37 +115,57 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
   const now = d.now ?? Date.now;
 
   // 1. Évènements.
-  const after = cursor.read();
-  let reply = await host.events(after);
-  if (reply.last < after) {
-    // Le journal de l'hôte est reparti de zéro : le curseur aussi, et on relit
-    // tout dans le même tour (relire un évènement déjà traité est sans effet).
-    cursor.write(0);
+  let state = cursor.read();
+  let reply = await host.events(state.after);
+  if (reply.last < state.after) {
+    // Le journal de l'hôte est reparti de zéro : ses ids aussi. Le curseur
+    // repart à 0, sans ids vus, et on lit le nouveau journal dans le même tour.
+    state = { after: 0, seen: [] };
+    cursor.write(state);
     reply = await host.events(0);
   }
   const events = reply.events;
   // Le curseur n'avance que jusqu'au premier évènement en échec : celui-ci
   // sera relu au tour suivant. Les suivants sont traités quand même (un
-  // ticket illisible ne bloque pas les autres) et relus sans effet.
+  // ticket illisible ne bloque pas les autres) et leurs ids retenus dans
+  // `seen` : relus, ils sont sautés.
   let advance = true;
+  const seen = new Set(state.seen);
+  // Les tickets dont un évènement a échoué ce tour : leur statut ne bouge pas
+  // avant qu'il soit relu (une QA `ko` à moitié traitée garde le ticket en `qa`).
+  const pending = new Set<string>();
   for (const ev of events) {
-    try {
-      if (ev.kind === "ask") await onAsk(tickets, host, ev, report);
-      else await onDone(tickets, host, ev, report);
-    } catch (e) {
-      if (!local(e)) throw e;
-      report.problems.push(`${ev.ticket}: event ${ev.id} (${ev.subtask}): ${message(e)}`);
-      advance = false;
+    let ok = true;
+    if (!seen.has(ev.id)) {
+      try {
+        if (ev.kind === "ask") await onAsk(tickets, host, ev, report);
+        else if (ev.mission === "qa") await onQaDone(tickets, host, ev, report);
+        else await onDone(tickets, host, ev, report);
+      } catch (e) {
+        if (!local(e)) throw e;
+        report.problems.push(`${ev.ticket}: event ${ev.id} (${ev.subtask}): ${message(e)}`);
+        pending.add(ev.ticket);
+        ok = false;
+      }
     }
-    if (advance) cursor.write(ev.id);
+    if (!ok) advance = false;
+    if (advance) {
+      state = { after: ev.id, seen: [...seen].filter((id) => id > ev.id) };
+      seen.delete(ev.id);
+    } else if (ok) {
+      seen.add(ev.id);
+      state = { after: state.after, seen: [...seen].sort((a, b) => a - b) };
+    } else continue;
+    cursor.write(state);
   }
 
   // 2. Photographie.
   const executors = await host.status();
-  const listed = await tickets.listTickets({ status: ["dev"] });
+  const listed = await tickets.listTickets({ status: ["dev", "qa"] });
   for (const p of listed.problems) report.problems.push(`${p.id}: ${p.message}`);
   const picture: Picture[] = [];
-  const unreadable = new Set<string>();
+  // Un ticket illisible n'est touché par aucune règle (sa QA tenue n'est pas libérée).
+  const unreadable = new Set<string>(listed.problems.map((p) => p.id));
   for (const ticket of listed.tickets) {
     try {
       const subtasks = await tickets.listSubtasks({ ticket: ticket.id });
@@ -143,6 +174,19 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
       if (!(e instanceof ConnectorError)) throw e;
       report.problems.push(`${ticket.id}: ${e.message}`);
       unreadable.add(ticket.id);
+    }
+  }
+
+  // Un ticket en `qa` dont une sous-tâche n'est pas finie revient en `dev` (un
+  // crash entre les deux écritures du marquage d'un rebase, plus bas).
+  for (const { ticket, subtasks } of picture) {
+    if (ticket.status !== "qa" || subtasks.every((x) => x.status === "done") || pending.has(ticket.id)) continue;
+    try {
+      await tickets.setTicketStatus({ id: ticket.id, status: "dev" });
+      ticket.status = "dev";
+    } catch (e) {
+      if (!local(e)) throw e;
+      report.problems.push(`${ticket.id}: back to dev: ${message(e)}`);
     }
   }
 
@@ -170,6 +214,16 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
   for (const ex of executors) {
     const m = ex.mission;
     if (!m) continue;
+    if (m.kind === "qa") {
+      // Une QA tient la sous-tâche du haut, finie : elle n'est libérée que
+      // quand son ticket n'est plus en `qa`.
+      if (unreadable.has(m.ticket)) continue;
+      if (picture.find((p) => p.ticket.id === m.ticket)?.ticket.status !== "qa") {
+        await host.release(ex.name);
+        ex.mission = null;
+      }
+      continue;
+    }
     const s = picture.find((p) => p.ticket.id === m.ticket)?.subtasks.find((x) => x.id === m.subtask);
     if (!s) continue;
     if (s.status === "done") {
@@ -179,7 +233,7 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
     } else if (s.status === "ready") {
       // Tenue mais `ready` : l'hôte a accepté un assign dont la réponse s'est perdue.
       try {
-        await tickets.setSubtaskStatus({ id: s.id, status: "in-dev" });
+        await tickets.setSubtaskStatus({ id: s.id, status: "in-dev", ...keep(s) });
         s.status = "in-dev";
       } catch (e) {
         if (!local(e)) throw e;
@@ -189,9 +243,11 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
   }
   // Un ticket dont toutes les sous-tâches (au moins une) sont `done` passe `qa`.
   for (const { ticket, subtasks } of picture) {
+    if (ticket.status !== "dev") continue;
     if (subtasks.length === 0 || !subtasks.every((x) => x.status === "done") || waiting.has(ticket.id)) continue;
     try {
       await tickets.setTicketStatus({ id: ticket.id, status: "qa" });
+      ticket.status = "qa";
     } catch (e) {
       if (!local(e)) throw e;
       report.problems.push(`${ticket.id}: to qa: ${message(e)}`);
@@ -202,7 +258,7 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
     for (const s of subtasks) {
       if (s.status !== "in-dev" || held.has(s.id)) continue;
       try {
-        await tickets.setSubtaskStatus({ id: s.id, status: "ready" });
+        await tickets.setSubtaskStatus({ id: s.id, status: "ready", ...keep(s) });
         s.status = "ready";
       } catch (e) {
         if (!local(e)) throw e;
@@ -211,14 +267,68 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
     }
   }
 
-  // 4. Distribution.
-  const found = candidates(picture, held, waiting);
-  report.problems.push(...found.problems);
+  // 4. Distribution : la QA d'abord (§2.5 : finir avant de commencer).
   // Un exécuteur `unknown` (container arrêté, hôte sans réponse) n'est pas libre.
   const free = executors.filter((e) => e.mission === null && e.session !== "unknown").map((e) => e.name).sort();
   const t = now();
   for (const [id, until] of refusals) if (until <= t) refusals.delete(id);
   const refusedBy = new Map<string, number>();
+  // Un refus de l'hôte : la mission attend son délai, l'exécuteur reste libre
+  // pour le tour, en fin de file, sauf s'il a déjà refusé ailleurs dans ce tour.
+  const refused = (key: string, to: string): void => {
+    refusals.set(key, t + RETRY_AFTER_REFUSAL_MS);
+    const n = (refusedBy.get(to) ?? 0) + 1;
+    refusedBy.set(to, n);
+    if (n < REFUSALS_PER_EXECUTOR) free.push(to);
+  };
+  const touched = new Set<string>();
+  const qa = qaCandidates(picture.filter((p) => p.ticket.status === "qa" && !waiting.has(p.ticket.id)));
+  report.problems.push(...qa.problems);
+  const qaHeld = new Set(executors.flatMap((e) => (e.mission?.kind === "qa" ? [e.mission.ticket] : [])));
+  for (const q of qa.candidates) {
+    const key = `${q.ticket.id} qa`;
+    if (qaHeld.has(q.ticket.id) || refusals.has(key)) continue;
+    // La cascade : la plus basse branche qui n'est plus posée sur la pointe de
+    // ce qu'il y a en dessous est rebasée d'abord ; aucune QA sur une pile périmée.
+    let states;
+    try {
+      states = await host.stack(q.stack);
+    } catch (e) {
+      if (!(e instanceof HostError)) throw e;
+      report.problems.push(`${q.ticket.id}: stack: ${e.message}`);
+      continue;
+    }
+    const stale = states.findIndex((x) => !x.current);
+    if (stale >= 0) {
+      touched.add(q.ticket.id);
+      const s = q.subtasks[stale]!;
+      try {
+        // La sous-tâche d'abord : un crash avant le ticket le laisse en `qa`
+        // avec une sous-tâche pas finie, que la photographie remet en `dev`.
+        await tickets.setSubtaskStatus({ id: s.id, status: "ready", reason: "rebase" });
+        s.status = "ready";
+        s.reason = "rebase";
+        await tickets.setTicketStatus({ id: q.ticket.id, status: "dev" });
+        q.ticket.status = "dev";
+      } catch (e) {
+        if (!local(e)) throw e;
+        report.problems.push(`${q.ticket.id}: ${s.id} to rebase: ${message(e)}`);
+      }
+      continue;
+    }
+    const to = free.shift();
+    if (to === undefined) continue;
+    const ex = executors.find((e) => e.name === to)!;
+    if (await launchQa(tickets, host, to, q, report)) {
+      ex.mission = heldOf(q);
+      report.qa.push({ ticket: q.ticket.id, verdict: "started" });
+    } else {
+      refused(key, to);
+    }
+  }
+
+  const found = candidates(picture.filter((p) => p.ticket.status === "dev" && !touched.has(p.ticket.id)), held, waiting);
+  report.problems.push(...found.problems);
   for (const c of found.candidates) {
     const id = c.subtask.id;
     if (failed.has(id) || refusals.has(id)) continue;
@@ -228,14 +338,9 @@ async function run(d: TickDeps, report: TickReport): Promise<void> {
       report.assigned.push({ subtask: id, executor: to });
       continue;
     }
-    // Refusée par l'hôte : la sous-tâche attend son délai, l'exécuteur reste
-    // libre pour le tour, en fin de file (le suivant le précède), sauf s'il a
-    // déjà refusé ailleurs dans ce tour.
+    // Refusée par l'hôte : la sous-tâche attend son délai (voir `refused`).
     if (failed.has(id)) {
-      refusals.set(id, t + RETRY_AFTER_REFUSAL_MS);
-      const n = (refusedBy.get(to) ?? 0) + 1;
-      refusedBy.set(to, n);
-      if (n < REFUSALS_PER_EXECUTOR) free.push(to);
+      refused(id, to);
     } else {
       free.unshift(to); // la base n'a pas pu passer la sous-tâche in-dev : l'hôte n'y est pour rien
     }
@@ -304,6 +409,33 @@ async function onDone(tickets: Connector, host: HostApi, ev: DoneEvent, report: 
   }
 }
 
+// Le `done` d'une QA, dans cet ordre, chaque étape sans effet si on la rejoue :
+// le compte rendu libre gardé en commentaire `qa-report` ; `ko` : un correctif
+// par défaut, dans l'ordre du compte rendu, puis le ticket en `dev` ; `ok` : le
+// ticket en `human-review` ; puis l'émetteur libéré s'il tient encore cette QA.
+// Le statut du ticket change en dernier : un crash avant lui rejoue l'étape
+// entière, et addFix ne crée rien deux fois. Un ticket qui n'est plus en `qa`
+// (évènement relu) : rien.
+async function onQaDone(tickets: Connector, host: HostApi, ev: DoneEvent, report: TickReport): Promise<void> {
+  const ticket = await tickets.getTicket({ id: ev.ticket });
+  if (ticket.status !== "qa" || ev.qa === null) return;
+  const qa = ev.qa;
+  const text = ev.report ?? `QA verdict: ${qa.verdict} (no report).`;
+  // Rejouée, l'étape ne regarde que le dernier compte rendu : c'est le sien.
+  const { comments } = await tickets.listComments({ ticket: ev.ticket });
+  const last = comments.filter((c) => c.kind === "qa-report").at(-1);
+  if (!last || last.author !== ev.executor || last.text !== text) {
+    await tickets.addComment({ ticket: ev.ticket, author: ev.executor, kind: "qa-report", text });
+  }
+  if (qa.verdict === "ko") {
+    for (const d of qa.defects) await addFix(tickets, ticket, { fixes: d.subtask, text: d.text });
+  }
+  await tickets.setTicketStatus({ id: ev.ticket, status: qa.verdict === "ko" ? "dev" : "human-review" });
+  report.qa.push({ ticket: ev.ticket, verdict: qa.verdict });
+  const holder = (await host.status()).find((e) => e.name === ev.executor);
+  if (holder?.mission?.kind === "qa" && holder.mission.ticket === ev.ticket) await host.release(ev.executor);
+}
+
 // Un `ask` (décision 35) : le développeur a rendu son travail en cours avec une
 // question pour l'humain. Dans cet ordre : la demande, la libération de
 // l'émetteur s'il tient encore la sous-tâche, la sous-tâche `ready`. Le ticket
@@ -311,6 +443,7 @@ async function onDone(tickets: Connector, host: HostApi, ev: DoneEvent, report: 
 // rouvre pas une demande déjà là, et ne touche pas à une sous-tâche qu'un autre
 // exécuteur tient.
 async function onAsk(tickets: Connector, host: HostApi, ev: AskEvent, report: TickReport): Promise<void> {
+  if (ev.mission === "qa") return onQaAsk(tickets, host, ev);
   const subtasks = await tickets.listSubtasks({ ticket: ev.ticket });
   const s = subtasks.find((x) => x.id === ev.subtask);
   if (!s) return void report.problems.push(`${ev.ticket}: event ${ev.id}: sub-task not found: ${ev.subtask}`);
@@ -322,15 +455,33 @@ async function onAsk(tickets: Connector, host: HostApi, ev: AskEvent, report: Ti
   // La base Markdown garde une réponse recommandée d'une ligne dans l'en-tête
   // de la demande ; plus longue, elle va dans son texte. Un retour chariot
   // (un fichier en CRLF) compte comme un saut de ligne : l'en-tête refuse les deux.
+  await openOnce(tickets, ev, s.id);
+  if (holds) await host.release(ev.executor);
+  if (s.status !== "ready") await tickets.setSubtaskStatus({ id: s.id, status: "ready", ...keep(s) });
+}
+
+// La demande d'un ask, sur `subtask`, sauf si elle est déjà ouverte (relu).
+async function openOnce(tickets: Connector, ev: AskEvent, subtask: string): Promise<void> {
   const rec = ev.recommended;
   const multi = rec !== null && /[\r\n]/.test(rec);
   const text = multi ? `${ev.text}\n\nRecommended answer:\n${rec}` : ev.text;
   const open = await tickets.listRequests({ ticket: ev.ticket, open: true });
-  if (!open.some((r) => r.subtask === s.id && r.text === text)) {
-    await tickets.openRequest({ ticket: ev.ticket, subtask: s.id, text, ...(rec !== null && !multi ? { recommended: rec } : {}) });
+  if (!open.some((r) => r.subtask === subtask && r.text === text)) {
+    await tickets.openRequest({ ticket: ev.ticket, subtask, text, ...(rec !== null && !multi ? { recommended: rec } : {}) });
   }
-  if (holds) await host.release(ev.executor);
-  if (s.status !== "ready") await tickets.setSubtaskStatus({ id: s.id, status: "ready" });
+}
+
+// L'ask d'une QA : la demande sur le ticket (sous-tâche : celle du haut, que la
+// QA tient), puis l'émetteur libéré s'il tient encore cette QA. Aucune
+// sous-tâche ne change : le ticket reste en `qa` et attend la réponse ; l'étape
+// de la QA la relance ensuite, la réponse dans « Questions already answered ».
+// Un ticket qui n'est plus en `qa` : rien.
+async function onQaAsk(tickets: Connector, host: HostApi, ev: AskEvent): Promise<void> {
+  const ticket = await tickets.getTicket({ id: ev.ticket });
+  if (ticket.status !== "qa") return;
+  await openOnce(tickets, ev, ev.subtask);
+  const holder = (await host.status()).find((e) => e.name === ev.executor);
+  if (holder?.mission?.kind === "qa" && holder.mission.ticket === ev.ticket) await host.release(ev.executor);
 }
 
 // Une mission dont la session est perdue : libérée, puis relancée sur le même
@@ -348,6 +499,15 @@ async function recover(
   // Ticket illisible : déjà signalé, on ne touche à rien.
   if (unreadable.has(held.ticket)) return;
   const entry = picture.find((p) => p.ticket.id === held.ticket);
+  if (held.kind === "qa") {
+    // Une QA perdue est libérée ; tant que son ticket est en `qa`, l'étape de
+    // la QA, plus bas dans le tour, la relance en QA, après le contrôle de la
+    // pile (jamais une QA sur une pile périmée).
+    await host.release(ex.name);
+    ex.mission = null;
+    if (entry?.ticket.status !== "qa") report.problems.push(`${held.ticket}: its QA is no longer to do, ${ex.name} released`);
+    return;
+  }
   const s = entry?.subtasks.find((x) => x.id === held.subtask);
   if (!entry || !s || s.status === "done") {
     await host.release(ex.name);
@@ -356,8 +516,10 @@ async function recover(
     return;
   }
   let base: string;
+  let branch: string;
   try {
     base = missionBase(entry.ticket, entry.subtasks, s);
+    branch = branchOf(entry.subtasks, s);
   } catch (e) {
     if (!(e instanceof RuleError)) throw e;
     report.problems.push(`${held.ticket}: ${e.message}`);
@@ -365,7 +527,7 @@ async function recover(
   }
   await host.release(ex.name);
   ex.mission = null;
-  if (await launch(tickets, host, ex.name, { ticket: entry.ticket, subtask: s, base }, true, failed, report)) {
+  if (await launch(tickets, host, ex.name, { ticket: entry.ticket, subtask: s, base, kind: held.kind === "rebase" || s.reason === "rebase" ? "rebase" : "dev", branch }, true, failed, report)) {
     ex.mission = held;
     report.recovered.push(s.id);
   }
@@ -390,16 +552,33 @@ async function launch(
     const requests = (await tickets.listRequests({ ticket: c.ticket.id })).filter((r) => r.subtask === s.id);
     const answered = requests.filter((r) => r.answer !== null);
     // Une sous-tâche qui a déjà une demande a été rendue en cours (ask) : sa
-    // branche porte le travail d'avant, la mission reprend.
-    if (requests.length > 0) resumed = true;
+    // branche porte le travail d'avant, la mission dev reprend. Un rebase
+    // arrêté par une question a été abandonné : il repart de zéro.
+    if (requests.length > 0 && c.kind === "dev") resumed = true;
+    let instruction: string;
+    if (c.kind === "rebase") {
+      // Le commit sur lequel la branche était posée, que l'hôte a retenu.
+      let builtOn: string | null;
+      try {
+        const [state] = await host.stack([{ repository: s.repository, branch: c.branch, base: c.base }]);
+        builtOn = state?.builtOn ?? null;
+      } catch (e) {
+        if (!(e instanceof HostError)) throw e;
+        report.problems.push(`${c.ticket.id}: ${s.id}: stack: ${e.message}`);
+        return false;
+      }
+      instruction = rebaseInstruction(c, builtOn, resumed, answered);
+    } else {
+      instruction = devInstruction(c, resumed, { answered, files });
+    }
     mission = {
-      kind: "dev",
+      kind: c.kind,
       ticket: c.ticket.id,
       subtask: s.id,
       repository: s.repository,
-      branch: `agent/${s.id}`,
+      branch: c.branch,
       base: c.base,
-      instruction: devInstruction(c, resumed, { answered, files }),
+      instruction,
       files,
     };
   } catch (e) {
@@ -409,7 +588,7 @@ async function launch(
   }
   try {
     if (s.status !== "in-dev") {
-      await tickets.setSubtaskStatus({ id: s.id, status: "in-dev" });
+      await tickets.setSubtaskStatus({ id: s.id, status: "in-dev", ...keep(s) });
       s.status = "in-dev";
     }
   } catch (e) {
@@ -424,12 +603,44 @@ async function launch(
     failed.add(s.id);
     report.problems.push(`${c.ticket.id}: assign ${s.id} to ${to}: ${describe(e)}`);
     try {
-      await tickets.setSubtaskStatus({ id: s.id, status: "ready" });
+      await tickets.setSubtaskStatus({ id: s.id, status: "ready", ...keep(s) });
       s.status = "ready";
     } catch (e2) {
       if (!local(e2)) throw e2;
       report.problems.push(`${c.ticket.id}: ${s.id} back to ready: ${message(e2)}`);
     }
+    return false;
+  }
+}
+
+// Une sous-tâche garde sa raison `rebase` jusqu'à `done` : chaque statut que le
+// tour écrit avant la repasse, sinon un rebase interrompu reviendrait en dev.
+function keep(s: Subtask): { reason?: "rebase" } {
+  return s.reason === "rebase" ? { reason: "rebase" } : {};
+}
+
+const heldOf = (q: QaCandidate): HeldMission => ({
+  kind: "qa", ticket: q.ticket.id, subtask: q.top.id, repository: q.top.repository, branch: `agent/${q.top.id}`, base: q.base,
+});
+
+// Assigne la QA d'un ticket : aucun statut ne change dans la base. Un refus
+// de l'hôte devient un problème. Renvoie vrai si assignée.
+async function launchQa(tickets: Connector, host: HostApi, to: string, q: QaCandidate, report: TickReport): Promise<boolean> {
+  let mission: MissionSpec;
+  try {
+    const files = missionFiles(await tickets.readMission({ ticket: q.ticket.id }));
+    const answered = (await tickets.listRequests({ ticket: q.ticket.id })).filter((r) => r.answer !== null);
+    mission = { ...heldOf(q), instruction: qaInstruction(q, { answered, files }), files };
+  } catch (e) {
+    if (!local(e)) throw e;
+    report.problems.push(`${q.ticket.id}: qa: mission files: ${message(e)}`);
+    return false;
+  }
+  try {
+    await host.assign(to, mission);
+    return true;
+  } catch (e) {
+    report.problems.push(`${q.ticket.id}: assign its QA to ${to}: ${describe(e)}`);
     return false;
   }
 }

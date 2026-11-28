@@ -7,11 +7,16 @@ import { dirname, join } from "node:path";
 import { ForgeError } from "./context.ts";
 import { apiDataDir } from "./paths.ts";
 
+// `builtOn` : le commit de sa base sur lequel la branche était posée à son
+// dernier rendu (null : jamais enregistré).
 export type BranchRecord = {
   branch: string; repository: string; ticket: string; subtask: string; base: string; executor: string | null;
+  builtOn: string | null;
 };
 
 const KEYS = ["base", "branch", "executor", "repository", "subtask", "ticket"];
+// Une fiche écrite par la partie 2 n'a pas `builtOn` : elle se lit avec null.
+const KEYS_BUILT = [...KEYS, "builtOn"].sort();
 
 export function branchRecordsPath(): string {
   return join(apiDataDir(), "branches.json");
@@ -27,11 +32,14 @@ function parse(path: string, text: string): BranchRecord[] {
   return o.records.map((r: unknown, i: number) => {
     if (typeof r !== "object" || r === null || Array.isArray(r)) throw bad(`record ${i} is not an object`);
     const rec = r as Record<string, unknown>;
-    if (Object.keys(rec).sort().join() !== KEYS.join()) throw bad(`record ${i} has the wrong keys`);
+    const keys = Object.keys(rec).sort().join();
+    if (keys !== KEYS.join() && keys !== KEYS_BUILT.join()) throw bad(`record ${i} has the wrong keys`);
     for (const k of KEYS) {
       if (k === "executor" ? rec[k] !== null && typeof rec[k] !== "string" : typeof rec[k] !== "string") throw bad(`record ${i}: bad ${k}`);
     }
-    return rec as BranchRecord;
+    const builtOn = rec.builtOn ?? null;
+    if (builtOn !== null && typeof builtOn !== "string") throw bad(`record ${i}: bad builtOn`);
+    return { ...(rec as Omit<BranchRecord, "builtOn">), builtOn };
   });
 }
 
@@ -49,9 +57,26 @@ export function branchRecord(repository: string, branch: string, path: string = 
 // assign, release et done (plan 1c Task 5) sont sérialisés par `exclusive()`.
 // L'écriture passe par un fichier temporaire du même dossier puis un rename,
 // pour qu'un lecteur ne voie jamais un fichier à moitié écrit.
-export function recordBranch(r: BranchRecord, path: string = branchRecordsPath()): void {
-  const records = readBranchRecords(path).filter((x) => !(x.repository === r.repository && x.branch === r.branch));
-  records.push(r);
+// Une fiche déjà là garde son `builtOn` : seul un rendu le change (setBuiltOn).
+export function recordBranch(r: Omit<BranchRecord, "builtOn">, path: string = branchRecordsPath()): void {
+  const all = readBranchRecords(path);
+  const builtOn = all.find((x) => x.repository === r.repository && x.branch === r.branch)?.builtOn ?? null;
+  const records = all.filter((x) => !(x.repository === r.repository && x.branch === r.branch));
+  const { branch, repository, ticket, subtask, base, executor } = r;
+  records.push({ branch, repository, ticket, subtask, base, executor, builtOn });
+  write(records, path);
+}
+
+// Ne change que le `builtOn` de la fiche ; une branche sans fiche n'en reçoit pas.
+export function setBuiltOn(repository: string, branch: string, sha: string, path: string = branchRecordsPath()): void {
+  const records = readBranchRecords(path);
+  const r = records.find((x) => x.repository === repository && x.branch === branch);
+  if (!r) return;
+  r.builtOn = sha;
+  write(records, path);
+}
+
+function write(records: BranchRecord[], path: string): void {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700); // un dossier déjà là est resserré aussi

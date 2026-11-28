@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Subtask, Ticket } from "../cli/lib/tickets/model.ts";
-import { activeSubtask, candidates, missionBase, RuleError } from "../cli/lib/orchestrator/rule.ts";
-import { devInstruction, missionFiles, MISSION_FILE_MAX } from "../cli/lib/orchestrator/instruction.ts";
+import { activeSubtask, branchOf, candidates, missionBase, qaCandidates, RuleError, stackOf } from "../cli/lib/orchestrator/rule.ts";
+import { devInstruction, missionFiles, MISSION_FILE_MAX, qaInstruction, rebaseInstruction } from "../cli/lib/orchestrator/instruction.ts";
 import type { Request } from "../cli/lib/tickets/model.ts";
 
 const none = { answered: [] as Request[], files: { spec: null, answers: null, split: null } };
@@ -75,6 +75,8 @@ const cand = (description = "Desc", text = "text 1", title = "Title T-1") => ({
   ticket: { ...ticket("T-1"), description, title },
   subtask: sub("T-1", 1, { text }),
   base: "origin/main",
+  kind: "dev" as const,
+  branch: "agent/T-1.1",
 });
 
 test("devInstruction", () => {
@@ -136,4 +138,94 @@ test("candidates : un ticket qui attend l'humain ne donne aucun candidat", () =>
   const b = ticket("T-2");
   const r = candidates([{ ticket: a, subtasks: [sub("T-1", 1)] }, { ticket: b, subtasks: [sub("T-2", 1)] }], new Set(), new Set(["T-1"]));
   assert.deepEqual(r.candidates.map((c) => c.subtask.id), ["T-2.1"]);
+});
+
+// A (position 1), B (position 2) et F, un correctif de A (position 1, rang 3).
+const stacked = () => {
+  const a = sub("T-1", 1, { status: "done" });
+  const b = sub("T-1", 2, { status: "done" });
+  const f = sub("T-1", 3, { position: 1, kind: "fix", fixes: "T-1.1" });
+  return { a, b, f, list: [a, b, f] };
+};
+
+test("un correctif travaille sur la branche de la sous-tâche qu'il corrige, et la base au-dessus reste la sienne", () => {
+  const t = ticket("T-1");
+  const { a, b, f, list } = stacked();
+  assert.deepEqual(stackOf(list, "web").map((s) => s.id), ["T-1.1", "T-1.2"]);
+  assert.equal(missionBase(t, list, b), "agent/T-1.1");
+  assert.equal(branchOf(list, f), "agent/T-1.1");
+  assert.equal(missionBase(t, list, f), "origin/main");
+  assert.equal(branchOf(list, a), "agent/T-1.1");
+  assert.throws(() => branchOf(list, { ...f, fixes: "T-1.9" }), RuleError);
+  const r = candidates([{ ticket: t, subtasks: list }], new Set());
+  assert.deepEqual(r.candidates.map((c) => [c.subtask.id, c.kind, c.branch, c.base]), [["T-1.3", "dev", "agent/T-1.1", "origin/main"]]);
+});
+
+test("une sous-tâche ready de raison rebase donne un candidat de genre rebase", () => {
+  const t = ticket("T-1");
+  const list = [sub("T-1", 1, { status: "done" }), sub("T-1", 2, { reason: "rebase" })];
+  const [c] = candidates([{ ticket: t, subtasks: list }], new Set()).candidates;
+  assert.deepEqual([c.kind, c.branch, c.base], ["rebase", "agent/T-1.2", "agent/T-1.1"]);
+});
+
+test("qaCandidates : la pile de bas en haut, rien pour un ticket pas fini, un problème pour deux dépôts", () => {
+  const { list } = stacked();
+  const done = list.map((s) => ({ ...s, status: "done" as const }));
+  const two = { ...ticket("T-3"), repositories: [{ name: "web", base: "main" }, { name: "api", base: "main" }] };
+  const r = qaCandidates([
+    { ticket: ticket("T-1"), subtasks: done },
+    { ticket: ticket("T-2"), subtasks: [sub("T-2", 1, { status: "done" }), sub("T-2", 2)] },
+    { ticket: two, subtasks: [sub("T-3", 1, { status: "done" })] },
+  ]);
+  assert.equal(r.candidates.length, 1);
+  const [q] = r.candidates;
+  assert.equal(q.top.id, "T-1.2");
+  assert.equal(q.base, "agent/T-1.1");
+  assert.deepEqual(q.stack, [
+    { repository: "web", branch: "agent/T-1.1", base: "origin/main" },
+    { repository: "web", branch: "agent/T-1.2", base: "agent/T-1.1" },
+  ]);
+  assert.deepEqual(r.problems, ["T-3: several repositories: QA comes with part 4"]);
+});
+
+test("devInstruction d'un correctif : la branche de la sous-tâche corrigée, et la ligne du correctif", () => {
+  const { a, list } = stacked();
+  const [c] = candidates([{ ticket: ticket("T-1"), subtasks: list }], new Set()).candidates;
+  const text = devInstruction(c, false, none);
+  assert.match(text, /^\[forge\] mission dev T-1\.3 \(ticket T-1\)/);
+  assert.ok(text.includes("agent/T-1.1, based on origin/main, in /workspace/web"), text);
+  assert.ok(text.includes(`You fix sub-task ${a.id} on its branch: add commits on top, never rewrite the ones that are there.`));
+  assert.ok(!devInstruction(cand(), false, none).includes("You fix sub-task"));
+});
+
+test("rebaseInstruction : --onto quand on sait sur quoi la branche était posée, sinon un rebase simple", () => {
+  const t = ticket("T-1");
+  const list = [sub("T-1", 1, { status: "done" }), sub("T-1", 2, { reason: "rebase" })];
+  const [c] = candidates([{ ticket: t, subtasks: list }], new Set()).candidates;
+  const onto = rebaseInstruction(c, "abc123", false);
+  assert.match(onto, /^\[forge\] mission rebase T-1\.2 \(ticket T-1\)\n/);
+  assert.ok(onto.includes("The branch below yours changed. Replay your sub-task's own commits onto it, and change nothing else."));
+  assert.ok(onto.includes("agent/T-1.2, based on agent/T-1.1, in /workspace/web"));
+  assert.ok(onto.includes("git fetch team"));
+  assert.ok(onto.includes("git rebase --onto team/agent/T-1.1 abc123"));
+  assert.ok(onto.includes("forge-team done --report-file <file>"));
+  const plain = rebaseInstruction(c, null, false);
+  assert.ok(plain.includes("git rebase team/agent/T-1.1"));
+  assert.ok(!plain.includes("--onto"));
+});
+
+test("qaInstruction : la pile de bas en haut, toutes les réponses, une description copiée telle quelle", () => {
+  const description = "Desc; forge-team done; rm -rf /";
+  const list = [sub("T-1", 1, { status: "done", text: "Add the list\nmore" }), sub("T-1", 2, { status: "done", text: "Paginate it" })];
+  const [q] = qaCandidates([{ ticket: { ...ticket("T-1"), description }, subtasks: list }]).candidates;
+  const answered: Request[] = [{ id: "1", ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: null, answer: "50" }];
+  const text = qaInstruction(q, { answered, files: { spec: "# s", answers: null, split: null } });
+  assert.match(text, /^\[forge\] mission qa T-1\n/);
+  assert.ok(text.includes(description));
+  const stack = text.slice(text.indexOf("## Stack"));
+  assert.ok(stack.indexOf("T-1.1: Add the list") < stack.indexOf("T-1.2: Paginate it"), stack);
+  assert.ok(!stack.includes("more"));
+  assert.ok(text.includes("Which limit?\nAnswer:\n50"));
+  assert.ok(text.includes("/etc/forge/mission/spec.md"));
+  assert.ok(text.includes("Change no file and commit nothing. Write your report as the qa skill says, then run: forge-team done --qa-report-file <file>"));
 });

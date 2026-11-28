@@ -1,4 +1,4 @@
-// Layer 3 for the project model (forge à tickets, plan 1c): a control
+// Layer 3 for the project model (forge à tickets, plans 1c and 3b): a control
 // container and two executors on a real Incus, opt-in, on a disposable Incus.
 //
 //   FORGE_INTEGRATION=1 node --test --test-concurrency=1 tests/integration/project.test.ts
@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { hcArgv } from "../../cli/lib/hc-session.ts";
 import { CONTROL, executorName } from "../../cli/lib/project.ts";
 import { ENABLED, incus, must, raw, run } from "./lib.ts";
-import { REPO, git, projectHarness, type ProjectHarness } from "./project-lib.ts";
+import { REPO, git, pause, projectHarness, type ProjectHarness } from "./project-lib.ts";
 
 const PROJECT = "forge-selftest-project";
 // Les suites incus (1, 2), egress (3) et orchestrator (5) ont les leurs.
@@ -214,4 +214,80 @@ test("a project: the control's socket and home, assign, done, a stacked sub-task
   assert.equal((await orch({ op: "release", to: EX2 })).ok, true);
   rows = await statusRows();
   assert.deepEqual([rows[EX2].mission, rows[EX2].session], [null, "unknown"], JSON.stringify(rows));
+
+  // ---------------------------------------------------------------- partie 3
+  // Une pile rebasée dans un exécuteur se reprend dans un autre, et une QA rend
+  // son compte rendu. Le ticket T-2 : A (T-2.1) sur origin/main, B (T-2.2) sur A.
+  must("discard ex-2's work", await gitIn(EX2, ["restore", "README.md"]));
+  must("start ex-1", incus(PROJECT, ["start", EX1]));
+  for (let i = 0; i < 60 && hc(EX1, ["ls"]).status !== 0; i++) await pause(1000);
+  assert.equal((await orch({ op: "release", to: EX1 })).ok, true);
+  const job = (kind: string, subtask: string, branch: string, base: string) => ({
+    kind, ticket: "T-2", subtask, repository: REPO, branch, base, instruction: `${kind} ${subtask}.`,
+    files: { spec: "# Spec de T-2\n", answers: null, split: null },
+  });
+  const A = "agent/T-2.1";
+  const B = "agent/T-2.2";
+  const commitIn = async (name: string, file: string) => {
+    must(`commit ${file} in ${name}`, await asAiuser(name, ["sh", "-c", `cd /workspace/${REPO} && echo ${file} > ${file} && git add ${file} && git commit -q -m ${file}`]));
+    return must(`head of ${name}`, await gitIn(name, ["rev-parse", "HEAD"])).stdout.trim();
+  };
+  const handBack = async (name: string, to: unknown) => {
+    const a = await orch({ op: "assign", to: name, mission: to });
+    assert.equal(a.ok, true, JSON.stringify(a));
+  };
+  const stackOf = async () => {
+    const s = await orch({ op: "stack", branches: [
+      { repository: REPO, branch: A, base: "origin/main" }, { repository: REPO, branch: B, base: A },
+    ] });
+    assert.equal(s.ok, true, JSON.stringify(s));
+    return (s.branches as { current: boolean }[]).map((x) => x.current);
+  };
+
+  // A puis B, rendues depuis ex-1.
+  await handBack(EX1, job("dev", "T-2.1", A, "origin/main"));
+  const a1 = await commitIn(EX1, "a1.txt");
+  must("done A", await asAiuser(EX1, ["forge-team", "done"]));
+  assert.equal((await orch({ op: "release", to: EX1 })).ok, true);
+  await handBack(EX1, job("dev", "T-2.2", B, A));
+  const b1 = await commitIn(EX1, "b1.txt");
+  must("done B", await asAiuser(EX1, ["forge-team", "done"]));
+  assert.equal((await orch({ op: "release", to: EX1 })).ok, true);
+  assert.deepEqual(await stackOf(), [true, true]);
+
+  // Un correctif de A depuis ex-2 : un commit de plus sur A, rendu. B n'est plus à jour.
+  await handBack(EX2, job("dev", "T-2.3", A, "origin/main"));
+  assert.equal(must("A in ex-2", await gitIn(EX2, ["rev-parse", "HEAD"])).stdout.trim(), a1);
+  const a2 = await commitIn(EX2, "a2.txt");
+  must("done the fix", await asAiuser(EX2, ["forge-team", "done"]));
+  assert.equal((await orch({ op: "release", to: EX2 })).ok, true);
+  assert.deepEqual(await stackOf(), [true, false]);
+
+  // Le rebase de B sur ex-2, qui n'en a aucune copie : rejoué sur A, rendu.
+  await handBack(EX2, job("rebase", "T-2.2", B, A));
+  assert.equal(must("B in ex-2", await gitIn(EX2, ["rev-parse", "HEAD"])).stdout.trim(), b1);
+  must("fetch team in ex-2", await gitIn(EX2, ["fetch", "-q", "team"]));
+  must("rebase B in ex-2", await gitIn(EX2, ["rebase", "-q", "--onto", `team/${A}`, a1]));
+  const b2 = must("rebased B", await gitIn(EX2, ["rev-parse", "HEAD"])).stdout.trim();
+  assert.equal(must("B's parent", await gitIn(EX2, ["rev-parse", "HEAD~1"])).stdout.trim(), a2);
+  must("done the rebase", await asAiuser(EX2, ["forge-team", "done"]));
+  assert.equal((await orch({ op: "release", to: EX2 })).ok, true);
+  assert.deepEqual(await stackOf(), [true, true]);
+
+  // ex-1 garde l'ancienne B, qu'il avait rendue : une mission sur B y démarre, sur la B rebasée.
+  await handBack(EX1, job("dev", "T-2.2", B, A));
+  assert.equal(must("B in ex-1", await gitIn(EX1, ["rev-parse", "HEAD"])).stdout.trim(), b2);
+  assert.equal((await orch({ op: "release", to: EX1 })).ok, true);
+
+  // La QA sur ex-1 : un HEAD détaché sur la pointe de B, puis son compte rendu.
+  await handBack(EX1, job("qa", "T-2.2", B, A));
+  assert.equal(must("ex-1 detached", await gitIn(EX1, ["rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim(), "HEAD");
+  assert.equal(must("ex-1 on B's tip", await gitIn(EX1, ["rev-parse", "HEAD"])).stdout.trim(), b2);
+  const qa = { verdict: "ko", defects: [{ subtask: "T-2.1", text: "a1.txt says a1" }] };
+  must("write the QA report", await asAiuser(EX1, ["sh", "-c", "cat > /tmp/qa.json"], JSON.stringify(qa)));
+  must("done the QA", await asAiuser(EX1, ["forge-team", "done", "--qa-report-file", "/tmp/qa.json"]));
+  r = await orch({ op: "events", after: 0 });
+  const last = (r.events as { mission: string; qa: unknown; subtask: string }[]).at(-1)!;
+  assert.deepEqual([last.mission, last.subtask, last.qa], ["qa", "T-2.2", qa]);
+  assert.equal((await orch({ op: "release", to: EX1 })).ok, true);
 });

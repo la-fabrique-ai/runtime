@@ -70,7 +70,7 @@ test("release et events", async () => {
     await socketHost(path).release("e1");
     assert.equal(received[0], '{"op":"release","to":"e1"}');
   });
-  const ev = { id: 3, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b", report: null };
+  const ev = { id: 3, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b", report: null, mission: "dev", qa: null };
   await withServer(JSON.stringify({ ok: true, events: [ev], last: 5 }), async (path, received) => {
     assert.deepEqual(await socketHost(path).events(2), { events: [ev], last: 5 });
     assert.equal(received[0], '{"op":"events","after":2}');
@@ -88,7 +88,7 @@ test("une réponse mal formée est refusée", async () => {
     await assert.rejects(socketHost(path).events(0), HostError);
   });
   // `last` absent, négatif ou non entier ; des évènements hors d'ordre ou au-delà de `last`.
-  const ev = (id: number) => ({ id, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b", report: null });
+  const ev = (id: number) => ({ id, kind: "done", executor: "e", ticket: "T", subtask: "s", branch: "b", report: null, mission: "dev", qa: null });
   for (const bad of [
     { ok: true, events: [] },
     { ok: true, events: [], last: -1 },
@@ -133,12 +133,47 @@ test("un socket absent est une HostError", async () => {
 });
 
 test("events lit un ask avec sa réponse recommandée ; un ask sans recommended est refusé", async () => {
-  const ask = { id: 4, kind: "ask", executor: "e", ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: null };
+  const ask = { id: 4, kind: "ask", executor: "e", ticket: "T-1", subtask: "T-1.1", text: "Which limit?", recommended: null, mission: "qa" };
   await withServer(JSON.stringify({ ok: true, events: [ask], last: 4 }), async (path) => {
     assert.deepEqual(await socketHost(path).events(0), { events: [ask], last: 4 });
   });
   const { recommended: _r, ...bare } = ask;
   await withServer(JSON.stringify({ ok: true, events: [bare], last: 4 }), async (path) => {
     await assert.rejects(socketHost(path).events(0), HostError);
+  });
+});
+
+test("events lit le done d'une QA avec son compte rendu ; un défaut mal typé ou un done sans mission est refusé", async () => {
+  const qa = {
+    id: 5, kind: "done", executor: "e", ticket: "T-1", subtask: "T-1.2", branch: "agent/T-1.2", report: "ran it", mission: "qa",
+    qa: { verdict: "ko", defects: [{ subtask: "T-1.1", text: "the list is empty" }, { subtask: null, text: "slow" }] },
+  };
+  await withServer(JSON.stringify({ ok: true, events: [qa], last: 5 }), async (path) => {
+    assert.deepEqual(await socketHost(path).events(0), { events: [qa], last: 5 });
+  });
+  const badDefect = { ...qa, qa: { verdict: "ko", defects: [{ subtask: 3, text: "x" }] } };
+  const { mission: _m, ...noMission } = qa;
+  for (const bad of [badDefect, { ...noMission, qa: null }]) {
+    await withServer(JSON.stringify({ ok: true, events: [bad], last: 5 }), async (path) => {
+      await assert.rejects(socketHost(path).events(0), HostError);
+    });
+  }
+});
+
+test("stack envoie la ligne du contrat et rend un état par branche ; un état de moins est refusé", async () => {
+  const branches = [
+    { repository: "web", branch: "agent/T-1.1", base: "origin/main" },
+    { repository: "web", branch: "agent/T-1.2", base: "agent/T-1.1" },
+  ];
+  const states = [
+    { branch: "agent/T-1.1", current: true, builtOn: "a".repeat(40) },
+    { branch: "agent/T-1.2", current: false, builtOn: null },
+  ];
+  await withServer(JSON.stringify({ ok: true, branches: states }), async (path, received) => {
+    assert.deepEqual(await socketHost(path).stack(branches), states);
+    assert.equal(received[0], JSON.stringify({ op: "stack", branches }));
+  });
+  await withServer(JSON.stringify({ ok: true, branches: [states[0]] }), async (path) => {
+    await assert.rejects(socketHost(path).stack(branches), (e) => e instanceof HostError && /stack/.test(e.message));
   });
 });

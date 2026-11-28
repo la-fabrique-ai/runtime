@@ -74,12 +74,13 @@ function dumpBase(dir: string): string {
   return out.join("\n");
 }
 
-// La mission que tient un exécuteur, d'après `forge-team status` (par l'API) : son id, ou null.
-async function heldBy(name: string): Promise<string | null> {
+// La mission que tient un exécuteur, d'après `forge-team status` (par l'API) :
+// son genre et son id (la sous-tâche, ou le ticket d'une QA), ou null.
+async function heldBy(name: string): Promise<{ kind: string; id: string } | null> {
   const r = must(`forge-team status in ${name}`, await h!.asAiuser(name, ["forge-team", "status"]));
-  const m = /^mission: (\S+)/m.exec(r.stdout);
+  const m = /^mission: (?:(rebase|qa) )?(\S+)/m.exec(r.stdout);
   assert.ok(m, raw(`forge-team status in ${name}`, r));
-  return m[1] === "none" ? null : m[1];
+  return m[2] === "none" ? null : { kind: m[1] ?? "dev", id: m[2] };
 }
 
 test("tickets in a Markdown base become stacked branches through the real orchestrator", { skip: !ENABLED }, async (t: TestContext) => {
@@ -111,8 +112,10 @@ test("tickets in a Markdown base become stacked branches through the real orches
   let finished = false;
   while (!finished && Date.now() < deadline) {
     for (const name of EXECUTORS) {
-      const s = await heldBy(name);
-      if (s === null || played.has(s)) continue;
+      // Une QA (un ticket arrivé en `qa`) reste tenue : l'agent factice ne la rend pas.
+      const held = await heldBy(name);
+      if (held === null || held.kind !== "dev" || played.has(held.id)) continue;
+      const s = held.id;
       const clone = `/workspace/${REPO}`;
       assert.equal(must(`branch of ${name}`, await h!.asAiuser(name, ["git", "-C", clone, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim(),
         `agent/${s}`);
@@ -150,6 +153,9 @@ test("tickets in a Markdown base become stacked branches through the real orches
     const ancestor = run("git", ["--git-dir", mirror, "merge-base", "--is-ancestor", `agent/${id}.1`, `agent/${id}.2`]);
     assert.equal(ancestor.status, 0, raw(`agent/${id}.2 does not descend from agent/${id}.1`, ancestor));
   }
-  // Plus aucune mission tenue.
-  for (const name of EXECUTORS) assert.equal(await heldBy(name), null, `${name} still holds a mission`);
+  // Plus aucune mission de développement : un exécuteur ne tient plus, au plus, que la QA d'un ticket.
+  for (const name of EXECUTORS) {
+    const held = await heldBy(name);
+    assert.ok(held === null || (held.kind === "qa" && TICKETS.includes(held.id)), `${name} still holds ${JSON.stringify(held)}`);
+  }
 });

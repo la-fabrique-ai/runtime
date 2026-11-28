@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openMarkdownBase } from "../cli/lib/tickets/markdown-base.ts";
 import type { Connector } from "../cli/lib/tickets/connector.ts";
+import { ConnectorError } from "../cli/lib/tickets/model.ts";
 import { handleChannel, serveChannel, type ChannelDeps } from "../cli/lib/orchestrator/channel.ts";
 
 async function setup(): Promise<{ d: ChannelDeps; tickets: Connector; logs: string[]; dir: string }> {
@@ -98,7 +99,10 @@ test("Review Focus 3: write-mission on a spec ticket is read back by mission; on
   assert.deepEqual(await ask(d, { op: "mission", id }), { ok: true, mission: { spec: "# Spec\n", answers: null, split: null } });
   const r = await ask(d, { op: "write-mission", id: "T-1", file: "spec", text: "x" });
   assert.equal(r.ok, false);
-  assert.match((r as { error: string }).error, /^T-1 is dev: /);
+  assert.match((r as { error: string }).error, /^T-1 is dev: the mission files are written only while the ticket is in spec, human-review or pr-review$/);
+  // En revue : le Pilote met la spec à jour avant les correctifs qui la changent.
+  await tickets.setTicketStatus({ id, status: "human-review" });
+  assert.deepEqual(await ask(d, { op: "write-mission", id, file: "spec", text: "# Spec, exit code 3\n" }), { ok: true });
 });
 
 const STACK = [{ repository: "web", text: "one" }, { repository: "api", text: "two" }, { repository: "web", text: "three" }];
@@ -142,4 +146,72 @@ test("answer-request writes the answer", async () => {
   assert.deepEqual(await ask(d, { op: "answer-request", id: "T-1", request: "1", text: "50" }), { ok: true });
   assert.equal((await tickets.listRequests({ ticket: "T-1" }))[0].answer, "50");
   assert.equal((await ask(d, { op: "answer-request", id: "T-1", request: "1", text: "60" })).ok, false);
+});
+
+// T-1 en revue : A (T-1.1) et B (T-1.2) finies, dans web.
+async function inReview(): Promise<{ d: ChannelDeps; tickets: Connector; logs: string[] }> {
+  const tickets = openMarkdownBase(mkdtempSync(join(tmpdir(), "forge-channel-review-")));
+  const t = await tickets.createTicket({ title: "Paginate", description: "d", priority: 2, repositories: [{ name: "web", base: "main" }] });
+  await tickets.setTicketStatus({ id: t.id, status: "dev" });
+  for (const n of [1, 2]) {
+    const s = await tickets.createSubtask({ ticket: t.id, repository: "web", position: n, rank: n, kind: "implementation", text: `s${n}` });
+    await tickets.setSubtaskStatus({ id: s.id, status: "done" });
+  }
+  await tickets.setTicketStatus({ id: t.id, status: "qa" });
+  await tickets.setTicketStatus({ id: t.id, status: "human-review" });
+  const logs: string[] = [];
+  return { d: { tickets, problems: () => [], log: (l) => void logs.push(l) }, tickets, logs };
+}
+
+test("create-fixes: a fix of A and a new sub-task, the ticket to dev; sent again after a reset, the same ids and nothing new", async () => {
+  const { d, tickets, logs } = await inReview();
+  const fixes = [{ fixes: "T-1.1", text: "the list is empty" }, { fixes: null, text: "add a counter" }];
+  const r = await ask(d, { op: "create-fixes", id: "T-1", fixes });
+  assert.deepEqual(r, { ok: true, subtasks: ["T-1.3", "T-1.4"] });
+  const subs = await tickets.listSubtasks({ ticket: "T-1" });
+  assert.deepEqual(subs.slice(2).map((s) => [s.kind, s.fixes, s.position]), [["fix", "T-1.1", 1], ["implementation", null, 3]]);
+  assert.equal((await tickets.getTicket({ id: "T-1" })).status, "dev");
+  assert.deepEqual(logs, ["create-fixes T-1: 2 sub-tasks, ticket to dev"]);
+  // Remis en revue à la main : la même liste ne crée rien de plus.
+  await tickets.setTicketStatus({ id: "T-1", status: "qa" });
+  await tickets.setTicketStatus({ id: "T-1", status: "human-review" });
+  assert.deepEqual(await ask(d, { op: "create-fixes", id: "T-1", fixes }), { ok: true, subtasks: ["T-1.3", "T-1.4"] });
+  assert.equal((await tickets.listSubtasks({ ticket: "T-1" })).length, 4);
+});
+
+test("create-fixes: refused on a ticket not in review, and as a whole when one item names another ticket's sub-task", async () => {
+  const { d, tickets } = await inReview();
+  assert.deepEqual(await ask(d, { op: "create-fixes", id: "T-1", fixes: [{ fixes: "T-1.1", text: "x" }, { fixes: "T-9.1", text: "y" }] }),
+    { ok: false, error: "create-fixes: fix 2 names T-9.1, which is not a sub-task of T-1" });
+  assert.equal((await tickets.listSubtasks({ ticket: "T-1" })).length, 2);
+  await tickets.setTicketStatus({ id: "T-1", status: "dev" });
+  assert.deepEqual(await ask(d, { op: "create-fixes", id: "T-1", fixes: [{ fixes: null, text: "x" }] }),
+    { ok: false, error: "T-1 is dev: fixes are created only for a ticket in review" });
+});
+
+test("create-ticket: a todo ticket with the repositories of its origin, its text kept verbatim", async () => {
+  const { d, tickets, logs } = await inReview();
+  const text = "status: dev\n\nShow a spinner while loading.";
+  const r = await ask(d, { op: "create-ticket", from: "T-1", title: "Spinner", text });
+  assert.deepEqual(r, { ok: true, id: "T-2" });
+  const t = await tickets.getTicket({ id: "T-2" });
+  assert.deepEqual([t.status, t.priority, t.title, t.description, t.repositories], ["todo", 0, "Spinner", text, [{ name: "web", base: "main" }]]);
+  assert.deepEqual(logs, ["create-ticket T-2 from T-1"]);
+  assert.deepEqual(await ask(d, { op: "create-ticket", from: "T-1", title: "two\nlines", text: "x" }),
+    { ok: false, error: "create-ticket: title must be one line of at most 200 bytes" });
+});
+
+test("tickets gives each ticket the number of its requests without an answer", async () => {
+  const { d } = await setup();
+  const r = await ask(d, { op: "tickets" }) as unknown as { tickets: { id: string; waiting: number }[] };
+  assert.deepEqual(r.tickets.map((t) => [t.id, t.waiting]), [["T-1", 1]]);
+});
+
+test("tickets: a ticket whose requests cannot be read is a problem line, the others are listed", async () => {
+  const { d } = await setup();
+  const broken = { ...d, tickets: { ...d.tickets, listRequests: async () => { throw new ConnectorError("T-1: request 1 is unreadable"); } } as Connector };
+  const r = await ask(broken, { op: "tickets" }) as unknown as { ok: boolean; tickets: { id: string; waiting: number }[]; problems: string[] };
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.tickets.map((t) => [t.id, t.waiting]), [["T-1", 0]]);
+  assert.ok(r.problems.includes("T-1: request 1 is unreadable"), JSON.stringify(r.problems));
 });

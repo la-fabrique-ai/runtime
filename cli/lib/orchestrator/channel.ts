@@ -6,7 +6,7 @@
 // la réponse une ligne JSON, comme l'API de l'hôte.
 //
 // Le canal ne rend jamais un chemin, une trace ni une credential : seulement le
-// message d'une ConnectorError ou de sa propre validation ;
+// message d'une ConnectorError, d'une RuleError ou de sa propre validation ;
 // toute autre erreur est `internal error`. Rien ici n'écrit dans une session.
 import { chmodSync, chownSync, lstatSync, unlinkSync } from "node:fs";
 import { createServer } from "node:net";
@@ -14,6 +14,8 @@ import type { Socket } from "node:net";
 import type { Connector } from "../tickets/connector.ts";
 import { ConnectorError, isRepoName, isSeq, isTicketId, TICKET_STATUSES } from "../tickets/model.ts";
 import type { MissionFile, Ticket, TicketStatus } from "../tickets/model.ts";
+import { addFix, resolveFixed } from "./fixes.ts";
+import { RuleError } from "./rule.ts";
 
 export type ChannelDeps = { tickets: Connector; problems: () => string[]; log: (line: string) => void };
 export type ChannelReply = { ok: true; [k: string]: unknown } | { ok: false; error: string };
@@ -41,8 +43,12 @@ const VERBS: Record<string, { need: string[]; may?: string[] }> = {
   "create-stack": { need: ["id", "subtasks"] },
   "answer-request": { need: ["id", "request", "text"] },
   comment: { need: ["id", "text"] },
+  "create-fixes": { need: ["id", "fixes"] },
+  "create-ticket": { need: ["from", "title", "text"] },
 };
 const STACK_MAX = 50;
+const FIXES_MAX = 20;
+const TITLE_MAX = 200;
 
 // Un texte non vide, sous son plafond.
 function text(v: unknown, what: string, max = CHANNEL_TEXT_MAX): string {
@@ -51,9 +57,13 @@ function text(v: unknown, what: string, max = CHANNEL_TEXT_MAX): string {
   return v;
 }
 
-async function inSpec(tickets: Connector, id: string, what: string): Promise<Ticket> {
+async function inSpec(tickets: Connector, id: string, what: string, also: TicketStatus[] = []): Promise<Ticket> {
   const t = await tickets.getTicket({ id });
-  if (t.status !== "spec") throw new ChannelError(`${id} is ${t.status}: ${what} only while the ticket is in spec`);
+  const allowed: TicketStatus[] = ["spec", ...also];
+  if (!allowed.includes(t.status)) {
+    const list = allowed.length === 1 ? allowed[0] : `${allowed.slice(0, -1).join(", ")} or ${allowed.at(-1)}`;
+    throw new ChannelError(`${id} is ${t.status}: ${what} only while the ticket is in ${list}`);
+  }
   return t;
 }
 
@@ -110,10 +120,21 @@ async function run(d: ChannelDeps, op: string, req: Obj): Promise<ChannelReply> 
         status = req.status as TicketStatus[];
       }
       const r = await tickets.listTickets(status ? { status } : {});
+      // `waiting` : les demandes du ticket sans réponse ; illisibles, un problème.
+      const problems = r.problems.map((p) => `${p.id}: ${p.message}`);
+      const waiting = await Promise.all(r.tickets.map(async (t) => {
+        try {
+          return (await tickets.listRequests({ ticket: t.id, open: true })).length;
+        } catch (e) {
+          if (!(e instanceof ConnectorError)) throw e;
+          problems.push(e.message.startsWith(`${t.id}:`) ? e.message : `${t.id}: ${e.message}`);
+          return 0;
+        }
+      }));
       return {
         ok: true,
-        tickets: r.tickets.map((t) => ({ id: t.id, title: t.title, status: t.status, priority: t.priority })),
-        problems: r.problems.map((p) => `${p.id}: ${p.message}`),
+        tickets: r.tickets.map((t, i) => ({ id: t.id, title: t.title, status: t.status, priority: t.priority, waiting: waiting[i] })),
+        problems,
       };
     }
     case "ticket": {
@@ -142,7 +163,9 @@ async function run(d: ChannelDeps, op: string, req: Obj): Promise<ChannelReply> 
       const file = req.file;
       if (file !== "spec" && file !== "answers" && file !== "split") throw new ChannelError("write-mission: file must be spec, answers or split");
       const body = text(req.text, "write-mission: text", CHANNEL_FILE_MAX);
-      await inSpec(tickets, id, "the mission files are written");
+      // En revue aussi : un correctif qui change la spec la met d'abord à jour
+      // (skill review), pour que la QA d'après teste contre la bonne.
+      await inSpec(tickets, id, "the mission files are written", ["human-review", "pr-review"]);
       await tickets.writeMission({ ticket: id, file: file as MissionFile, text: body });
       d.log(`write-mission ${id}: ${file}, ${Buffer.byteLength(body, "utf8")} bytes`);
       return { ok: true };
@@ -155,6 +178,22 @@ async function run(d: ChannelDeps, op: string, req: Obj): Promise<ChannelReply> 
       await tickets.answerRequest({ ticket: id, id: req.request, text: text(req.text, "answer-request: text") });
       d.log(`answer-request ${id}: request ${req.request}`);
       return { ok: true };
+    }
+    case "create-fixes":
+      return createFixes(d, ticketId(req.id), req.fixes);
+    case "create-ticket": {
+      const from = await tickets.getTicket({ id: ticketId(req.from) });
+      const title = req.title;
+      if (typeof title !== "string" || title.trim() === "" || /[\r\n]/.test(title) || Buffer.byteLength(title, "utf8") > TITLE_MAX) {
+        throw new ChannelError(`create-ticket: title must be one line of at most ${TITLE_MAX} bytes`);
+      }
+      // Un point non bloquant d'une revue : un ticket neuf, `todo`, que rien ne
+      // fait démarrer seul ; son texte est copié tel quel.
+      const t = await tickets.createTicket({
+        title, description: text(req.text, "create-ticket: text"), priority: 0, repositories: from.repositories,
+      });
+      d.log(`create-ticket ${t.id} from ${from.id}`);
+      return { ok: true, id: t.id };
     }
     case "comment": {
       const id = ticketId(req.id);
@@ -193,6 +232,39 @@ async function createStack(d: ChannelDeps, id: string, items: StackItem[]): Prom
   return { ok: true, subtasks: ids };
 }
 
+// Les correctifs d'une revue, sur un ticket en `human-review` ou `pr-review` :
+// toute la liste est vérifiée avant la première création ; puis un addFix par
+// élément, dans l'ordre (un correctif d'une QA et d'une revue sont la même
+// sous-tâche, jamais créée deux fois), puis le ticket en `dev`. Reprise avec la
+// même liste, elle ne crée que ce qui manque.
+async function createFixes(d: ChannelDeps, id: string, raw: unknown): Promise<ChannelReply> {
+  const { tickets } = d;
+  const ticket = await tickets.getTicket({ id });
+  if (ticket.status !== "human-review" && ticket.status !== "pr-review") {
+    throw new ChannelError(`${id} is ${ticket.status}: fixes are created only for a ticket in review`);
+  }
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > FIXES_MAX) {
+    throw new ChannelError(`create-fixes: fixes must be a list of 1 to ${FIXES_MAX} fixes`);
+  }
+  const subtasks = await tickets.listSubtasks({ ticket: id });
+  const items = raw.map((x, i) => {
+    if (!isObj(x) || Object.keys(x).length !== 2 || !("fixes" in x) || !("text" in x)) {
+      throw new ChannelError(`create-fixes: fix ${i + 1} must be {"fixes", "text"}`);
+    }
+    const fixes = x.fixes;
+    if (fixes !== null && (typeof fixes !== "string" || resolveFixed(subtasks, fixes) === null)) {
+      const named = typeof fixes === "string" && /^[A-Za-z0-9.-]{1,40}$/.test(fixes) ? fixes : "something";
+      throw new ChannelError(`create-fixes: fix ${i + 1} names ${named}, which is not a sub-task of ${id}`);
+    }
+    return { fixes: fixes as string | null, text: text(x.text, `create-fixes: the text of fix ${i + 1}`) };
+  });
+  const ids: string[] = [];
+  for (const item of items) ids.push((await addFix(tickets, ticket, item)).id);
+  await tickets.setTicketStatus({ id, status: "dev" });
+  d.log(`create-fixes ${id}: ${items.length} sub-tasks, ticket to dev`);
+  return { ok: true, subtasks: ids };
+}
+
 // Une requête, une réponse ; ne lève jamais.
 export async function handleChannel(d: ChannelDeps, line: string): Promise<ChannelReply> {
   try {
@@ -200,7 +272,7 @@ export async function handleChannel(d: ChannelDeps, line: string): Promise<Chann
     const { op, req } = parse(line);
     return await run(d, op, req);
   } catch (e) {
-    if (e instanceof ChannelError || e instanceof ConnectorError) return { ok: false, error: e.message };
+    if (e instanceof ChannelError || e instanceof ConnectorError || e instanceof RuleError) return { ok: false, error: e.message };
     return { ok: false, error: "internal error" };
   }
 }
