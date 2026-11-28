@@ -67,7 +67,7 @@ export function desiredAcl(): DesiredAcl {
   };
 }
 
-export function desiredProfile(cfg: ForgeConfig, ids: Ids, opts: { rawLxc: boolean }): DesiredProfile {
+export function desiredProfile(cfg: ForgeConfig, ids: Ids, opts: { lowLevel: boolean }): DesiredProfile {
   const config: Record<string, string> = {
     "environment.HOME": "/home/aiuser",
     "security.privileged": "false",
@@ -75,18 +75,21 @@ export function desiredProfile(cfg: ForgeConfig, ids: Ids, opts: { rawLxc: boole
     "security.nesting": "true",
     "security.syscalls.deny_default": "true",
     "limits.memory": cfg.limits.memory,
-    // Without swap, a container's anonymous memory never goes to disk, so it
-    // does not prolong the thrashing at the limit. That is not an OOM kill:
-    // the kernel still reclaims file pages (program code, read again from disk
-    // at once), and the host's memory watchdog kills the process (#126, #128).
-    "limits.memory.swap": "false",
     "limits.processes": String(cfg.limits.processes),
     // The caller (the forge user) is aiuser inside: workspace files keep
     // belonging to the caller on the host, with no shift and no chown.
     "raw.idmap": `uid ${ids.uid} ${AGENT_UID}\ngid ${ids.gid} ${AGENT_UID}`,
   };
   if (cfg.limits.cpu !== null) config["limits.cpu"] = String(cfg.limits.cpu);
-  if (opts.rawLxc) config["raw.lxc"] = RAW_LXC;
+  if (opts.lowLevel) {
+    config["raw.lxc"] = RAW_LXC;
+    // Without swap, a container's anonymous memory never goes to disk, so it
+    // does not prolong the thrashing at the limit. That is not an OOM kill:
+    // the kernel still reclaims file pages (program code, read again from disk
+    // at once), and the host's memory watchdog kills the process (#126, #128).
+    // A low-level key: a restricted project refuses it like raw.lxc.
+    config["limits.memory.swap"] = "false";
+  }
   return {
     description: "agent-forge: agent containers (managed by forge setup)",
     config,
@@ -106,9 +109,10 @@ export function desiredProfile(cfg: ForgeConfig, ids: Ids, opts: { rawLxc: boole
   };
 }
 
-// raw.lxc is refused in a restricted project unless its administrator allowed
-// low-level container keys (spec "Restricted-project compatibility").
-export function rawLxcAllowed(projectConfig: Record<string, string>): boolean {
+// raw.lxc and limits.memory.swap are refused in a restricted project unless
+// its administrator allowed low-level container keys (spec "Restricted-project
+// compatibility").
+export function lowLevelAllowed(projectConfig: Record<string, string>): boolean {
   return projectConfig.restricted !== "true" || projectConfig["restricted.containers.lowlevel"] === "allow";
 }
 
@@ -159,7 +163,7 @@ export function desiredStrictAcl(plan: ProxyPlan): DesiredAcl {
   };
 }
 
-export function desiredProxyProfile(cfg: ForgeConfig, names: EgressNames, opts: { rawLxc: boolean }): DesiredProfile {
+export function desiredProxyProfile(cfg: ForgeConfig, names: EgressNames, opts: { lowLevel: boolean }): DesiredProfile {
   const config: Record<string, string> = {
     "security.privileged": "false",
     "security.nesting": "false",
@@ -168,7 +172,7 @@ export function desiredProxyProfile(cfg: ForgeConfig, names: EgressNames, opts: 
     "limits.processes": "1000",
     "boot.autostart": "true",
   };
-  if (opts.rawLxc) config["raw.lxc"] = RAW_LXC;
+  if (opts.lowLevel) config["raw.lxc"] = RAW_LXC;
   return {
     description: "agent-forge: the egress proxy (managed by forge setup)",
     config,
